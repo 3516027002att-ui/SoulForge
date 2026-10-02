@@ -1,17 +1,61 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { mkdirSync } from 'node:fs';
-import { discoverChecks, workspaceScriptReachability } from './verify/checkRegistry.mjs';
+import { discoverChecks } from './verify/checkRegistry.mjs';
 import { loadWorkspaces } from './verify/scriptGraph.mjs';
 import { planScript } from './verify/commandPlan.mjs';
 
 const runner = fileURLToPath(new URL('./check.mjs', import.meta.url));
 const compatibilityRunner = fileURLToPath(new URL('./verify.mjs', import.meta.url));
+test('list and audit inspect checks without claiming actual completion', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sf-check-static-completion-'));
+  try {
+    mkdirSync(join(root, 'scripts'), { recursive: true });
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: {} }));
+    writeFileSync(join(root, 'scripts/proof.test.mjs'),
+      'import test from "node:test";import {writeFileSync} from "node:fs";test("actual check",()=>writeFileSync("executed.txt","executed"));');
+    for (const mode of ['--list', '--audit']) {
+      const result = spawnSync(process.execPath,
+        [runner, '--suite', 'file:scripts/proof.test.mjs', mode], { cwd: root, encoding: 'utf8' });
+      const report = JSON.parse(result.stdout);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(report.ok, true, mode);
+      assert.equal(report.completionVerified, false, mode);
+      assert.deepEqual(report.results, [], mode);
+      assert.equal(report.counts.passed, 0, mode);
+      assert.equal(existsSync(join(root, 'executed.txt')), false, mode);
+    }
+    const run = spawnSync(process.execPath,
+      [runner, '--suite', 'file:scripts/proof.test.mjs', '--require-executed'], { cwd: root, encoding: 'utf8' });
+    const report = JSON.parse(run.stdout);
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(report.results[0].status, 'passed');
+    assert.equal(report.completionVerified, true);
+    assert.equal(existsSync(join(root, 'executed.txt')), true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+test('requested missing checks stay not_run without historical required-suite files', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sf-current-report-status-'));
+  try {
+    mkdirSync(join(root, 'scripts'), { recursive: true });
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: {} }));
+    writeFileSync(join(root, 'scripts/current.test.mjs'), 'console.log("ACTUAL_CURRENT_ASSERTION_EXECUTED")');
+    const result = spawnSync(process.execPath,
+      [runner, '--suite', 'file:scripts/current.test.mjs,missing-check', '--require-executed'],
+      { cwd: root, encoding: 'utf8' });
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.results.find(row => row.scriptName === 'file:scripts/current.test.mjs')?.status, 'passed');
+    assert.equal(report.results.find(row => row.scriptName === 'missing-check')?.status, 'not_run');
+    assert.equal(report.ok, false);
+    assert.equal(report.completionVerified, false);
+    assert.equal(result.status, 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 test('the verify compatibility entry discovers current checks without a tier table or legacy governance data',()=>{
  const root=mkdtempSync(join(tmpdir(),'sf-verify-current-entry-'));
  try{
@@ -128,7 +172,7 @@ test('explicit exclusion is not_run and never passed', () => {
   } finally {rmSync(root,{recursive:true,force:true});}
 });
 
-test('node --test uses parsed independent operations, and covered aliases are reachable', () => {
+test('node --test uses parsed independent operations without requiring a root forwarding alias', () => {
   const root = mkdtempSync(join(tmpdir(),'sf-check-node-test-'));
   try {
     mkdirSync(join(root,'packages/a/src'),{recursive:true});
@@ -137,7 +181,36 @@ test('node --test uses parsed independent operations, and covered aliases are re
     writeFileSync(join(root,'packages/a/src/known.test.mjs'),'import "node:test";');
     const workspaces = loadWorkspaces(root);
     assert.equal(planScript(root,workspaces,'test')[0].command,'node');
-    assert.equal(workspaceScriptReachability(root,workspaces,workspaces.byName.get('@test/a'),'test:alias'),'reachable');
+    workspaces.rootScripts = {};
+    const registry = discoverChecks(root, workspaces);
+    assert.equal(registry.get('workspace:@test/a:test:alias').steps[0].command, 'node');
+    writeFileSync(join(root,'package.json'),JSON.stringify({workspaces:['packages/*'],scripts:{}}));
+    const result = spawnSync(process.execPath,[runner,'--suite','workspace:@test/a:test:alias'],{cwd:root,encoding:'utf8'});
+    const report = JSON.parse(result.stdout);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(report.results[0].status, 'passed');
+    assert.deepEqual(report.auditFindings, []);
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test('workspace discovery preserves removed forwarding operations while a root-only check remains distinct', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sf-check-forwarder-retirement-'));
+  try {
+    mkdirSync(join(root, 'packages/a/src'), { recursive: true });
+    writeFileSync(join(root, 'package.json'), JSON.stringify({workspaces:['packages/*'],scripts:{
+      'test:forwarded':'npm run test:owned -w @test/a', 'test:root-only':'node root-check.mjs'}}));
+    writeFileSync(join(root, 'packages/a/package.json'), JSON.stringify({name:'@test/a',scripts:{'test:owned':'node --test src/guard.test.mjs'}}));
+    writeFileSync(join(root, 'packages/a/src/guard.test.mjs'), 'import test from "node:test";test("actual guard",()=>{});');
+    writeFileSync(join(root, 'root-check.mjs'), 'console.log("ROOT_ONLY_GUARD")');
+    const workspaces = loadWorkspaces(root);
+    const keys = () => [...new Set([...discoverChecks(root, workspaces).values()].flatMap(entry => entry.steps.map(step => step.key)))].sort();
+    const before = keys();
+    delete workspaces.rootScripts['test:forwarded'];
+    assert.deepEqual(keys(), before);
+    assert.ok(discoverChecks(root, workspaces).get('workspace:@test/a:test:owned'));
+    const rootOnlyKey = discoverChecks(root, workspaces).get('test:root-only').steps[0].key;
+    delete workspaces.rootScripts['test:root-only'];
+    assert.equal(keys().includes(rootOnlyKey), false, 'a root-only assertion cannot be discarded as a forwarder');
   } finally {rmSync(root,{recursive:true,force:true});}
 });
 

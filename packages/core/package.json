@@ -233,8 +233,6 @@
     "test:audit-sf-27-unit": "tsc -b ../shared . && node dist/testing/runAuditSf27Smoke.js --layer unit",
     "test:audit-sf-27-native": "tsc -b ../shared . && node dist/testing/runAuditSf27Smoke.js --layer native",
     "test:audit-sf-28-unit": "tsc -b ../shared . && node dist/testing/runAuditSf28Smoke.js --layer unit",
-    "test:audit-sf-29-unit": "tsc -b ../shared . && node dist/testing/runAuditSf29Smoke.js --layer unit",
-    "test:audit-sf-29-native": "tsc -b ../shared . && node dist/testing/runAuditSf29Smoke.js --layer native",
     "test:param-rag-identity-convergence": "tsc -b ../shared . && node dist/testing/runParamRagIdentityConvergenceSmoke.js",
     "test:tae-action-groups": "tsc -b ../shared . && node dist/testing/runTaeActionGroupSmoke.js"
   },

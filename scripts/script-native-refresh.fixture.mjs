@@ -19,6 +19,7 @@ const sourcePaths = {
   writeContext: 'apps/desktop/src/main/services/resourceWriteContext.ts',
   ipc: 'apps/desktop/src/main/ipc.ts',
   ownership: 'apps/desktop/src/main/knowledgeRefreshOwnership.ts',
+  sessionCommit: 'apps/desktop/src/main/services/sessionCommitService.ts',
   mutation: 'packages/core/src/editing/editorMutationService.ts',
   dto: 'apps/desktop/src/main/rendererDto.ts'
 };
@@ -55,9 +56,9 @@ function extract(relative, name, scope) {
 }
 
 const ownership = execute(source(sourcePaths.ownership), sourcePaths.ownership);
+const shared = execute(source('packages/shared/src/path-sanitizer.ts'), 'packages/shared/src/path-sanitizer.ts');
 const dto = execute(source(sourcePaths.dto), sourcePaths.dto, {}, {
-  // Only a path masker is replaced; all renderer result conversion is actual source.
-  '@soulforge/shared': { maskPathFragments: value => value }
+  '@soulforge/shared': shared
 });
 const cancelledWrite = extract(sourcePaths.ipc, 'cancelledWrite');
 const toSaveResultFromOutcome = extract(sourcePaths.ipc, 'toSaveResultFromOutcome', {
@@ -71,27 +72,36 @@ const storage = { root: '/owned-synthetic', backupBaseDir: '/owned-synthetic/bac
 const hksBytes = Buffer.from([0x1b, 0x4c, 0x75, 0x61, 0x51, 0]);
 const unused = () => { throw new Error('Unexpected capability invocation'); };
 
-function harness({ candidateOk = true, cancel = false, commitOk = true, rejectRefresh = false, rejectCache = false, readOk = true, compileOk = true, readRootsOk = true, stageRootsOk = true } = {}) {
+function harness({ candidateOk = true, cancel = false, commitOk = true, rejectRefresh = false, rejectCache = false, readOk = true, compileOk = true, readRootsOk = true, stageRootsOk = true, commitGate, commitStarted, workspaceSessionId = 'owned-session' } = {}) {
   const events = [];
-  const requests = { bridge: [], commit: [], confirmation: [], candidate: [] };
+  const requests = { bridge: [], commit: [], confirmation: [], candidate: [], workbench: [], refresh: [] };
   const handlers = new Map();
+  let activeSession = session, generation = 1;
   const rawResult = { ok: commitOk, opId: 'owned-commit', changedFiles: commitOk ? [file.absolutePath] : [], diagnostics: [] };
   const refresh = async (_sources, carrier) => {
     events.push('refresh');
+    requests.refresh.push(_sources);
     if (rejectRefresh) throw new Error('owned refresh failed');
     carrier.knowledgeRefresh = { status: 'converged' };
   };
-  const sessionCommitPort = extract(sourcePaths.ipc, 'sessionCommitPort', {
-    ...ownership,
-    createConfirmationReceipt: unused,
-    getActiveWorkspaceSessionIdState: unused,
-    saveRawReplace: async input => {
+  const ownedSaveRawReplace = async input => {
       requests.commit.push(input);
       assert.ok(input.confirmation, 'Actual confirmation must reach commit');
       assert.equal(input.expectedHash, 'owned-container-hash');
       events.push('commit');
+      commitStarted?.();
+      if (commitGate) await commitGate;
       return rawResult;
-    },
+  };
+  const { createSessionCommitPort } = execute(source(sourcePaths.sessionCommit), sourcePaths.sessionCommit, {}, {
+    '@soulforge/core': { saveRawReplace: ownedSaveRawReplace, createConfirmationReceipt: input => { requests.workbench.push(input); return { subjects: input.subjects }; } },
+    '../knowledgeRefreshOwnership.js': ownership
+  });
+  const sessionCommitPort = extract(sourcePaths.ipc, 'sessionCommitPort', {
+    createSessionCommitPort,
+    getActiveWorkspaceSessionIdState: () => workspaceSessionId,
+    getWorkspaceSession: () => activeSession,
+    getActiveWorkspaceSessionGenerationState: () => generation,
     refreshActiveIndexAfterNativeWrite: refresh
   });
   const applyNativeMutation = extract(sourcePaths.mutation, 'applyNativeMutation', {
@@ -129,13 +139,15 @@ function harness({ candidateOk = true, cancel = false, commitOk = true, rejectRe
     'node:fs/promises': { readFile: unused },
     'node:path': path,
     '@soulforge/core': core,
+    '@soulforge/shared': shared,
     '../rendererDto.js': dto,
     '../knowledgeRefreshOwnership.js': ownership
   });
   resource.registerResourceIpcHandlers({
     handle: (name, handler) => handlers.set(name, handler),
     getIndexedFiles: () => [file],
-    getActiveSession: () => session,
+    getActiveSession: () => activeSession,
+    getActiveWorkspaceSessionGeneration: () => generation,
     ensureActiveOperationLog: async () => ({}),
     durableStoragePaths: () => storage,
     rejectNonSekiroNativeWrite: () => null,
@@ -149,6 +161,7 @@ function harness({ candidateOk = true, cancel = false, commitOk = true, rejectRe
   });
   return {
     events, requests, rawResult, sessionCommitPort,
+    switchSession(value) { activeSession = value; generation++; },
     save: () => handlers.get('resource.saveScriptSource')({}, sourceUri, 'owned.lua', 'owned-child-hash', 'owned-container-hash', 'return 2', 'utf8', 0)
   };
 }
@@ -162,6 +175,14 @@ test('Script resource orchestration is callable below IPC with no sender or regi
   const service = 'apps/desktop/src/main/services/scriptSourceService.ts';
   assert.equal(fs.existsSync(path.join(repo, service)), true, 'Script source application service must exist');
   assert.doesNotMatch(source(service), /IpcMainInvokeEvent|TrustedIpcHandle|deps\.handle/);
+});
+
+test('native commit orchestration is callable below the root adapter without transport capabilities', () => {
+  assert.doesNotMatch(source(sourcePaths.sessionCommit), /IpcMainInvokeEvent|TrustedIpcHandle|electron|\.handle\(/);
+  const text = source(sourcePaths.ipc), parsed = ts.createSourceFile(sourcePaths.ipc, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const adapter = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'sessionCommitPort');
+  assert.match(adapter.getText(parsed), /createSessionCommitPort\(/);
+  assert.doesNotMatch(adapter.getText(parsed), /saveRawReplace\(|commitWithKnowledgeRefresh\(|createConfirmationReceipt\(/);
 });
 
 test('source identity is reported for the actual handler, commit port, mutation control flow and ownership helper', t => {
@@ -263,6 +284,64 @@ test('actual default commit port preserves result identity on refresh rejection 
   assert.equal(result.ok, true);
   assert.equal(result.diagnostics[0].code, 'POSTCOMMIT_REFRESH_FAILED');
   assert.deepEqual(postCommit(h.events), ['commit', 'refresh']);
+});
+
+test('actual commit service retains workbench fallback confirmation subjects and durable Patch Engine arguments', async () => {
+  for (const workspaceSessionId of ['owned-session', null]) {
+    const h = harness({ workspaceSessionId }), log = {};
+    const result = await h.sessionCommitPort(session, log, storage).commit({ file, expectedHash: 'owned-container-hash',
+      newContentBase64: hksBytes.toString('base64'), title: 'owned-title' });
+    assert.equal(result, h.rawResult); assert.equal(h.requests.workbench.length, 1);
+    assert.deepEqual(plain(h.requests.workbench[0]), {
+      subjects: ['MAIN_WORKBENCH_COMMIT', sourceUri, 'ALL_RISKS', ...(workspaceSessionId ? [`WORKSPACE_SESSION:${workspaceSessionId}`] : []), 'TITLE:owned-title'],
+      riskLevel: 'high', sourceUri, note: '工作台提交视为已确认'
+    });
+    const committed = h.requests.commit[0];
+    assert.equal(committed.session, session); assert.equal(committed.operationLog, log); assert.equal(committed.file, file);
+    assert.equal(committed.backupBaseDir, storage.backupBaseDir); assert.equal(committed.recoveryDir, storage.recoveryDir);
+    assert.deepEqual(postCommit(h.events), ['commit', 'refresh']);
+  }
+});
+
+for (const aba of [false, true]) {
+  test(`actual default commit port preserves A receipt without publishing into ${aba ? 'same-object ABA' : 'B'} owner`, async () => {
+    let resolveCommit, notifyStarted;
+    const commitGate = new Promise(resolve => { resolveCommit = resolve; });
+    const started = new Promise(resolve => { notifyStarted = resolve; });
+    const h = harness({ commitGate, commitStarted: notifyStarted });
+    const port = h.sessionCommitPort(session, {}, storage);
+    const pending = port.commit({ file, expectedHash: 'owned-container-hash', newContentBase64: hksBytes.toString('base64'),
+      title: 'owned-only', confirmation: { subjects: ['owned-only'] } });
+    await started;
+    h.switchSession({ ...session, layers: { overlayRoot: '/owned-other' } });
+    if (aba) h.switchSession(session);
+    resolveCommit(); const result = await pending;
+    assert.equal(result, h.rawResult); assert.equal(result.ok, true); assert.equal(result.opId, 'owned-commit');
+    assert.equal(h.requests.commit[0].session, session);
+    assert.deepEqual(postCommit(h.events), ['commit']);
+    assert.equal(result.diagnostics.filter(item => item.code === 'POSTCOMMIT_WORKSPACE_SUPERSEDED').length, 1);
+    assert.equal(h.requests.commit.length, 1);
+  });
+}
+
+test('actual default commit port performs no projection on a failed old-owner write', async () => {
+  const h = harness({ commitOk: false }); h.switchSession({ ...session });
+  const result = await h.sessionCommitPort(session, {}, storage).commit({ file, expectedHash: 'owned-container-hash',
+    newContentBase64: hksBytes.toString('base64'), title: 'owned-only', confirmation: { subjects: ['owned-only'] } });
+  assert.equal(result, h.rawResult); assert.equal(result.ok, false);
+  assert.deepEqual(postCommit(h.events), ['commit']); assert.deepEqual(result.diagnostics, []);
+});
+
+test('actual default commit port retains its submitted logical source when indexed fields are reused', async () => {
+  let resolveCommit, notifyStarted;
+  const commitGate = new Promise(resolve => { resolveCommit = resolve; });
+  const started = new Promise(resolve => { notifyStarted = resolve; });
+  const h = harness({ commitGate, commitStarted: notifyStarted }), mutableFile = { ...file };
+  const pending = h.sessionCommitPort(session, {}, storage).commit({ file: mutableFile, expectedHash: 'owned-container-hash',
+    newContentBase64: hksBytes.toString('base64'), title: 'owned-only', confirmation: { subjects: ['owned-only'] } });
+  await started; mutableFile.sourceUri = 'resource://owned-other/reused'; resolveCommit();
+  const result = await pending;
+  assert.equal(result, h.rawResult); assert.deepEqual(plain(h.requests.refresh), [[sourceUri]]);
 });
 
 test('resource cache invalidation rejection keeps committed ok and still runs one refresh', async t => {

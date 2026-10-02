@@ -19,22 +19,25 @@ const file = { sourceUri: 'resource://owned/script', absolutePath: ownedPath('mo
   resourceKind: 'script', extension: '.lua', compoundExtension: '.lua', formatKind: 'text', formatLabel: 'Lua', parseStatus: 'parsed', diagnostics: [], size: 8, mtimeMs: 1, sha256: hash };
 const channels = ['resource.replaceContainerChild', 'resource.saveScriptSource', 'resource.preview', 'resource.saveText', 'resource.search'];
 const plain = value => JSON.parse(JSON.stringify(value));
+const turn = () => new Promise(resolve => setImmediate(resolve));
+function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
 
 function harness(options = {}) {
   const calls = [], handlers = new Map(), cache = new Map();
   let files = options.files ?? [file], session = options.session === null ? null : { meta: { workspaceId: 'owned' }, layers: { overlayRoot: ownedPath('mod'), baseRoot: null } };
   let activeIndex = options.index ?? null;
+  let generation = 1;
   const storage = { root: ownedPath('storage'), backupBaseDir: ownedPath('backup'), recoveryDir: ownedPath('recovery'), stagingRoot: ownedPath('stage') };
-  const result = { ok: true, opId: 'owned-op', changedFiles: [file.absolutePath], diagnostics: [] };
+  const result = { ok: options.commitOk !== false, opId: 'owned-op', changedFiles: options.commitOk === false ? [] : [file.absolutePath], diagnostics: [] };
   const core = {
     runBridge: async input => { calls.push(['bridge', input]); return { parseStatus: 'partial', diagnostics: [], data: {
       containerHash: hash, contentHash: childHash, contentBase64: Buffer.from('return 1').toString('base64'), sanitizedName: 'owned.lua'
     } }; },
-    openResourcePreview: async input => { calls.push(['preview', input]); return { file: input.file, previewKind: 'text', text: 'owned preview', truncated: false, bytesRead: 8, diagnostics: [] }; },
-    replaceContainerChild: async input => { calls.push(['replaceChild', input]); return result; },
-    saveRawReplace: async input => { calls.push(['rawReplace', input]); return result; },
-    saveTextResource: async input => { calls.push(['textSave', input]); return options.confirmationRequired && !input.confirmation
-      ? { ok: false, requiresConfirmation: true, changedFiles: [], diagnostics: [] } : result; },
+    openResourcePreview: async input => { calls.push(['preview', input]); await options.previewGate?.promise; if (options.previewError) throw options.previewError; return { file: input.file, previewKind: 'text', text: 'owned preview', truncated: false, bytesRead: 8, diagnostics: [] }; },
+    replaceContainerChild: async input => { calls.push(['replaceChild', input]); await options.commitGate?.promise; return result; },
+    saveRawReplace: async input => { calls.push(['rawReplace', input]); await options.commitGate?.promise; return result; },
+    saveTextResource: async input => { calls.push(['textSave', input]); if (options.confirmationRequired && !input.confirmation)
+      return { ok: false, requiresConfirmation: true, changedFiles: [], diagnostics: [] }; await options.commitGate?.promise; return result; },
     encodeScriptSourceForWriteback: (_original, text) => ({ ok: true, bytes: Buffer.from(text), diagnostics: [] }),
     readContainerChild: async () => ({ ok: true, bytes: Buffer.from(options.childBytecode ? [0x1b,0x4c,0x75,0x61,0x51] : 'return 1') }),
     inspectContainerTree: async () => ({ ok: true, tree: { rootHash: hash } }),
@@ -65,22 +68,23 @@ function harness(options = {}) {
   const deps = {
     handle: (name, callback) => handlers.set(name, (...args) => { if (options.deny) throw new Error('IPC_UNTRUSTED_SENDER'); return callback(...args); }),
     getIndexedFiles: () => files, getActiveSession: () => session, getActiveIndex: () => activeIndex, getActiveWorkspaceSessionId: () => 'owned-session',
+    getActiveWorkspaceSessionGeneration: () => generation,
     durableStoragePaths: () => storage, ensureActiveOperationLog: async () => { calls.push(['operationLog']); return {}; },
     rejectNonSekiroNativeWrite: () => options.gameFailure ?? null,
     requestWriteConfirmation: async input => { calls.push(['confirm', input]); return options.cancel ? null : { token: 'owned-confirmation' }; },
     verifiedReadRoots: async () => ({ allowedRoots: [ownedPath('mod')], diagnostics: options.rootDiagnostics ?? [] }),
     verifiedStageRoots: async () => ({ allowedRoots: [ownedPath('mod')], writableRoots: [storage.stagingRoot], diagnostics: [] }),
     sessionCommitPort: () => ({ commit: async () => result }), toSaveResultFromOutcome: outcome => ({ ok: outcome.status === 'committed', changedFiles: [], diagnostics: outcome.diagnostics ?? [] }),
-    clearResourceRelatedCaches: () => calls.push(['cacheClear']),
-    refreshActiveIndexAfterNativeWrite: async (sources, carrier) => calls.push(['refresh', sources, carrier]),
+    clearResourceRelatedCaches: () => { calls.push(['cacheClear']); if (options.cacheError) throw options.cacheError; },
+    refreshActiveIndexAfterNativeWrite: async (sources, carrier) => { calls.push(['refresh', sources, carrier]); if (options.refreshError) throw options.refreshError; },
     withForegroundPriority: async fn => { calls.push(['foreground']); return fn(); },
-    bumpPathSourceGenerationForUris: uris => calls.push(['generation', uris]),
-    replaceIndexedFile: (uri, next) => { calls.push(['replaceIndex', uri, next]); return true; }
+    bumpPathSourceGenerationForUris: uris => { calls.push(['generation', uris]); if (options.generationError) throw options.generationError; },
+    replaceIndexedFile: (uri, next) => { calls.push(['replaceIndex', uri, next]); if (options.indexError) throw options.indexError; return true; }
   };
   adapter.registerResourceIpcHandlers(deps);
   return { calls, handlers, adapter, deps, load, storage, result,
     invoke: (channel, ...args) => handlers.get(channel)({ sender: { id: 17 } }, ...args),
-    switchFiles(next) { files = next; }, switchSession(next) { session = next; }, switchIndex(next) { activeIndex = next; }
+    switchFiles(next) { files = next; }, switchSession(next) { session = next; generation++; }, switchIndex(next) { activeIndex = next; }
   };
 }
 
@@ -174,6 +178,7 @@ test('Script source service accepts a neutral deferred confirmation port and nev
   const h = harness(); const { createScriptSourceService } = h.load(mainPath('services/scriptSourceService.ts'));
   const ports = {};
   for (const name of ['getIndexedFiles', 'replaceIndexedFile', 'getActiveSession', 'durableStoragePaths', 'ensureActiveOperationLog',
+    'getActiveWorkspaceSessionGeneration',
     'verifiedReadRoots', 'verifiedStageRoots', 'sessionCommitPort', 'toSaveResultFromOutcome', 'rejectNonSekiroNativeWrite',
     'refreshActiveIndexAfterNativeWrite', 'clearResourceRelatedCaches']) ports[name] = h.deps[name];
   const service = createScriptSourceService(ports); assert.deepEqual(Object.keys(service), ['saveScriptSource']);
@@ -186,3 +191,73 @@ test('Script source service accepts a neutral deferred confirmation port and nev
   h.switchFiles([]);
   assert.equal((await service.saveScriptSource(() => { throw new Error('must remain deferred'); }, file.sourceUri, undefined, undefined, undefined, 'return 2')).ok, false);
 });
+
+const committedPaths = [
+  { name: 'container replacement', writer: 'replaceChild', invoke: h => h.invoke(channels[0], `${file.sourceUri}#bnd/child/owned.lua`, hash, childHash, 'b3duZWQ='), prepareFailures: ['cacheError'] },
+  { name: 'generic text save', writer: 'textSave', invoke: h => h.invoke(channels[3], file.sourceUri, 'owned text'), prepareFailures: ['generationError', 'previewError', 'indexError'] },
+  { name: 'legacy container Script save', writer: 'replaceChild', invoke: h => h.invoke(channels[1], file.sourceUri, 'owned.lua', childHash, hash, 'return 2'), prepareFailures: ['cacheError'] },
+  { name: 'loose Script save', writer: 'rawReplace', invoke: h => h.invoke(channels[1], file.sourceUri, undefined, undefined, undefined, 'return 2'), prepareFailures: ['previewError', 'indexError'] }
+];
+
+for (const scenario of committedPaths) {
+  test(`${scenario.name} keeps A's receipt labels when the original indexed object is mutated while the result is pending`, async () => {
+    const gate = deferred(), mutable = { ...file };
+    const h = harness({ files: [mutable], commitGate: gate }); const pending = scenario.invoke(h); await turn();
+    assert.equal(h.calls.filter(([kind]) => kind === scenario.writer).length, 1);
+    mutable.sourceUri = 'resource://reused-index/B'; mutable.relativePath = 'B-reused.lua';
+    gate.resolve(); const result = await pending;
+    assert.equal(result.ok, true); assert.equal(result.opId, 'owned-op');
+    assert.deepEqual(plain(result.changedFiles), [file.sourceUri]);
+    assert.equal(h.calls.filter(([kind]) => kind === scenario.writer).length, 1);
+  });
+  for (const returnToSameObject of [false, true]) {
+    test(`${scenario.name} retains A's receipt without writing the ${returnToSameObject ? 'remounted A' : 'B'} global projection after owner replacement`, async () => {
+      const gate = deferred(); const h = harness({ commitGate: gate }); const original = h.deps.getActiveSession();
+      const pending = scenario.invoke(h); await turn(); assert.equal(h.calls.filter(([kind]) => kind === scenario.writer).length, 1);
+      h.switchSession({ ...original }); h.switchFiles([{ ...file, sourceUri: 'resource://other/script', absolutePath: ownedPath('other/script.lua') }]);
+      if (returnToSameObject) h.switchSession(original);
+      gate.resolve(); const result = await pending;
+      assert.equal(result.ok, true); assert.equal(result.opId, 'owned-op'); assert.deepEqual(plain(result.changedFiles), [file.sourceUri]);
+      assert.equal(h.calls.some(([kind]) => ['cacheClear','generation','preview','replaceIndex','refresh'].includes(kind)), false);
+      assert.equal(h.calls.filter(([kind]) => kind === scenario.writer).length, 1);
+      assert.ok(result.diagnostics.some(d => d.code === 'POSTCOMMIT_WORKSPACE_SUPERSEDED'));
+    });
+  }
+  for (const physicalPath of ['C:\\Users\\owned\\private\\script.lua', '/home/owned/private/script.lua']) {
+    test(`${scenario.name} retains committed facts on ${physicalPath.startsWith('C:') ? 'Windows' : 'POSIX'} refresh rejection without replay`, async () => {
+      const h = harness({ refreshError: new Error(`EACCES refresh denied '${physicalPath}'; reload needed`) });
+      const result = await scenario.invoke(h);
+      assert.equal(result.ok, true); assert.equal(result.opId, 'owned-op'); assert.deepEqual(plain(result.changedFiles), [file.sourceUri]);
+      assert.equal(h.result.ok, true); assert.equal(h.calls.find(([kind]) => kind === 'refresh')[2], h.result);
+      assert.equal(h.calls.filter(([kind]) => kind === scenario.writer).length, 1); assert.equal(h.calls.filter(([kind]) => kind === 'refresh').length, 1);
+      const warning = result.diagnostics.find(d => d.code === 'POSTCOMMIT_REFRESH_FAILED'); assert.equal(warning.severity, 'warning');
+      const text = JSON.stringify(warning); assert.equal(text.includes(physicalPath), false); assert.equal(text.includes(physicalPath.replaceAll('\\', '\\\\')), false);
+      assert.ok(text.includes('[本机路径已隐藏]')); assert.ok(text.includes('EACCES refresh denied')); assert.ok(text.includes('reload needed'));
+    });
+  }
+  test(`${scenario.name} preserves committed identity on each preparation failure and still refreshes exactly once`, async () => {
+    for (const phase of scenario.prepareFailures) {
+      const h = harness({ [phase]: new Error('owned projection failed') }); const result = await scenario.invoke(h);
+      assert.equal(result.ok, true); assert.equal(result.opId, 'owned-op'); assert.deepEqual(plain(result.changedFiles), [file.sourceUri]);
+      assert.equal(result.diagnostics[0].code, 'POSTCOMMIT_PREVIEW_FAILED'); assert.equal(result.diagnostics[0].severity, 'warning');
+      assert.equal(h.calls.filter(([kind]) => kind === scenario.writer).length, 1); assert.equal(h.calls.filter(([kind]) => kind === 'refresh').length, 1);
+    }
+  });
+  test(`${scenario.name} does not prepare or refresh a failed commit`, async () => {
+    const h = harness({ commitOk: false, refreshError: new Error('must not run'), previewError: new Error('must not run'), cacheError: new Error('must not run') });
+    const result = await scenario.invoke(h); assert.equal(result.ok, false); assert.deepEqual(plain(result.changedFiles), []);
+    assert.equal(h.calls.some(([kind]) => ['cacheClear','generation','preview','replaceIndex','refresh'].includes(kind)), false);
+    assert.equal(h.calls.filter(([kind]) => kind === scenario.writer).length, 1);
+  });
+}
+
+for (const scenario of committedPaths.filter(s => s.prepareFailures.includes('previewError'))) {
+  test(`${scenario.name} drops the old preview result if the owner changes during preview without hiding the committed receipt`, async () => {
+    const gate = deferred(); const h = harness({ previewGate: gate }); const pending = scenario.invoke(h);
+    await turn(); assert.equal(h.calls.filter(([kind]) => kind === 'preview').length, 1);
+    h.switchSession({ ...h.deps.getActiveSession() }); gate.resolve(); const result = await pending;
+    assert.equal(result.ok, true); assert.equal(result.opId, 'owned-op');
+    assert.equal(h.calls.some(([kind]) => kind === 'replaceIndex' || kind === 'refresh'), false);
+    assert.ok(result.diagnostics.some(d => d.code === 'POSTCOMMIT_WORKSPACE_SUPERSEDED'));
+  });
+}

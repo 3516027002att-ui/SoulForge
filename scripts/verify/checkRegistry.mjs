@@ -4,31 +4,6 @@ import { analyzeEntry } from './classify.mjs';
 import { resolveScriptEntries } from './scriptGraph.mjs';
 import { operationKey, planScript } from './commandPlan.mjs';
 
-export function workspaceScriptReachability(repoRoot, workspaces, workspace, name) {
-  const virtual = {...workspaces,rootScripts:{...workspaces.rootScripts}};
-  // Resolve with its real workspace directory, including node --test flags and
-  // transitive npm forwarding, rather than matching command text by substring.
-  const alias = '__workspace_target';
-  virtual.rootScripts[alias] = `npm run ${name} -w ${[...workspaces.byName].find(([,w]) => w === workspace)?.[0]}`;
-  const own = resolveScriptEntries(repoRoot,virtual,alias);
-  if (own.unresolved.length || own.cycles.length || own.entryFiles.length === 0) return 'unknown';
-  const reachable = new Set(Object.keys(workspaces.rootScripts).flatMap(root => resolveScriptEntries(repoRoot,workspaces,root).entryFiles));
-  return own.entryFiles.every(entry => reachable.has(entry)) ? 'reachable' : 'unreachable';
-}
-
-export function auditCheckRegistration(repoRoot, workspaces) {
-  const findings = [];
-  for (const [workspaceName,workspace] of workspaces.byName) {
-    for (const name of Object.keys(workspace.scripts).filter(n => n.startsWith('test'))) {
-      const status = workspaceScriptReachability(repoRoot,workspaces,workspace,name);
-      if (status === 'reachable') continue;
-      findings.push({severity:'warning',code:status === 'unknown' ? 'WORKSPACE_REACHABILITY_UNKNOWN':'WORKSPACE_SUITE_UNREACHABLE',
-        scriptName:`${workspaceName}:${name}`,message:status === 'unknown' ? 'Cannot statically determine execution.' : 'No root script covers this test entry; automatic discovery will include it.'});
-    }
-  }
-  return findings;
-}
-
 /** Labels describe actual execution inputs, never a required registration row. */
 export function selectCheckTier(name, sources, requirements) {
   const paths = sources.map(path => path.replaceAll('\\','/'));

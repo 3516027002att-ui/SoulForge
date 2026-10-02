@@ -1,5 +1,7 @@
 # SoulForge 全局前端实施规范
 
+当前 issue-based 全重构中，本文作为历史设计背景。正文中的 gov、Gate/scope 登记和手工 tiers 接入指令已退役，不作为开工、验证或封存的前置条件。当前任务边界以用户指令和 [工程入口](../../AGENTS.md) 为准；具体产品约束须与当前源码、[架构](../../ARCHITECTURE.md) 和 [决定](../DECISIONS.md) 核对。
+
 > **最高优先级产品决定**
 >
 > SoulForge 的常规编辑器工作台不再自行设计。对照本机 `tools` 里的 Smithbox 2.2.4 与 DarkScript3，复制的是**选择链、窗格身份、信息密度和操作顺序**，不是把 ImGui 可拆停靠翻译成固定 CSS 四栏，也不是“参考后重新设计”成卡片式网页。Agent dock 是 SoulForge 自有外壳，构图按 TRAE/Cursor；参考截图目前不在仓库内。

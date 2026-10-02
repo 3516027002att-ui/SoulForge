@@ -20,6 +20,7 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
     withForegroundPriority: <T>(fn: () => Promise<T>) => deps.withForegroundPriority(fn),
   });
   const mutation = createResourceMutationService({
+    getActiveWorkspaceSessionGeneration: () => deps.getActiveWorkspaceSessionGeneration(),
     getIndexedFiles: () => deps.getIndexedFiles(),
     replaceIndexedFile: (sourceUri, file) => deps.replaceIndexedFile(sourceUri, file),
     getActiveSession: () => deps.getActiveSession(),
@@ -31,6 +32,7 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
     clearResourceRelatedCaches: () => deps.clearResourceRelatedCaches(),
   });
   const script = createScriptSourceService({
+    getActiveWorkspaceSessionGeneration: () => deps.getActiveWorkspaceSessionGeneration(),
     getIndexedFiles: () => deps.getIndexedFiles(),
     replaceIndexedFile: (sourceUri, file) => deps.replaceIndexedFile(sourceUri, file),
     getActiveSession: () => deps.getActiveSession(),

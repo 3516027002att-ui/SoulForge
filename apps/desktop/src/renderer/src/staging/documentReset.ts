@@ -185,6 +185,8 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   setSelectedFile: '选中文件本身，不是文档态',
   setPreview: '通用预览，非资源族专属',
   setEditText: '文本编辑器内容，纯文本路径',
+  setEditTextState: 'Resource owner 的私有文本状态，公开编辑入口仍由当前文档生命周期限定',
+  setResourceOwnerEpoch: 'Resource 命令生命周期代次，由资源reset/选择同步推进，不是可保存文档内容',
   setLastSavedText: '同上',
   setMsgRows: 'FMG 文本表行，由 extractMsgRows 从 preview 派生',
   setSaveDiagnostics: '保存诊断，随保存动作更新',

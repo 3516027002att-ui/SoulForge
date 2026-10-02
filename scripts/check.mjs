@@ -2,7 +2,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { loadWorkspaces } from './verify/scriptGraph.mjs';
-import { discoverChecks, auditCheckRegistration } from './verify/checkRegistry.mjs';
+import { discoverChecks } from './verify/checkRegistry.mjs';
 import { runPlannedSuite, OUTCOME } from './verify/runner.mjs';
 import { summarizePlan } from './verify/commandPlan.mjs';
 
@@ -31,7 +31,9 @@ if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1) throw new
 const repoRoot = process.cwd();
 const workspaces = loadWorkspaces(repoRoot);
 const registry = discoverChecks(repoRoot,workspaces);
-const auditFindings = auditCheckRegistration(repoRoot,workspaces);
+// Kept in the report shape for existing consumers. Workspace checks are
+// independently discovered; root forwarding aliases confer no execution proof.
+const auditFindings = [];
 const selected = options.suites.length ? options.suites : [...registry.keys()].filter(name => options.tiers.includes(registry.get(name).tier) && (!options.filter || name.includes(options.filter)));
 // A required suite is an execution requirement, including when its phase is
 // outside the ordinary selection. Missing or explicitly excluded names remain
@@ -67,7 +69,9 @@ const blocking = results.filter(r => r.status === 'failed' || r.status === 'not_
   || (r.status === 'unavailable' && (options.requireExecuted || options.requiredTiers.includes(r.tier) || options.requiredSuites.includes(r.scriptName))));
 const ok = auditFindings.every(f => f.severity !== 'error') && blocking.length === 0
   && (options.list || options.audit || results.some(r => r.status === 'passed'));
-const report = {ok,completionVerified:ok && counts.unavailable === 0 && counts.not_run === 0,mode:options.list ? 'list':options.audit ? 'audit':'run',counts,auditFindings,
+const completionVerified = ok && !options.list && !options.audit && counts.passed > 0
+  && counts.unavailable === 0 && counts.not_run === 0;
+const report = {ok,completionVerified,mode:options.list ? 'list':options.audit ? 'audit':'run',counts,auditFindings,
   scheduling:summarizePlan(plan),...(options.list ? {suites:plan}:{}),results};
 if (options.jsonOut) {const path = resolve(repoRoot,options.jsonOut);mkdirSync(dirname(path),{recursive:true});writeFileSync(path,`${JSON.stringify(report,null,2)}\n`);}
 console.log(JSON.stringify(report,null,2));

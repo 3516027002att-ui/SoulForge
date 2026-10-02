@@ -27,6 +27,7 @@ function deferred() { let resolve; const promise = new Promise(done => { resolve
 function harness(options = {}) {
   const calls = [], handlers = new Map(), cache = new Map(), owners = new Map();
   let files = options.files ?? [msb, model], activeSession = options.session === undefined ? session : options.session;
+  let activeIndex = options.index ?? {};
   let revision = 1, generation = 1;
   const core = {
     BRIDGE_TRANSPORT_TIMING_CODE: 'BRIDGE_TRANSPORT_TIMINGS',
@@ -37,12 +38,12 @@ function harness(options = {}) {
         diagnostics: options.diagnostics ?? [], data: options.data === undefined
           ? { sessionToken: 'native-owned-token', nextCursor: null, complete: true, chunks: [], sourceHash: hash } : options.data };
     },
-    readMsbDocumentViaBridge: async input => { calls.push(['msbRead', plain(input)]); return {
+    readMsbDocumentViaBridge: async input => { calls.push(['msbRead', plain(input)]); if (options.msbRead) return options.msbRead(input); return {
       ok: true, diagnostics: [], data: { sourceHash: hash, modelCount: 1, partCount: 1, regionCount: 0, eventCount: 0,
         routeCount: 0, models: [], parts: [], regions: [], events: [], routes: [], absolutePath: 'PRIVATE' }
     }; },
     mapExportFromMsbDocument: input => { calls.push(['mapExport', plain(input)]); return input; },
-    ingestBridgeResult: (_index, input) => calls.push(['ingest', plain(input)]),
+    ingestBridgeResult: (index, input) => calls.push(['ingest', plain(input), index]),
     nativeEditSessionFromContext: input => { calls.push(['nativeEdit', input]); return {
       indexFile: async () => { calls.push(['indexFile']); return { ...msb, sha256: 'b'.repeat(64), mtimeMs: 2 }; }
     }; },
@@ -90,10 +91,10 @@ function harness(options = {}) {
     }),
     get indexedFiles() { return files; }, get indexedFilesRevision() { return revision; },
     get indexedFilesIdentityDigest() { return `owned-${revision}`; }, get activeSession() { return activeSession; },
-    activeIndex: {}, activeWorkspaceSessionId: 'owned-session', get activeWorkspaceSessionGeneration() { return generation; },
+    get activeIndex() { return activeIndex; }, activeWorkspaceSessionId: 'owned-session', get activeWorkspaceSessionGeneration() { return generation; },
     safeExists: value => value.startsWith('/owned/mod/map/') || files.some(file => file.absolutePath === value),
     asBasicDiagnostics: value => value,
-    verifiedReadRoots: async () => { calls.push(['roots']); return { allowedRoots: ['/owned/mod'], diagnostics: options.rootDiagnostics ?? [] }; },
+    verifiedReadRoots: async (readSession, fallback) => { calls.push(['roots']); if (options.roots) return options.roots(readSession, fallback); return { allowedRoots: ['/owned/mod'], diagnostics: options.rootDiagnostics ?? [] }; },
     rejectNonSekiroNativeWrite: () => options.gameFailure ?? null,
     durableStoragePaths: () => ({ root: '/owned/storage', backupBaseDir: '/owned/backups', recoveryDir: '/owned/recovery', stagingRoot: '/owned/staging' }),
     ensureActiveOperationLog: async () => { calls.push(['operationLog']); return {}; },
@@ -116,7 +117,7 @@ function harness(options = {}) {
   return { calls, handlers, owners, load, deps, action, adapter,
     invoke: (channel, ...args) => handlers.get(channel)(event(1), ...args),
     invokeAs: (id, channel, ...args) => handlers.get(channel)(event(id), ...args),
-    switchFiles(value) { files = value; revision++; }, switchSession(value) { activeSession = value; generation++; }
+    switchFiles(value) { files = value; revision++; }, switchSession(value, index = {}) { activeSession = value; activeIndex = index; generation++; }
   };
 }
 
@@ -146,6 +147,66 @@ test('native MSB read preserves hash/root options and logical renderer projectio
   assert.equal(result.ok, true); assert.equal(result.data.sourceHash, hash); assert.equal('absolutePath' in result.data, false);
   assert.deepEqual(h.calls[1], ['msbRead', { sourcePath: msb.absolutePath, allowedRoots: ['/owned/mod'] }]);
   assert.equal(h.calls.find(([name]) => name === 'ingest')[1].sourcePath, msb.relativePath);
+});
+
+const msbReadResult = () => ({ ok: true, diagnostics: [], data: { sourceHash: hash, modelCount: 1, partCount: 1,
+  regionCount: 0, eventCount: 0, routeCount: 0, models: [], parts: [], regions: [], events: [], routes: [] } });
+
+for (const aba of [false, true]) {
+  test(`pending MSB native read discards ${aba ? 'same-object ABA' : 'A-to-B'} owner results before index ingestion`, async () => {
+    const started = deferred(), native = deferred(), indexA = {}, indexB = {};
+    const h = harness({ index: indexA, msbRead: async () => { started.resolve(); return native.promise; } });
+    const pending = h.invoke(channels[0], msb.sourceUri); await started.promise;
+    h.switchSession({ ...session, layers: { overlayRoot: '/owned/other', baseRoot: null } }, indexB);
+    if (aba) h.switchSession(session, indexA);
+    native.resolve(msbReadResult()); const result = await pending;
+    assert.equal(result.ok, false); assert.equal(result.cancelled, true);
+    assert.equal(result.diagnostics[0].code, 'WORKSPACE_READ_SUPERSEDED');
+    assert.equal(result.data, undefined); assert.equal(h.calls.filter(([name]) => name === 'ingest').length, 0);
+    assert.equal(h.calls.filter(([name]) => name === 'msbRead').length, 1);
+  });
+
+  test(`pending MSB root preparation prevents native dispatch after ${aba ? 'same-object ABA' : 'A-to-B'} activation`, async () => {
+    const started = deferred(), roots = deferred();
+    const h = harness({ roots: async readSession => { assert.equal(readSession, session); started.resolve(); return roots.promise; } });
+    const pending = h.invoke(channels[0], msb.sourceUri); await started.promise;
+    h.switchSession({ ...session, layers: { overlayRoot: '/owned/other', baseRoot: null } });
+    if (aba) h.switchSession(session);
+    roots.resolve({ allowedRoots: ['/owned/mod'], diagnostics: [] }); const result = await pending;
+    assert.equal(result.ok, false); assert.equal(result.cancelled, true);
+    assert.equal(result.diagnostics[0].code, 'WORKSPACE_READ_SUPERSEDED');
+    assert.equal(h.calls.filter(([name]) => name === 'msbRead' || name === 'ingest').length, 0);
+  });
+}
+
+test('current MSB read ingests only its captured index and returns the original source hash', async () => {
+  const started = deferred(), native = deferred(), index = {};
+  const h = harness({ index, msbRead: async () => { started.resolve(); return native.promise; } });
+  const pending = h.invoke(channels[0], msb.sourceUri); await started.promise;
+  native.resolve(msbReadResult()); const result = await pending;
+  assert.equal(result.ok, true); assert.equal(result.data.sourceHash, hash);
+  assert.equal(h.calls.find(([name]) => name === 'ingest')[2], index);
+  assert.equal(h.calls.filter(([name]) => name === 'msbRead').length, 1);
+});
+
+test('pending MSB read retains primitive source labels when indexed file fields are reused', async () => {
+  const started = deferred(), native = deferred(), file = { ...msb };
+  const h = harness({ files: [file], msbRead: async () => { started.resolve(); return native.promise; } });
+  const pending = h.invoke(channels[0], msb.sourceUri); await started.promise;
+  file.absolutePath = '/owned/other/private.msb'; file.relativePath = 'map/MapStudio/other.msb'; file.game = 'unknown';
+  native.resolve(msbReadResult()); const result = await pending;
+  assert.equal(result.relativePath, msb.relativePath);
+  const ingested = h.calls.find(([name]) => name === 'ingest')[1];
+  assert.equal(ingested.sourcePath, msb.relativePath); assert.equal(ingested.game, msb.game);
+});
+
+test('current MSB native failure retains diagnostics and never ingests a parsed snapshot', async () => {
+  const diagnostics = [{ severity: 'error', code: 'OWNED_NATIVE_READ_FAILED', message: 'owned native failure' }];
+  const h = harness({ msbRead: async () => ({ ok: false, diagnostics }) });
+  const result = await h.invoke(channels[0], msb.sourceUri);
+  assert.equal(result.ok, false); assert.deepEqual(plain(result.diagnostics), diagnostics);
+  assert.equal(h.calls.filter(([name]) => name === 'ingest').length, 0);
+  assert.equal(h.calls.filter(([name]) => name === 'msbRead').length, 1);
 });
 
 test('verified-root rejection prevents native static reads', async () => {

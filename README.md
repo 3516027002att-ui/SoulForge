@@ -6,7 +6,7 @@ SoulForge 是给魂游（FromSoftware 的《只狼》《黑暗之魂》《艾尔
 
 像写代码时用 Cursor 一样，你用自然语言告诉它想怎么改游戏，它在独立的工作区里帮你改好、验证、提交，还能随时一键回滚
 
-> 当前状态：工作区内所有文件均可读取、索引和诊断；文件能否编辑、写入方式和安全等级以当前治理登记、原生 authority、验证结果和工作区诊断为准。安装包未做代码签名，暂不适合作为稳定工具分发。
+> 当前状态：工作区内所有文件均可读取、索引和诊断；文件能否编辑、写入方式和安全等级以当前原生能力、验证结果和工作区诊断为准。安装包未做代码签名，暂不适合作为稳定工具分发。
 
 ## 当前可用能力
 
@@ -34,7 +34,7 @@ SoulForge 是给魂游（FromSoftware 的《只狼》《黑暗之魂》《艾尔
 
 ## 开发文档
 
-开发与架构设计规范请参阅[实施交接书](docs/V0_5_IMPLEMENTATION_HANDOFF.md)。文档内容以当前治理登记与验证结果为准。
+当前开发入口是 [AGENTS.md](AGENTS.md)、[ARCHITECTURE.md](ARCHITECTURE.md) 和 [DECISIONS.md](docs/DECISIONS.md)。[实施交接书](docs/V0_5_IMPLEMENTATION_HANDOFF.md) 保留历史背景；产品能力以当前源码、原生验证结果和工作区诊断为准。
 
 ### CLI 与真实 Agent 验证
 
@@ -58,7 +58,7 @@ node scripts/check.mjs --suite file:scripts/check.fixture.mjs --require-executed
 
 同一计划按工作目录、命令参数和显式环境复用已通过的操作，共享重复的 TypeScript 编译；JSON 报告的 `steps.execution` 区分执行与复用。构建、npm 生命周期和无法安全展开的 shell 命令会清除复用结果。复用不跨运行保存，也不用于把 skip/partial 改成 passed。需要全部实际通过时用 `--require-executed`；混合层级可用 `--require-tier governance,unit` 或 `--require-suite test:renderer-e2e` 指定严格范围。
 
-Windows CI 对文档和治理数据变更只跑治理检查；代码变更共用一次公开验证计划，renderer e2e 只执行一次。打包输入变化或手动选择安装验收时，独立运行 NSIS、内容完整性和安装生命周期。真实游戏语料、签名和跨机验收仍按各自前置执行。Agent 模拟和数据库 smoke 在源文件与产物 SHA-256 都匹配时复用生产构建；缺少所需 smoke 入口或指纹变化时重建。
+Windows CI 对已知文档变更选择工程入口检查；代码与未识别的数据变更共用一次公开验证计划，renderer e2e 只执行一次。打包输入变化或手动选择安装验收时，独立运行 NSIS、内容完整性和安装生命周期。真实游戏语料、签名和跨机验收仍按各自前置执行。Agent 模拟在源文件与产物 SHA-256 都匹配时复用生产构建；数据库 smoke 使用隔离测试构建，缺少入口或指纹变化时重建对应产物。
 
 ## 快速开始
 

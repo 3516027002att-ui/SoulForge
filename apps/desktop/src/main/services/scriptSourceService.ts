@@ -3,12 +3,14 @@ import { readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { applyNativeMutation, encodeScriptSourceForWriteback, inspectContainerTree, openResourcePreview, readContainerChild, replaceContainerChild, runBridge, saveRawReplace, type NativeMutationOutcome, type RawReplaceCommitPort, type WorkspaceSession } from '@soulforge/core';
 import type { Diagnostic, IndexedFile } from '@soulforge/shared';
-import { toRendererSaveResult, type RendererSaveResult } from '../rendererDto.js';
+import { toRendererSaveResult, type RendererSaveResult, type RendererResourceLabelSource } from '../rendererDto.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
-import { appendPostCommitFailureDiagnostic, runCallerOwnedPostCommit, type KnowledgeRefreshOwner } from '../knowledgeRefreshOwnership.js';
+import { runCallerOwnedPostCommit, type KnowledgeRefreshOwner } from '../knowledgeRefreshOwnership.js';
+import { appendRendererPostCommitFailureDiagnostic as appendPostCommitFailureDiagnostic } from '../rendererPostCommitDiagnostic.js';
 import { cancelledWrite, confirmationRequiredResult, type ResourceWriteConfirmation } from './resourceWriteContext.js';
+import { captureResourcePostCommitOwner, type ResourcePostCommitOwnerDeps } from './resourcePostCommitOwner.js';
 
-export interface ScriptSourceServiceDeps {
+export interface ScriptSourceServiceDeps extends ResourcePostCommitOwnerDeps {
   getIndexedFiles(): readonly IndexedFile[];
   replaceIndexedFile(sourceUri: string, file: IndexedFile): boolean;
   getActiveSession(): WorkspaceSession | null;
@@ -36,7 +38,7 @@ export interface ScriptSourceServiceDeps {
   ): RawReplaceCommitPort;
   toSaveResultFromOutcome(
     outcome: NativeMutationOutcome,
-    files: readonly IndexedFile[]
+    files: readonly RendererResourceLabelSource[]
   ): RendererSaveResult;
   rejectNonSekiroNativeWrite(sourceUri: string, file?: IndexedFile): RendererSaveResult | null;
   refreshActiveIndexAfterNativeWrite(
@@ -166,6 +168,7 @@ export function createScriptSourceService(deps: ScriptSourceServiceDeps) {
         };
       }
       const activeSession = deps.getActiveSession();
+      const owner = captureResourcePostCommitOwner(deps, activeSession, sourceUri);
       if (!activeSession) {
         return {
           ok: false,
@@ -351,8 +354,8 @@ export function createScriptSourceService(deps: ScriptSourceServiceDeps) {
           );
           if (outcome.status === 'committed' && outcome.result.ok) {
             await runCallerOwnedPostCommit(outcome.result, {
-              prepare: () => deps.clearResourceRelatedCaches(),
-              refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([sourceUri], result),
+              prepare: () => { if (owner.canProject(outcome.result)) deps.clearResourceRelatedCaches(); },
+              refresh: async result => { if (owner.canProject(result)) await deps.refreshActiveIndexAfterNativeWrite([sourceUri], result); },
               onPrepareError: (result, error) => appendPostCommitFailureDiagnostic(
                 result,
                 'POSTCOMMIT_PREVIEW_FAILED',
@@ -368,7 +371,7 @@ export function createScriptSourceService(deps: ScriptSourceServiceDeps) {
               )
             });
           }
-          return deps.toSaveResultFromOutcome(outcome, [...deps.getIndexedFiles()]);
+          return deps.toSaveResultFromOutcome(outcome, owner.receiptFiles);
         }
 
         const read = await readContainerChild(file.absolutePath, childUri, {
@@ -446,10 +449,14 @@ export function createScriptSourceService(deps: ScriptSourceServiceDeps) {
           ...storage
         });
         if (result.ok) {
-          deps.clearResourceRelatedCaches();
-          await deps.refreshActiveIndexAfterNativeWrite([sourceUri], result);
+          await runCallerOwnedPostCommit(result, {
+            prepare: () => { if (owner.canProject(result)) deps.clearResourceRelatedCaches(); },
+            refresh: async carrier => { if (owner.canProject(carrier)) await deps.refreshActiveIndexAfterNativeWrite([sourceUri], carrier); },
+            onPrepareError: (carrier, error) => appendPostCommitFailureDiagnostic(carrier, 'POSTCOMMIT_PREVIEW_FAILED', sourceUri, error),
+            onRefreshError: (carrier, error) => appendPostCommitFailureDiagnostic(carrier, 'POSTCOMMIT_REFRESH_FAILED', sourceUri, error)
+          });
         }
-        return toRendererSaveResult(result, [...deps.getIndexedFiles()] as IndexedFile[]);
+        return toRendererSaveResult(result, owner.receiptFiles);
       }
       let originalBytes: Uint8Array;
       try {
@@ -520,16 +527,23 @@ export function createScriptSourceService(deps: ScriptSourceServiceDeps) {
         title: `保存脚本源码 ${file.relativePath}`
       });
       if (result.ok) {
-        const refreshed = await openResourcePreview({
-          file,
-          inspectNative: true,
-          parseStructured: true,
-          ...(activeSession.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {})
+        await runCallerOwnedPostCommit(result, {
+          prepare: async () => {
+            if (!owner.canProject(result)) return;
+            const refreshed = await openResourcePreview({
+              file,
+              inspectNative: true,
+              parseStructured: true,
+              ...(activeSession.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {})
+            });
+            if (owner.canProject(result)) deps.replaceIndexedFile(sourceUri, refreshed.file);
+          },
+          refresh: async carrier => { if (owner.canProject(carrier)) await deps.refreshActiveIndexAfterNativeWrite([sourceUri], carrier); },
+          onPrepareError: (carrier, error) => appendPostCommitFailureDiagnostic(carrier, 'POSTCOMMIT_PREVIEW_FAILED', sourceUri, error),
+          onRefreshError: (carrier, error) => appendPostCommitFailureDiagnostic(carrier, 'POSTCOMMIT_REFRESH_FAILED', sourceUri, error)
         });
-        deps.replaceIndexedFile(sourceUri, refreshed.file);
-        await deps.refreshActiveIndexAfterNativeWrite([sourceUri], result);
       }
-      return toRendererSaveResult(result, [...deps.getIndexedFiles()] as IndexedFile[]);
+      return toRendererSaveResult(result, owner.receiptFiles);
     };
 
   return Object.freeze({ saveScriptSource });

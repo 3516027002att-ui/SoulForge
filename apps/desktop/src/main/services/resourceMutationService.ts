@@ -4,8 +4,11 @@ import type { IndexedFile } from '@soulforge/shared';
 import { toRendererSaveResult, type RendererSaveResult } from '../rendererDto.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
 import { cancelledWrite, type ResourceWriteConfirmation } from './resourceWriteContext.js';
+import { runCallerOwnedPostCommit } from '../knowledgeRefreshOwnership.js';
+import { appendRendererPostCommitFailureDiagnostic } from '../rendererPostCommitDiagnostic.js';
+import { captureResourcePostCommitOwner, type ResourcePostCommitOwnerDeps } from './resourcePostCommitOwner.js';
 
-export interface ResourceMutationServiceDeps {
+export interface ResourceMutationServiceDeps extends ResourcePostCommitOwnerDeps {
   getIndexedFiles(): readonly IndexedFile[];
   replaceIndexedFile(sourceUri: string, file: IndexedFile): boolean;
   getActiveSession(): WorkspaceSession | null;
@@ -53,6 +56,7 @@ export function createResourceMutationService(deps: ResourceMutationServiceDeps)
         };
       }
       const activeSession = deps.getActiveSession();
+      const owner = captureResourcePostCommitOwner(deps, activeSession, containerUri);
       if (!activeSession) {
         return {
           ok: false,
@@ -94,10 +98,14 @@ export function createResourceMutationService(deps: ResourceMutationServiceDeps)
         ...(storage ?? {})
       });
       if (result.ok) {
-        deps.clearResourceRelatedCaches();
-        await deps.refreshActiveIndexAfterNativeWrite([containerUri], result);
+        await runCallerOwnedPostCommit(result, {
+          prepare: () => { if (owner.canProject(result)) deps.clearResourceRelatedCaches(); },
+          refresh: async carrier => { if (owner.canProject(carrier)) await deps.refreshActiveIndexAfterNativeWrite([containerUri], carrier); },
+          onPrepareError: (carrier, error) => appendRendererPostCommitFailureDiagnostic(carrier, 'POSTCOMMIT_PREVIEW_FAILED', containerUri, error),
+          onRefreshError: (carrier, error) => appendRendererPostCommitFailureDiagnostic(carrier, 'POSTCOMMIT_REFRESH_FAILED', containerUri, error)
+        });
       }
-      return toRendererSaveResult(result, [...deps.getIndexedFiles()] as IndexedFile[]);
+      return toRendererSaveResult(result, owner.receiptFiles);
     };
 
   const saveText = async (
@@ -120,6 +128,7 @@ export function createResourceMutationService(deps: ResourceMutationServiceDeps)
           ]
         };
       const activeSession = deps.getActiveSession();
+      const owner = captureResourcePostCommitOwner(deps, activeSession, sourceUri);
       const operationLog = activeSession ? await deps.ensureActiveOperationLog(activeSession) : undefined;
       const storage = activeSession ? deps.durableStoragePaths(activeSession.meta.workspaceId) : undefined;
       let result = await saveTextResource({
@@ -147,17 +156,24 @@ export function createResourceMutationService(deps: ResourceMutationServiceDeps)
         });
       }
       if (result.ok) {
-        deps.bumpPathSourceGenerationForUris([sourceUri]);
-        const refreshed = await openResourcePreview({
-          file,
-          inspectNative: true,
-          parseStructured: true,
-          ...(activeSession?.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {})
+        await runCallerOwnedPostCommit(result, {
+          prepare: async () => {
+            if (!owner.canProject(result)) return;
+            deps.bumpPathSourceGenerationForUris([sourceUri]);
+            const refreshed = await openResourcePreview({
+              file,
+              inspectNative: true,
+              parseStructured: true,
+              ...(activeSession?.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {})
+            });
+            if (owner.canProject(result)) deps.replaceIndexedFile(sourceUri, refreshed.file);
+          },
+          refresh: async carrier => { if (owner.canProject(carrier)) await deps.refreshActiveIndexAfterNativeWrite([sourceUri], carrier); },
+          onPrepareError: (carrier, error) => appendRendererPostCommitFailureDiagnostic(carrier, 'POSTCOMMIT_PREVIEW_FAILED', sourceUri, error),
+          onRefreshError: (carrier, error) => appendRendererPostCommitFailureDiagnostic(carrier, 'POSTCOMMIT_REFRESH_FAILED', sourceUri, error)
         });
-        deps.replaceIndexedFile(sourceUri, refreshed.file);
-        await deps.refreshActiveIndexAfterNativeWrite([sourceUri], result);
       }
-      return toRendererSaveResult(result, [...deps.getIndexedFiles()] as IndexedFile[]);
+      return toRendererSaveResult(result, owner.receiptFiles);
     };
 
   return Object.freeze({ replaceContainerChild, saveText });

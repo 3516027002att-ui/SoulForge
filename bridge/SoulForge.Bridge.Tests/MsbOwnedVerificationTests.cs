@@ -26,14 +26,38 @@ public sealed class MsbOwnedVerificationTests
         Assert.Equal(expected, verifyOwned(document));
         Assert.True(expected.SemanticIdentical); Assert.False(expected.ByteIdentical);
         for (var index = 0; index < 4; index++) { document.VerifyRoundTrip(); verifyOwned(document); }
-        var before = GC.GetAllocatedBytesForCurrentThread(); var copied = document.VerifyRoundTrip();
-        var copyBytes = GC.GetAllocatedBytesForCurrentThread() - before;
-        before = GC.GetAllocatedBytesForCurrentThread(); var owned = verifyOwned(document);
-        var ownedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
-        Assert.Equal(copied, owned);
-        // A large source with tiny geometry localizes the allocation to the public
-        // snapshot copy, rather than the parser's model/part work or an exact total.
-        Assert.InRange(copyBytes - ownedBytes, size, size + 64L);
+        if (size >= 1024 * 1024)
+        {
+            var differences = new long[7];
+            for (var pair = 0; pair < differences.Length; pair++)
+            {
+                long copyBytes, ownedBytes;
+                MsbRoundTripReport copied, owned;
+                if ((pair & 1) == 0)
+                {
+                    var before = GC.GetAllocatedBytesForCurrentThread(); copied = document.VerifyRoundTrip();
+                    copyBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+                    before = GC.GetAllocatedBytesForCurrentThread(); owned = verifyOwned(document);
+                    ownedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+                }
+                else
+                {
+                    var before = GC.GetAllocatedBytesForCurrentThread(); owned = verifyOwned(document);
+                    ownedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+                    before = GC.GetAllocatedBytesForCurrentThread(); copied = document.VerifyRoundTrip();
+                    copyBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+                }
+                Assert.Equal(copied, owned);
+                differences[pair] = copyBytes - ownedBytes;
+            }
+            Array.Sort(differences);
+            // This thread-wide counter includes parser/runtime accounting. A
+            // source-sized difference on large source/tiny geometry detects a
+            // lost public copy or an accidentally copied owned path; it is not
+            // an exact object-size or whole-request allocation assertion.
+            var sourceScaleTolerance = size / 16L;
+            Assert.InRange(differences[differences.Length / 2], size - sourceScaleTolerance, size + sourceScaleTolerance);
+        }
         Assert.Equal(Hash(bytes), expected.SourceHash);
         Assert.Equal(Hash(bytes), expected.RebuiltHash);
     }

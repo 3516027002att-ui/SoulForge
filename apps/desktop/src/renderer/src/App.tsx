@@ -38,8 +38,7 @@ import type {
 } from '../../main/ipc.js';
 import type {
   RendererIndexedFile,
-  RendererPatchHistoryEntry,
-  RendererResourcePreview
+  RendererPatchHistoryEntry
 } from '../../main/rendererDto.js';
 import type {
   AiPermissionMode,
@@ -53,7 +52,6 @@ import { ParamWorkbench } from './workbench/ParamWorkbench.js';
 import { GparamWorkbench, type GparamBankView } from './workbench/GparamWorkbench.js';
 import { selectEditor } from './workbench/selectEditor.js';
 import {
-  planResourceOpen,
   shouldLoadFmg,
   shouldLoadParam
 } from './workbench/documentLoadGates.js';
@@ -108,6 +106,7 @@ import { AmbientField } from './theme/AmbientField.js';
 import { ThemeSettings } from './theme/ThemeSettings.js';
 import { useSpectralTheme } from './theme/useSpectralTheme.js';
 import { shouldShowEditorWelcome } from './theme/editorWelcome.js';
+import { useResourceDocumentController } from './app/useResourceDocumentController.js';
 import { useWorkspaceController } from './app/useWorkspaceController.js';
 import { useTextDocumentController } from './app/useTextDocumentController.js';
 import { useMapDocumentController } from './app/useMapDocumentController.js';
@@ -142,12 +141,6 @@ import {
 import { MsgTableEditor } from './components/MsgTableEditor.js';
 import { PanelErrorBoundary } from './components/PanelErrorBoundary.js';
 import { StartWorkspacePanel } from './workbench/StartWorkspacePanel.js';
-import {
-  extractMsgRows,
-  nextMsgId,
-  serializeMsgRowsToTsv,
-  type EditableMsgRow
-} from './format/msgRows.js';
 import {
   filterFilesForMode,
   formatFilesCount,
@@ -291,12 +284,6 @@ export function App(): ReactElement {
   const rollbackInFlightRef = useRef<string | null>(null);
   const operationHistoryRefreshRef = useRef(Promise.resolve());
   const operationHistoryRequestRef = useRef(0);
-  const [selectedFile, setSelectedFile] = useState<RendererIndexedFile | null>(null);
-  const [preview, setPreview] = useState<RendererResourcePreview | null>(null);
-  const [editText, setEditText] = useState('');
-  const [lastSavedText, setLastSavedText] = useState('');
-  const [msgRows, setMsgRows] = useState<EditableMsgRow[]>([]);
-  const [saveDiagnostics, setSaveDiagnostics] = useState<string[]>([]);
   const [query, setQuery] = useState('');
   const [eventUri, setEventUri] = useState('');
   const [toolOutput, setToolOutput] = useState<ToolResult | null>(null);
@@ -371,15 +358,19 @@ export function App(): ReactElement {
     code: string;
     message: string;
   } | null>(null);
+  const { selectedFile, preview, editText, lastSavedText, msgRows, saveDiagnostics, openTabs, taeData, esdData, flverData,
+    canEditText, hasMsgTable, editDirty, selectFile, switchToOpenTab, closeTab, clearResourceSelection, clearResourcePreview,
+    resetWorkspaceDocuments, resetTaeDocument, resetEsdDocument, resetFlverDocument, setEditText, updateMsgRow, addMsgRow,
+    removeMsgRow, saveCurrentText, applyTextResourceAndReload, applyFlverMaterialSlotSetAndReload } =
+    useResourceDocumentController({ bridge, setStatus, pushToast, refreshOperationHistory, describeBridgeAbsence,
+      onSelectionActivated: activateResourceSelection });
+
   const { eventPendingTab, eventOpening, eventSourcePreview, resetEventDocument, submitEventDsl } =
     useEventDocumentController({
       bridge, selectedFile, setStatus, describeBridgeAbsence,
       onEventOpenFailure: failure => setLastOpenFailure(current =>
         failure ?? (current?.kind === 'event-open-failed' ? null : current))
     });
-  const [taeData, setTaeData] = useState<Record<string, unknown> | null>(null);
-  const [esdData, setEsdData] = useState<Record<string, unknown> | null>(null);
-  const [flverData, setFlverData] = useState<Record<string, unknown> | null>(null);
   const { fmgEntries, fmgSourceHash, fmgLive, resetTextDocument, applyFmgMutationAndReload, submitFmgEntry } =
     useTextDocumentController({ bridge, selectedFile, setStatus, pushToast });
   const { msbParts, msbModels, msbRegions, msbEvents, msbRoutes, msbSourceCounts, msbSourceHash, setMsbSourceHash, resetMapDocument } =
@@ -449,7 +440,6 @@ export function App(): ReactElement {
   const [workspaceSwitcherOpen, setWorkspaceSwitcherOpen] = useState(false);
   const [cmdkIndex, setCmdkIndex] = useState(0);
   const [toasts, setToasts] = useState<Array<{ id: number; text: string; kind: 'ok' | 'warn' }>>([]);
-  const [openTabs, setOpenTabs] = useState<RendererIndexedFile[]>([]);
   /** S31：文本目录缓存（事件实参 → 已打开文本表的匹配用，只读 metadata）。 */
   const [textCatalog, setTextCatalog] = useState<TextCatalogResponse | null>(null);
   /** S31：FMG 面板的外部 reveal 请求（表 + 条目 id）；面板处理后经回调清除。 */
@@ -492,9 +482,9 @@ export function App(): ReactElement {
       // Cross-domain opening failure shares the existing unified reset boundary.
       setLastOpenFailure(null);
     },
-    tae: () => setTaeData(null),
-    esd: () => setEsdData(null),
-    flver: () => setFlverData(null)
+    tae: resetTaeDocument,
+    esd: resetEsdDocument,
+    flver: resetFlverDocument
   }), []);
 
   // BND 不是顶层目录：选择真实 BND 文件后自动进入容器工作台，
@@ -503,8 +493,6 @@ export function App(): ReactElement {
     && (selectedFile.formatKind === 'bnd' || selectedFile.formatKind === 'dcx'
       || selectedFile.compoundExtension.includes('.bnd')
       || selectedFile.compoundExtension.includes('.dcx'));
-  const canEditText = preview?.previewKind === 'text' && preview.structuredPreview?.editable === true && !preview.truncated;
-  const hasMsgTable = canEditText && msgRows.length > 0;
 
   /**
    * 打开的是不是 param 容器（parambnd）。
@@ -675,20 +663,6 @@ export function App(): ReactElement {
     hasWorkspace: workspace !== null,
     openTabCount: openTabs.length
   });
-
-  /**
-   * 交给 ParamDefPanel 的字段定义。
-   *
-   * origin 来自主进程的 fieldDefsOrigin（见 paramFieldDefsOrigin 的注释）：
-   * 它在 matchParamMetadataPackage 的包校验和行宽核对通过后给出 first-party，
-   * 否则是 fixture（只读）。
-   *
-   * 渲染器不自行判定 origin，也不提供外部 schema 信任入口；那道检查守的是
-   * 「内置元数据字段偏移与真实 PARAM 是否对得上」：偏移错了就是往错误
-   * 字节位置写数值，存出来的 param 静默损坏。
-   */
-
-  const editDirty = editText !== lastSavedText;
   const changeStore = useMemo(() => new ChangeControlStore(), []);
   const changeState = useSyncExternalStore(changeStore.subscribe, changeStore.getState);
   const pendingChangeCount = changeState.items.filter((item) =>
@@ -1021,51 +995,6 @@ export function App(): ReactElement {
     await next;
   }
 
-  /**
-   * S38：FLVER 材质槽写回（write-flver material-slot-set，直接落 Patch Engine）。
-   * 哈希缺失时按 S29 规则透传空串，由 main 写时现算；成功后重读文档刷新视图。
-   */
-  async function applyFlverMaterialSlotSetAndReload(input: {
-    meshStableId: string;
-    materialStableId: string;
-  }): Promise<void> {
-    if (!selectedFile || !flverData) {
-      setStatus('尚未打开可写的 FLVER 文档。');
-      return;
-    }
-    if (!bridge) {
-      setStatus(describeBridgeAbsence('提交 FLVER 材质槽'));
-      return;
-    }
-    if (typeof bridge.applyFlverMutation !== 'function') {
-      setStatus('当前预加载未暴露 applyFlverMutation。');
-      return;
-    }
-    const flverSourceHash = typeof flverData === 'object'
-      ? (flverData as { sourceHash?: unknown }).sourceHash
-      : undefined;
-    setStatus(`正在提交 FLVER 材质槽 ${input.meshStableId}…`);
-    const result = await bridge.applyFlverMutation(
-      selectedFile.sourceUri,
-      typeof flverSourceHash === 'string' ? flverSourceHash : '',
-      { kind: 'material-slot-set', meshStableId: input.meshStableId, slotIndex: 0, materialStableId: input.materialStableId }
-    );
-    if (!result.ok) {
-      setStatus(result.diagnostics?.[0]?.message ?? 'FLVER 材质槽提交失败');
-      return;
-    }
-    const reload = await bridge.readFlverDocument(selectedFile.sourceUri) as {
-      ok?: boolean;
-      data?: Record<string, unknown>;
-    };
-    if (reload.ok && reload.data) {
-      setFlverData(reload.data);
-    }
-    await refreshOperationHistory();
-    setStatus('已保存。');
-    pushToast('已保存');
-  }
-
   /** Electron-only 操作在 browser-preview 表面的统一可见降级：不抛异常、不静默。 */
   function announceDesktopOnly(operation: string): void {
     const message = describeBridgeAbsence(operation);
@@ -1246,32 +1175,20 @@ export function App(): ReactElement {
     setRespondingApprovalCallId(null);
     setStatus('已开始新的 Agent 任务');
   }
-
-  function closeTab(file: RendererIndexedFile): void {
-    const next = openTabs.filter((tab) => tab.sourceUri !== file.sourceUri);
-    setOpenTabs(next);
-    if (selectedFile?.sourceUri === file.sourceUri) {
-      const fallback = next.length > 0 ? next[next.length - 1] : null;
-      if (fallback) {
-        void selectFile(fallback);
-      } else {
-        setSelectedFile(null);
-        setPreview(null);
-      }
-    }
+  function activateResourceSelection(): void {
+    setAiDraft(null);
+    setAgentIdleNotice(null);
+    resetAllDocuments(documentResetActions);
+    setBnd4Forced(false);
+    setCenterView('resource');
   }
+
   function installWorkspaceViews(result: RendererWorkspaceScanResult): void {
       // 有工作区后「开始」不是页，必须立即进入 resource 视图
       setCenterView('resource');
       setSidebarView('explorer');
-      setSelectedFile(null);
-      setPreview(null);
-      setOpenTabs([]);
+      resetWorkspaceDocuments();
       setAgentGoal(null);
-      setEditText('');
-      setLastSavedText('');
-      setMsgRows([]);
-      setSaveDiagnostics([]);
       setToolOutput(null);
       setAiDraft(null);
       setAgentIdleNotice(null);
@@ -1287,20 +1204,18 @@ export function App(): ReactElement {
         // 没有合法上次领域（缺省 / 非法 / 上次是 project）→ 默认进 param
         const preferred = pickPreferredParamContainer(result.files);
         setActiveDomain('param');
-        setPreview(null);
+        clearResourcePreview();
         setCenterView('resource');
         if (preferred) {
           void selectFile(preferred);
         } else {
-          setSelectedFile(null);
+          clearResourceSelection();
         }
       }
   }
 
   function resetWorkspaceResourceViews(): void {
-    setOpenTabs([]);
-    setSelectedFile(null);
-    setPreview(null);
+    resetWorkspaceDocuments();
     resetAllDocuments(documentResetActions);
   }
 
@@ -1343,7 +1258,7 @@ export function App(): ReactElement {
         const preferred = pickPreferredParamContainer(index);
         if (preferred) void selectFile(preferred);
       } else if (domain === 'text') {
-        setPreview(null);
+        clearResourcePreview();
       }
       return true;
     } catch {
@@ -1374,7 +1289,7 @@ export function App(): ReactElement {
     setBnd4Forced(false);
     if (domain === 'project') {
       // 无工作区：才落到开始页（打开工作区的落点）。
-      setSelectedFile(null);
+      clearResourceSelection();
       setCenterView('project');
       setSidebarView('explorer');
       setSidebarCollapsed(false);
@@ -1405,7 +1320,7 @@ export function App(): ReactElement {
       // 3-B：打开文本域时保留上次选中的 msgbnd（有就留，Categories 只列那一个
       // 容器的表）；没有选中文件就让 Categories 走空态，等用户在左侧资源浏览器
       // 点 item / menu。绝不自动 selectFile(item) 把工作台钉死在某个容器。
-      setPreview(null);
+      clearResourcePreview();
       setCenterView('resource');
       setStatus('文本：已打开文本工作台');
       return;
@@ -1436,8 +1351,8 @@ export function App(): ReactElement {
     // SHELL-09：语义领域不再过滤物理文件（§4.1）；领域切换清掉上一份选中，
     // 让领域占位/未来逻辑库成为该领域的默认视图（§18.13 Done：PARAM 入口
     // 直接打开逻辑库）。Files 领域独占物理浏览。
-    setSelectedFile(null);
-    setPreview(null);
+    clearResourceSelection();
+    clearResourcePreview();
     setCenterView('resource');
     if (domain === 'files') {
       setStatus('文件：物理浏览');
@@ -1462,82 +1377,6 @@ export function App(): ReactElement {
     setBnd4Forced(true);
     setCenterView('resource');
     setStatus(`以 BND4 容器打开：${selectedFile.relativePath}`);
-  }
-
-  async function selectFile(file: RendererIndexedFile): Promise<void> {
-    // SHELL-09：打开文件不再把领域切到「文件所属领域」（§4.1 禁止按文件分类
-    // 驱动领域导航）；领域保持当前选择，编辑器由 selectEditor 唯一分派。
-    setSelectedFile(file);
-    setOpenTabs((tabs) =>
-      tabs.some((tab) => tab.sourceUri === file.sourceUri) ? tabs : [...tabs, file]
-    );
-    setPreview(null);
-    setEditText('');
-    setLastSavedText('');
-    setMsgRows([]);
-    setSaveDiagnostics([]);
-    setAiDraft(null);
-    setAgentIdleNotice(null);
-    // 换选中文件同样要清空全部资源族：此前这里只清了 TAE/ESD/FLVER/TPF，
-    // FMG/PARAM/EMEVD/MSB 会残留到下一个文件的面板上。
-    resetAllDocuments(documentResetActions);
-    setBnd4Forced(false);
-    setCenterView('resource');
-    if (!bridge) {
-      setStatus(describeBridgeAbsence(`打开 ${file.relativePath}`));
-      return;
-    }
-    setStatus(`正在打开 ${file.relativePath}...`);
-    const nextPreview = await bridge.openResourcePreview(file.sourceUri);
-    setPreview(nextPreview);
-    const text = nextPreview?.text ?? '';
-    setEditText(text);
-    setLastSavedText(text);
-    setMsgRows(extractMsgRows(nextPreview));
-    const openPlan = planResourceOpen(file);
-    if (openPlan.ipcMethods.includes('readTaeDocument') && typeof bridge.readTaeDocument === 'function') {
-      try {
-        const result = await (bridge.readTaeDocument as (uri: string, opts?: { animationPage?: number; animationPageSize?: number }) => Promise<unknown>)(file.sourceUri) as { ok: boolean; data?: Record<string, unknown>; diagnostics?: Diagnostic[] };
-        setTaeData(result.ok && result.data ? result.data : {
-          format: 'TAE_READ_FAILED', diagnostics: result.diagnostics?.length ? result.diagnostics : [
-            { severity: 'error', code: 'TAE_READ_FAILED', message: '原生动作文档读取失败。' }
-          ]
-        });
-      } catch (error) {
-        setTaeData({ format: 'TAE_READ_FAILED', diagnostics: [{ severity: 'error', code: 'TAE_READ_FAILED',
-          message: error instanceof Error ? error.message : String(error) }] });
-      }
-    }
-    if (openPlan.ipcMethods.includes('readEsdDocument') && typeof bridge.readEsdDocument === 'function') {
-      const result = await bridge.readEsdDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
-      if (result.ok && result.data) setEsdData(result.data);
-    }
-    if (openPlan.ipcMethods.includes('readFlverDocument') && typeof bridge.readFlverDocument === 'function') {
-      const result = await bridge.readFlverDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
-      if (result.ok && result.data) setFlverData(result.data);
-    }
-    setStatus(nextPreview ? `已打开 ${file.relativePath}` : '无法预览该资源');
-  }
-
-  /**
-   * S31：切到 openTabs 里已打开的资源（文本 / PARAM 跳转目标）。
-   *
-   * 与 selectFile 的差异：不追加 openTabs（目标必须已在其中）、不调
-   * openResourcePreview（那是「打开文档」的读链，跳转不应新开磁盘文件）。
-   * 选中文件切换后，param/fmg 各自的 load effect 会按 selectedFile 重读。
-   */
-  function switchToOpenTab(file: RendererIndexedFile): void {
-    setSelectedFile(file);
-    setPreview(null);
-    setEditText('');
-    setLastSavedText('');
-    setMsgRows([]);
-    setSaveDiagnostics([]);
-    setAiDraft(null);
-    setAgentIdleNotice(null);
-    resetAllDocuments(documentResetActions);
-    setBnd4Forced(false);
-    setCenterView('resource');
   }
 
   /**
@@ -1597,34 +1436,6 @@ export function App(): ReactElement {
     return result;
   }
 
-  /**
-   * 文本编辑「保存」= 直接写盘（S29：与 FMG/容器 PARAM 同一把尺子，不再进审查队列）。
-   * 底层仍走 saveTextResource → Patch Engine（自动备份、可回滚）。
-   */
-  async function saveCurrentText(): Promise<void> {
-    if (!selectedFile || !preview) return;
-    if (!bridge) {
-      setStatus(describeBridgeAbsence(`保存 ${selectedFile.relativePath}`));
-      return;
-    }
-    const result = await bridge.saveTextResource(selectedFile.sourceUri, editText);
-    if (!result.ok) {
-      const message = result.diagnostics?.[0]?.message ?? '文本写入失败。';
-      setStatus(`保存失败：${message}`);
-      pushToast(`保存失败：${message}`, 'warn');
-      return;
-    }
-    const refreshed = await bridge.openResourcePreview(selectedFile.sourceUri);
-    setPreview(refreshed);
-    const text = refreshed?.text ?? editText;
-    setEditText(text);
-    setLastSavedText(text);
-    setMsgRows(extractMsgRows(refreshed));
-    await refreshOperationHistory();
-    setStatus('已保存。');
-    pushToast('已保存');
-  }
-
   /** 变更队列写入执行器：按 kind 调用对应 IPC，保留 hash 前置条件与重读。 */
   async function applyStagedChange(
     change: CandidateChange
@@ -1639,15 +1450,7 @@ export function App(): ReactElement {
     }
     switch (change.kind) {
       case 'text': {
-        const result = await bridge.saveTextResource(change.sourceUri, change.newValue);
-        if (result.ok) {
-          const refreshed = await bridge.openResourcePreview(change.sourceUri);
-          setPreview(refreshed);
-          const text = refreshed?.text ?? change.newValue;
-          setEditText(text);
-          setLastSavedText(text);
-          setMsgRows(extractMsgRows(refreshed));
-        }
+        const result = await applyTextResourceAndReload(change.sourceUri, change.newValue);
         return { ok: result.ok, diagnostics: mapDiag(result.diagnostics) };
       }
       case 'fmg': {
@@ -1794,24 +1597,6 @@ export function App(): ReactElement {
       rollbackInFlightRef.current = null;
       setRollbackInFlight(null);
     }
-  }
-
-  function updateMsgRow(index: number, patch: Partial<EditableMsgRow>): void {
-    const nextRows = msgRows.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row);
-    setMsgRows(nextRows);
-    setEditText(serializeMsgRowsToTsv(nextRows));
-  }
-
-  function addMsgRow(): void {
-    const nextRows = [...msgRows, { textId: nextMsgId(msgRows), text: '', ...(msgRows[0]?.category ? { category: msgRows[0].category } : {}) }];
-    setMsgRows(nextRows);
-    setEditText(serializeMsgRowsToTsv(nextRows));
-  }
-
-  function removeMsgRow(index: number): void {
-    const nextRows = msgRows.filter((_row, rowIndex) => rowIndex !== index);
-    setMsgRows(nextRows);
-    setEditText(serializeMsgRowsToTsv(nextRows));
   }
 
   /* ── AI agent 任务：运行 / 取消 / 会话历史 ───────────────────────────────

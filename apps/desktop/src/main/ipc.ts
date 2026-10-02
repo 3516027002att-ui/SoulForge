@@ -50,11 +50,8 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { TrustedIpcHandle } from './ipc/registration.js';
 import { registerWindowThemeIpcHandlers } from './ipc/windowTheme.js';
-import {
-  appendPostCommitFailureDiagnostic,
-  commitWithKnowledgeRefresh,
-  type KnowledgeRefreshOwner
-} from './knowledgeRefreshOwnership.js';
+import type { KnowledgeRefreshOwner } from './knowledgeRefreshOwnership.js';
+import { createSessionCommitPort } from './services/sessionCommitService.js';
 import { registerAgentIpcHandlers, hasActiveAgentRuns, isAgentSessionActive, scheduleInternalRagEmbedding } from './ipc/agent.js';
 import { registerResourceIpcHandlers } from './ipc/resource.js';
 import { resolveWorkspaceStoragePaths, type WorkspaceStoragePaths } from './workspaceStorage.js';
@@ -130,7 +127,6 @@ import {
   rollbackOperation,
   roundTripContainer,
   runBridge,
-  saveRawReplace,
   saveTextResource,
   scanWorkspace,
   buildRagCorpus,
@@ -246,6 +242,7 @@ import {
   type RendererIndexedFile,
   type RendererPatchHistoryEntry,
   type RendererResourcePreview,
+  type RendererResourceLabelSource,
   type RendererSaveResult
 } from './rendererDto.js';
 import { OperationLogUtilityClient, type WorkspaceBoundUtilityStore } from './operationLogUtilityClient.js';
@@ -1633,49 +1630,12 @@ function sessionCommitPort(
   // explicitly take ownership of the one post-commit knowledge refresh.
   options: { knowledgeRefreshOwner?: KnowledgeRefreshOwner } = {}
 ): RawReplaceCommitPort {
-  return {
-    commit: async (input) => {
-      // 工作台按钮就是确认。S29 拆掉了弹窗，但 file_replace 对 parambnd 等
-      // 打包格式仍要一张 receipt；不补的话新建/删行会停在
-      // EDIT_CONFIRMATION_REQUIRED（Files Mode raw/high-risk…）。
-      const confirmation = input.confirmation ?? createConfirmationReceipt({
-        subjects: [
-          'MAIN_WORKBENCH_COMMIT',
-          input.file.sourceUri,
-          'ALL_RISKS',
-          ...(getActiveWorkspaceSessionIdState() ? [`WORKSPACE_SESSION:${getActiveWorkspaceSessionIdState()}`] : []),
-          `TITLE:${input.title}`
-        ],
-        riskLevel: 'high',
-        sourceUri: input.file.sourceUri,
-        note: '工作台提交视为已确认'
-      });
-      // All native writers that use applyNativeMutation share this commit port.
-      // Refresh only after Patch Engine reports a committed replacement; a
-      // staged/failed write must never invalidate live evidence speculatively.
-      return commitWithKnowledgeRefresh(
-        () => saveRawReplace({
-          file: input.file,
-          expectedHash: input.expectedHash,
-          newContentBase64: input.newContentBase64,
-          title: input.title,
-          confirmation,
-          session,
-          operationLog,
-          backupBaseDir: storage.backupBaseDir,
-          recoveryDir: storage.recoveryDir
-        }),
-        options.knowledgeRefreshOwner ?? 'port',
-        (result) => refreshActiveIndexAfterNativeWrite([input.file.sourceUri], result),
-        (result, error) => appendPostCommitFailureDiagnostic(
-          result,
-          'POSTCOMMIT_REFRESH_FAILED',
-          input.file.sourceUri,
-          error
-        )
-      );
-    }
-  };
+  return createSessionCommitPort({
+    getActiveSession: getWorkspaceSession,
+    getActiveWorkspaceSessionId: getActiveWorkspaceSessionIdState,
+    getActiveWorkspaceSessionGeneration: getActiveWorkspaceSessionGenerationState,
+    refreshActiveIndexAfterNativeWrite
+  }, session, operationLog, storage, options);
 }
 
 /**
@@ -1683,7 +1643,7 @@ function sessionCommitPort(
  */
 function toSaveResultFromOutcome(
   outcome: NativeMutationOutcome,
-  files: IndexedFile[]
+  files: readonly RendererResourceLabelSource[]
 ): RendererSaveResult {
   if (outcome.status === 'cancelled') return cancelledWrite(outcome.sourceUri);
   if (outcome.status === 'failed') {
@@ -1916,6 +1876,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     getActiveIndex: getWorkspaceActiveIndex,
     getActiveSession: getWorkspaceSession,
     getActiveWorkspaceSessionId: getActiveWorkspaceSessionIdState,
+    getActiveWorkspaceSessionGeneration: getActiveWorkspaceSessionGenerationState,
     durableStoragePaths,
     ensureActiveOperationLog,
     verifiedReadRoots,

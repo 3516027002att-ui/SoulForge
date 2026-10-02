@@ -125,6 +125,7 @@ async function readParamRow(page, sourceUri) {
   }, sourceUri);
 }
 
+/** @param {import('playwright').ElectronApplication} app */
 async function paramObservationCheckpoint(app) {
   return app.evaluate(() => {
     const snapshot = Reflect.get(globalThis, '__editorSaveObservation');
@@ -133,8 +134,9 @@ async function paramObservationCheckpoint(app) {
   });
 }
 
+/** @param {import('playwright').ElectronApplication} app */
 async function paramIpcCompletion(app, after, method) {
-  return app.evaluate(({ after, method }) => {
+  return app.evaluate((_electron, { after, method }) => {
     const snapshot = Reflect.get(globalThis, '__editorSaveObservation');
     if (typeof snapshot !== 'function') throw new Error('EDITOR_SAVE_OBSERVER_UNAVAILABLE');
     const observation = snapshot();
@@ -150,6 +152,7 @@ async function paramIpcCompletion(app, after, method) {
   }, { after, method });
 }
 
+/** @param {import('playwright').ElectronApplication} app */
 async function waitForParamReload(app, beforeSave) {
   // The current save must finish before its UI-owned index -> payload reads.
   // No native API is called here; a stale toast or draft value cannot pass.

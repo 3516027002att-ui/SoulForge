@@ -504,3 +504,86 @@ zero. Input bytes remained unchanged. Exact pins, every measured row and the
 separate daemon capture are in
 `.local-validation/msb-verify/actual-receipt.json` (SHA256 `624dffff...`).
 The two full leaf hashes remain the largest measured verification CPU component.
+
+## Actual Node client return boundary
+
+A subsequent owned capture called the unmodified compiled Core
+`BridgeDaemonClient` with the official .NET entry and that same `12449b4b...`
+producer. It retained the 16 MiB / one-active-request negotiation and same
+physical/decoded MSB hashes. The compiled bodies of four relevant Core modules
+matched their current source emitted by TypeScript 5.9.3; 72 input/runtime/source
+pins matched before and after. The 65 canonical code/compiler inputs were also
+copied into owned evidence storage before later rebuilds could replace them.
+
+Three warmups and twenty measured requests had median client request-to-payload
+return 90.162 ms and same-request native total 24.815 ms. The final decoded stdout
+chunk callback-to-parsed-frame boundary was 10.677 ms, and parsed frame-to-payload
+return was 0.146 ms. The chunk callback is Node event delivery rather than OS read
+readiness; its interval includes remaining line handling and `JSON.parse`, so it
+is not a pure parse measurement. Native completion-to-parsed-frame epoch gap had
+median 64.495 ms with the existing 5 ms tolerance. It includes native output
+serialization/queueing, pipe transfer and Node frame handling. Native execution
+overlaps the client request span; these values are not a critical-path sum.
+
+The bounded observer forwarded the original private method return/promise and
+throw behavior, retained metadata rather than result arrays, and restored the
+methods after disposal. All 105 actual frames and 23 rows carry request/session
+identity. The capture verified complete result values, source identity, queued
+cancellation with an actual cancelled terminal receipt and no result replay,
+same-source reopen, zero active/queued health and close, and native exit zero.
+Natural-GC Node heap/RSS and native RSS observations are snapshots rather than
+allocation totals, peaks or retained-memory proof. Evidence is under
+`.local-validation/msb-node-client/receipt.json` (SHA256 `dec2f327...`), with report
+SHA256 `e12068f9...` and owned input-copy manifest `61260fd7...`.
+
+This records the real Core client/native return path. It does not execute
+`msbBridgeRead` projection, the MAP application service, Electron IPC, renderer
+preparation or GPU first frame. This observation run is not a paired whole-request
+comparison with the copy candidate.
+
+The MSB helper now accepts optional explicit session and timing options. Absent
+session options retain the former scope; an explicit session is forwarded exactly.
+Default, false and non-boolean timing inputs add no timing options or diagnostic
+details. Only an explicit true forwards the existing native/client timing option and
+retains details for the two known timing codes. Other details stay omitted and the
+full document projection is unchanged. Six source-bound recording-port regressions
+went from 3/6 RED to 6/6 GREEN, with strict actual-source type checking and independent
+peer review. Those regressions are not native performance measurements.
+
+A separate two-read integration compiled that actual helper source and called the
+real compiled Core `runBridge`, which normally discovered an independently copied
+official apphost at the product's ordinary Release publish path. Apphost SHA256 is
+`b4c23318...`; receipt SHA256 is `6b2430c0...` and source remains `ef466a63...` / 307
+inputs. All six executable/receipt/native-library/runtime-notice files were copied
+and hash-checked; the standard freshness assertion also passed in the owned tree.
+The default 16 MiB / two-concurrent-request configuration stayed unchanged. Default
+and opt-in DTO data were equal, default diagnostics remained silent, and the opt-in
+request's actual UUID/session and both source hashes carried native and transport
+details through the helper. Both native pools were disposed. This verifies the real
+helper transport/projection contract, not latency or Electron/main execution;
+`.local-validation/msb-node-client/helper-real-read.json` has SHA256 `cacd5b48...`.
+The main service adapter and its session capture before the first await remain a
+separate source-owner integration before an application-service timeline capture.
+
+### Allocation regression contract correction
+
+The hosted Linux native suite exposed an over-precise assertion in the new copy
+control: its 2 MiB source delta was 2,100,592 bytes, outside `sourceSize + 64`,
+while all verification reports and the other 80 tests passed. An owned single-thread
+probe on the unchanged `12449b4b...` DLL and .NET 10.0.0 reproduced that exact delta.
+Its 360 natural pairs had 28 failures of the old bound, with source-relative extras
+from -5,328 to +6,064 bytes. Subsequent GC-instrumented and original-binary controls
+reported +24 throughout. Those controls do not uniquely attribute the transient
+variation to GC or JIT. The thread-wide allocation counter is not an object-local
+copy measurement; the product source and outputs did not change.
+
+Small/85,000-byte/2 MiB fixtures still compare full reports and hashes. The allocation
+contract now uses seven alternating pairs on the large-source/tiny-geometry case,
+with a median delta and a source-relative 1/16 tolerance. It detects a missing or
+additional whole source copy without asserting an exact runtime allocation total.
+Two owned source mutants proved sensitivity: deleting the public copy and adding
+an owned-path copy each failed the allocation assertion with a zero delta while
+the other five report/mutation/error checks passed. The unchanged real producer
+passed all 81 tests with zero skips. No product, runtime flags or budgets changed;
+trace, mutant source/DLL identities and tests are retained under
+`.local-validation/msb-allocation-contract/`.

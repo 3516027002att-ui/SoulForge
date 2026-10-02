@@ -19,7 +19,6 @@ import {
 } from '@soulforge/core';
 import {
   isCharacterPreviewBundle,
-  MASKED_PATH_PLACEHOLDER,
   type CharacterPreviewBundle,
   type Diagnostic,
   type FlverPreviewModel,
@@ -27,8 +26,9 @@ import {
   type IndexedFile,
   type MapEditTransaction
 } from '@soulforge/shared';
-import { sanitizeDiagnostics, sanitizeRendererValue, type RendererSaveResult } from '../rendererDto.js';
-import { appendPostCommitFailureDiagnostic, runCallerOwnedPostCommit } from '../knowledgeRefreshOwnership.js';
+import { sanitizeRendererValue, type RendererSaveResult } from '../rendererDto.js';
+import { runCallerOwnedPostCommit } from '../knowledgeRefreshOwnership.js';
+import { appendRendererPostCommitFailureDiagnostic } from '../rendererPostCommitDiagnostic.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
 import {
   MAP_NATIVE_TIMING_CODE,
@@ -95,22 +95,9 @@ const refreshCommittedMapWrite = (sourceUri: string, response: RendererSaveResul
   runCallerOwnedPostCommit(response, {
     prepare: () => undefined,
     refresh: (result) => deps.refreshActiveIndexAfterNativeWrite([sourceUri], result),
-    onRefreshError: (result, error) => {
-      const warningIndex = result.diagnostics.length;
-      appendPostCommitFailureDiagnostic(result, 'POSTCOMMIT_REFRESH_FAILED', sourceUri, error);
-      const warning = sanitizeDiagnostics([result.diagnostics[warningIndex]!])[0]!;
-      // This newly created error detail contains physical I/O context, while
-      // the shared renderer masker intentionally preserves logical slash URIs.
-      // Mask plain POSIX paths here without changing any existing result DTO.
-      const details = warning.details as Record<string, unknown>;
-      for (const [key, value] of Object.entries(details)) {
-        if (typeof value === 'string') {
-          details[key] = value.replace(/(^|[\s'"(（:：])\/(?!\/)[^\s'"()（）<>|，。、；：！？]+/g,
-            (_span, prefix: string) => `${prefix}${MASKED_PATH_PLACEHOLDER}`);
-        }
-      }
-      result.diagnostics[warningIndex] = warning;
-    }
+    onRefreshError: (result, error) => appendRendererPostCommitFailureDiagnostic(
+      result, 'POSTCOMMIT_REFRESH_FAILED', sourceUri, error
+    )
   });
 const { characterTexturePackagePaths, assembleC0000CompatibilityPreview } = deps;
 const { characterBundleToMapChunks, estimateMapStaticWireBytes, splitCharacterMapChunks, evictMapCharacterPageSessions,
@@ -369,9 +356,25 @@ async function getVerifiedReadRoots(
   return { allowedRoots: [...result.allowedRoots], diagnostics: [...result.diagnostics] };
 }
 const readMsbDocument = async (sourceUri: string) => {
-    const file = getIndexedFileIndex(deps.indexedFiles, deps.indexedFilesRevision).bySourceUri.get(sourceUri)
+    const readSession = deps.activeSession;
+    const readGeneration = deps.activeWorkspaceSessionGeneration;
+    const readIndex = deps.activeIndex;
+    const oodleRuntimeRoot = readSession?.layers.baseRoot;
+    const isCurrentRead = () => deps.activeSession === readSession
+      && deps.activeWorkspaceSessionGeneration === readGeneration;
+    const supersededRead = () => ({
+      ok: false,
+      cancelled: true,
+      diagnostics: [{
+        severity: 'info' as const,
+        code: 'WORKSPACE_READ_SUPERSEDED',
+        message: '工作区已更换，旧读取结果已丢弃。',
+        sourceUri
+      }]
+    });
+    const indexedFile = getIndexedFileIndex(deps.indexedFiles, deps.indexedFilesRevision).bySourceUri.get(sourceUri)
       ?? deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
-    if (!file) {
+    if (!indexedFile) {
       return {
         ok: false,
         diagnostics: [{
@@ -382,7 +385,18 @@ const readMsbDocument = async (sourceUri: string) => {
         }]
       };
     }
-    const roots = await getVerifiedReadRoots(deps, file.absolutePath);
+    // Index records can be reused during refresh. Keep this read's physical
+    // source and logical labels stable without copying parsed index contents.
+    const file = { absolutePath: indexedFile.absolutePath, relativePath: indexedFile.relativePath, game: indexedFile.game };
+    const roots = await getVerifiedReadRoots({
+      activeSession: readSession,
+      activeWorkspaceSessionId: deps.activeWorkspaceSessionId,
+      activeWorkspaceSessionGeneration: readGeneration,
+      indexedFilesRevision: deps.indexedFilesRevision,
+      indexedFilesIdentityDigest: deps.indexedFilesIdentityDigest,
+      verifiedReadRoots: (session, fallback) => deps.verifiedReadRoots(session, fallback)
+    }, file.absolutePath);
+    if (!isCurrentRead()) return supersededRead();
     if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
     const result = await readMsbDocumentViaBridge({
       sourcePath: file.absolutePath,
@@ -392,16 +406,17 @@ const readMsbDocument = async (sourceUri: string) => {
       // （缺口4：显示上限渗进索引=假装完整）。
       // P5 裁定：真实游戏 .msb.dcx 是 KRAK 压缩，缺 Oodle 运行时读不出实体表
       // （表现为 3D 代理场景 0 节点 / 0 实体）。
-      ...(deps.activeSession?.layers.baseRoot
-        ? { oodleRuntimeRoot: deps.activeSession.layers.baseRoot }
+      ...(oodleRuntimeRoot
+        ? { oodleRuntimeRoot }
         : {})
     });
+    if (!isCurrentRead()) return supersededRead();
     // 问题 6-B：生产 analyze 的 export-map 未实现，桌面打开 MSB 时用
     // read-msb-document 的 parts[] 喂 MapExport（最小 hunk，不实现 C# export-map）。
-    if (result.ok && result.data && deps.activeIndex) {
+    if (result.ok && result.data && readIndex) {
       const mapId = basename(file.relativePath).replace(/\.msb(\.dcx)?$/i, '');
       if (mapId) {
-        ingestBridgeResult(deps.activeIndex, {
+        ingestBridgeResult(readIndex, {
           sourceUri,
           sourcePath: file.relativePath,
           game: file.game,

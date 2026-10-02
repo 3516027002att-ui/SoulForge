@@ -32,6 +32,9 @@ const SOURCE_TEXT_KEYS = new Set([
   'text'
 ]);
 
+/** Save receipts only need primitive physical identity and logical labels. */
+export type RendererResourceLabelSource = Readonly<Pick<IndexedFile, 'absolutePath' | 'sourcePath' | 'sourceUri'>>;
+
 const SENSITIVE_PATH_KEYS = new Set([
   'absolutePath',
   'sourcePath',
@@ -89,7 +92,7 @@ export function toRendererResourcePreview(preview: ResourcePreview): RendererRes
 
 export function toRendererSaveResult(
   result: SaveTextResourceResult,
-  files: readonly IndexedFile[]
+  files: readonly RendererResourceLabelSource[]
 ): RendererSaveResult {
   return {
     ok: result.ok,
@@ -200,7 +203,7 @@ function sanitizeRendererString(value: string): string {
   return maskPathFragments(value);
 }
 
-function pathToResourceLabel(path: string, files: readonly IndexedFile[]): string {
+function pathToResourceLabel(path: string, files: readonly RendererResourceLabelSource[]): string {
   const match = files.find((file) => file.absolutePath === path || file.sourcePath === path);
   return match?.sourceUri ?? '[本机路径已隐藏]';
 }

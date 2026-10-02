@@ -12,7 +12,8 @@ const retiredScripts = [
   'test:handoff-integrity', 'test:handoff-integrity:fixtures', 'test:handoff-projection',
   'test:release-scope', 'test:release-scope-proposal', 'test:release-scope-fixtures',
   'test:v06-deferral-index', 'test:v06-deferral-index-fixtures', 'test:required-validation',
-  'test:orphan-smoke-gate', 'test:mission1-acceptance'
+  'test:orphan-smoke-gate', 'test:mission1-acceptance',
+  'test:audit-sf-29-unit', 'test:audit-sf-29-native'
 ];
 const retiredFiles = [
   'scripts/gov.mjs', 'scripts/gov/lock.mjs', 'scripts/gov/seal.mjs',
@@ -27,7 +28,8 @@ const retiredFiles = [
   'scripts/verify-v06-deferral-index-fixtures.mjs', 'scripts/verify-required-validation-fixtures.mjs',
   'scripts/verify-orphan-smoke-gate.mjs', 'scripts/governance', 'docs/governance',
   'scripts/verify-mission1-acceptance.mjs', 'scripts/verify-mission1-a1.mjs',
-  'scripts/hourly-mission1-check.mjs', 'testdata/mission1/runner-negative-fixtures.v1.json'
+  'scripts/hourly-mission1-check.mjs', 'testdata/mission1/runner-negative-fixtures.v1.json',
+  'packages/core/src/testing/runAuditSf29Smoke.ts', 'scripts/audit-execution/check-verify-summary.mjs'
 ];
 
 test('retired governance operations cannot run through aliases or convention discovery', () => {
@@ -54,6 +56,15 @@ test('retired governance operations cannot run through aliases or convention dis
     'test:bridge-write-boundary', 'test:core-journal-wiring', 'test:writer-failure-matrix']) {
     assert.ok(registry.get(name)?.steps.length > 0, name);
   }
+});
+
+test('actual product entry remains runnable without a fixed historical task map', () => {
+  const desktop = JSON.parse(readFileSync('apps/desktop/package.json', 'utf8'));
+  assert.match(desktop.scripts['test:renderer-playwright'], /playwright test/);
+  assert.equal(existsSync('apps/desktop/e2e/playwright/playwright.config.mjs'), true);
+  const root = process.cwd(), registry = discoverChecks(root, loadWorkspaces(root));
+  assert.ok(registry.get('workspace:@soulforge/core:test:audit-sf-01-unit')?.steps.some(step => step.kind === 'test'));
+  assert.ok(registry.get('workspace:@soulforge/core:test:audit-sf-01-native')?.steps.some(step => step.kind === 'test'));
 });
 
 test('CI uses the independent check runner and stable engineering entry points', () => {

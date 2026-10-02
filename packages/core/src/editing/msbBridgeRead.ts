@@ -7,6 +7,7 @@
  */
 
 import { runBridge } from '../bridge/runBridge.js';
+import { BRIDGE_TRANSPORT_TIMING_CODE } from '../bridge/bridgeTransportTiming.js';
 
 export interface MsbBridgePart {
   name: string;
@@ -93,12 +94,15 @@ export async function readMsbDocumentViaBridge(input: {
   maxRegions?: number;
   maxModels?: number;
   maxEvents?: number;
+  /** Existing bounded native/client timing schemas; silent unless explicitly true. */
+  diagnosticTimings?: boolean;
+  workspaceSessionId?: string;
   /** P5 裁定：真实游戏 .msb.dcx 是 KRAK 压缩，缺 Oodle 运行时解不出实体表。 */
   oodleRuntimeRoot?: string;
 }): Promise<{
   ok: boolean;
   data?: MsbBridgeDocument;
-  diagnostics: Array<{ severity: string; code: string; message: string }>;
+  diagnostics: Array<{ severity: string; code: string; message: string; details?: unknown }>;
 }> {
   const result = await runBridge<{
     sourceHash?: string;
@@ -121,16 +125,23 @@ export async function readMsbDocumentViaBridge(input: {
     filePath: input.sourcePath,
     allowedRoots: input.allowedRoots,
     timeoutMs: input.timeoutMs ?? 120_000,
+    ...(input.workspaceSessionId !== undefined ? { workspaceSessionId: input.workspaceSessionId } : {}),
+    ...(input.diagnosticTimings === true ? { commandOptions: { diagnosticTimings: true } } : {}),
     ...(input.oodleRuntimeRoot ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {})
   });
+  const diagnostics = result.diagnostics.map((d) => ({
+    severity: d.severity,
+    code: d.code,
+    message: d.message,
+    ...(input.diagnosticTimings === true
+      && (d.code === 'MSB_NATIVE_TIMINGS' || d.code === BRIDGE_TRANSPORT_TIMING_CODE)
+      && d.details !== undefined
+      ? { details: d.details } : {})
+  }));
   if (result.parseStatus === 'failed' || !result.data?.sourceHash) {
     return {
       ok: false,
-      diagnostics: result.diagnostics.map((d) => ({
-        severity: d.severity,
-        code: d.code,
-        message: d.message
-      }))
+      diagnostics
     };
   }
   const bounded = (count: number | undefined, defaultValue: number): number | undefined =>
@@ -212,10 +223,6 @@ export async function readMsbDocumentViaBridge(input: {
       ...(result.data.readerSchemaRevision !== undefined ? { readerSchemaRevision: Number(result.data.readerSchemaRevision) } : {}),
       ...(result.data.entityEdit ? { entityEdit: result.data.entityEdit } : {})
     },
-    diagnostics: result.diagnostics.map((d) => ({
-      severity: d.severity,
-      code: d.code,
-      message: d.message
-    }))
+    diagnostics
   };
 }
