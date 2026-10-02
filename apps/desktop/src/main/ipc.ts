@@ -1,4 +1,5 @@
 import { resolveCharacterFlverResource } from './services/characterPreviewService.js';
+import { bumpWorkspacePathSourceGenerationForUris } from './services/workspaceService.js';
 import type {
   AnalyzeWorkspaceSummary,
   RendererWorkspaceSession,
@@ -150,8 +151,6 @@ import {
   type ScriptContainerEntryEvidence,
   type ScriptEntryClassification,
   ingestBridgeResult,
-  saveFingerprintStore,
-  bumpPathSourceGeneration,
   mapExportFromMsbDocument
 } from '@soulforge/core';
 import {
@@ -249,7 +248,6 @@ import {
   getWorkspaceIndexedFilesRevisionState,
   getWorkspaceRuntimeIdentityState,
   replaceWorkspaceIndexedFileState,
-  getWorkspaceFingerprintStore,
   applyWorkspaceIndexSnapshot,
   applyWorkspaceRag,
   setWorkspaceForegroundActive,
@@ -282,24 +280,9 @@ async function withForegroundPriority<T>(fn: () => Promise<T>): Promise<T> {
   setWorkspaceForegroundActive(true);
   try { return await fn(); } finally { setWorkspaceForegroundActive(false); }
 }
-function bumpPathSourceGenerationForUris(uris: readonly string[]): void {
-  const fingerprintStore = getWorkspaceFingerprintStore();
-  if (!fingerprintStore) return;
-  const indexedFiles = getWorkspaceIndexedFiles();
-  for (const uri of uris) {
-    const rel = uri.startsWith('file://') ? decodeURI(uri.slice('file://'.length)) : uri;
-    const file = indexedFiles.find(f => f.sourceUri === uri || f.relativePath === uri || f.absolutePath === uri);
-    const rp = file?.relativePath ?? rel.replaceAll('\\','/').replace(/^\/+/,'');
-    if (!rp) continue;
-    bumpPathSourceGeneration(fingerprintStore, rp);
-    fingerprintStore.hashes.delete(rp);
-  }
-  const session = getWorkspaceSession();
-  if (session) {
-    const root = durableStoragePaths(session.meta.workspaceId).root;
-    void saveFingerprintStore({ storageRoot: root, state: fingerprintStore }).catch(()=>{});
-  }
-}
+const bumpPathSourceGenerationForUris = (uris: readonly string[]): void => {
+  bumpWorkspacePathSourceGenerationForUris({ durableStoragePaths }, uris);
+};
 /** Provider configs may omit contextWindowTokens; keep compaction fail-safe by default. */
 const DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS = 500_000;
 const AGENT_CONTEXT_COMPACTION_RATIO = 0.8;

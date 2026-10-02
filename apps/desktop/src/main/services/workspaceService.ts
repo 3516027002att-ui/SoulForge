@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import { analyzeWorkspace, canReusePersistedHash, createDefaultToolRegistry, disposeBridgeDaemonPool, fileIdentityFromStat, getPathSourceGeneration, isNativeSemanticBundleCurrent, loadFingerprintStore, loadSymbolBundleIntoIndex, makeFileFingerprint, makeWorkspacePersistentIdentityHash, normalizeCtimeNs, normalizeMtimeNs, openWorkspaceSession, rebaseSymbolBundleToFileRevision, saveFingerprintStore, scanWorkspace, workspacePhysicalRootHash, WorkspaceIndex, type NativeSemanticRefreshOptions, type NativeSemanticRefreshResult, type WorkspaceSession, type FingerprintStoreState, type RagCorpus, type SemanticCacheProvider, } from '@soulforge/core';
+import { analyzeWorkspace, bumpPathSourceGeneration, canReusePersistedHash, createDefaultToolRegistry, disposeBridgeDaemonPool, fileIdentityFromStat, getPathSourceGeneration, isNativeSemanticBundleCurrent, loadFingerprintStore, loadSymbolBundleIntoIndex, makeFileFingerprint, makeWorkspacePersistentIdentityHash, normalizeCtimeNs, normalizeMtimeNs, openWorkspaceSession, rebaseSymbolBundleToFileRevision, saveFingerprintStore, scanWorkspace, workspacePhysicalRootHash, WorkspaceIndex, type NativeSemanticRefreshOptions, type NativeSemanticRefreshResult, type WorkspaceSession, type FingerprintStoreState, type RagCorpus, type SemanticCacheProvider, } from '@soulforge/core';
 import type { WorkspaceStoragePaths } from '../workspaceStorage.js';
 import type { Diagnostic, IndexedFile, ResourceKind, SymbolBundle } from '@soulforge/shared';
 import { sanitizeDiagnostics, sanitizeRendererValue, toRendererIndexedFile } from '../rendererDto.js';
@@ -1368,4 +1368,27 @@ export function applyWorkspaceRag(corpus: RagCorpus): void {
 }
 export function setWorkspaceForegroundActive(value: boolean): void {
     foregroundActive = value;
+}
+
+/** The host selects durable storage; Workspace owns source generation/hash projection. */
+export interface WorkspaceFingerprintPersistencePort {
+    durableStoragePaths(workspaceId: string): Pick<WorkspaceStoragePaths, 'root'>;
+}
+export function bumpWorkspacePathSourceGenerationForUris(ports: WorkspaceFingerprintPersistencePort, uris: readonly string[]): void {
+  const fingerprintStore = getWorkspaceFingerprintStore();
+  if (!fingerprintStore) return;
+  const indexedFiles = getWorkspaceIndexedFiles();
+  for (const uri of uris) {
+    const rel = uri.startsWith('file://') ? decodeURI(uri.slice('file://'.length)) : uri;
+    const file = indexedFiles.find(f => f.sourceUri === uri || f.relativePath === uri || f.absolutePath === uri);
+    const rp = file?.relativePath ?? rel.replaceAll('\\','/').replace(/^\/+/,'');
+    if (!rp) continue;
+    bumpPathSourceGeneration(fingerprintStore, rp);
+    fingerprintStore.hashes.delete(rp);
+  }
+  const session = getWorkspaceSession();
+  if (session) {
+    const root = ports.durableStoragePaths(session.meta.workspaceId).root;
+    void saveFingerprintStore({ storageRoot: root, state: fingerprintStore }).catch(()=>{});
+  }
 }
