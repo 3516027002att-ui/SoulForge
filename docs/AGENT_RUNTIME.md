@@ -10,6 +10,14 @@ The finite kernel lives in `@soulforge/agent` and has no dependency on core, Ele
 
 ## Headless CLI
 
+Standalone CLI validation and public Windows/Linux CI use Node 22.22.0. Use that
+verified runtime for `sfcli`. On the restored Debian 13 host, Node 24.19.0 with
+better-sqlite3 12.11.1 loaded a small binding probe but aborted during SQLite
+Statement garbage collection in the real `--analyze` request. The same source
+and input completed under Node 22.22.0. This observation does not establish the
+outcome for other Node 24 versions or platforms. Electron has its own runtime
+and ABI binding evidence; do not substitute a standalone Node binding for it.
+
 Use a UTF-8 task file or one argument value. JSON Lines events include protocolVersion, sessionId, runId, requestId and eventSeq. Reports bind the actual source checkout/difference, built code, input and provider configuration. Credentials come from the trusted host environment or the original encrypted `test` loader and remain in process memory. `--diagnostics` emits workspace and individual tool timing/error codes to stderr.
 
 ```sh
@@ -42,7 +50,7 @@ Agent calls use session name `agent:<sessionId>` and request ID `<sessionId>:<ca
 
 ## Comparison and completion limits
 
-Desktop and CLI now use the same finite production kernel. The former loop has been removed; runAgentToolLoop is only a compatibility function forwarding to that shared kernel. The legacy production selector is rejected before provider or workspace work. Explicit comparison fixtures materialize the exact trace-instrumented baseline 217234bb97ee20e3a83048042c4a1e67e9a16d33 into test-owned output; it is preserved in Git and never selected by production. The optional agent-control-trace.experiment.mjs exercises its retired heuristic triggers; current convention checks do not need that history.
+Desktop and CLI now use the same finite production kernel. The former loop has been removed; runAgentToolLoop is only a compatibility function forwarding to that shared kernel. The legacy production selector is rejected before provider or workspace work. Explicit comparison fixtures materialize a declared, source-bound control into test-owned output. The historical control `217234bb97ee20e3a83048042c4a1e67e9a16d33` is currently unavailable after the filesystem replacement. `public-main-c4` is an explicitly selected alternative with its own revision, loop and tree identities; it cannot be relabeled as that historical control. The optional agent-control-trace.experiment.mjs exercises retired heuristic triggers; production startup and unrelated convention checks do not need comparison history.
 
 The bounded switch comparison ran four scenarios with both kernels, with identical deterministic transport, task, tools, sampling and neutral budgets. Both native mutations produced identical bytes under independent pinned SoulsFormatsNEXT readback. Read/no-op scenarios wrote nothing; a model falsely claiming success failed the independent goal. Inputs, sibling files and preserved native fields remained unchanged. The separate description-dedup experiment removed 24,248 serialized characters from 56 tool definitions; this is not a token or cost measurement.
 

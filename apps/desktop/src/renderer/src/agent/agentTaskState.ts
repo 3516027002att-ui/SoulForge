@@ -241,7 +241,9 @@ export function extractApprovalPreview(argumentsJson: string): AgentApprovalPrev
   const structuredEdit = typeof changeRecord?.structuredEdit === 'object' && changeRecord.structuredEdit !== null
     ? changeRecord.structuredEdit as Record<string, unknown>
     : null;
-  let rawText = pickString(record.newText) ?? pickString(structuredEdit?.newText);
+  let rawText = typeof record.newText === 'string'
+    ? record.newText
+    : typeof structuredEdit?.newText === 'string' ? structuredEdit.newText : undefined;
   let changeCount: number | null = changes === null ? null : changes.length;
 
   // mutate_param_fields: edits: [{ table, rowId, fieldId, value }]

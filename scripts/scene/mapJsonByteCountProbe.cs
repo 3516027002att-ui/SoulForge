@@ -98,7 +98,7 @@ try
     CheckFailure("throwing-property-after-prefix", new { prefix = failurePrefix, value = new CounterThrowingProperty() });
     Check("successful-count-after-failures", new { value = "recovered+雪" });
 
-    if (args.Length == 3)
+    if (args.Length is 3 or 4)
     {
         var map = assembly.GetType("MapStaticGeometryService", true)!;
         var native = assembly.GetType("FlverNativeDocument", true)!;
@@ -186,10 +186,25 @@ try
                     "WRONG_BUDGET_FAILURE_PATH:" + error.Message);
             }
             controls.Add(new { kind = "one-triangle-serialized-budget-failure", passed = true, failureTokenLength });
+            if (args.Length == 4)
+            {
+                var shared = Chunk(Session(Path.GetFullPath(args[3])), "");
+                var element = Element(shared.chunk);
+                Require(shared.complete && shared.next is null && element.GetProperty("triangleCount").GetInt32() == 2
+                    && element.GetProperty("emittedVertexCount").GetInt32() == 4, "SHARED_VERTEX_PREFIX_COUNT_WRONG");
+                Require(Sources(shared.chunk).SequenceEqual(new uint[] { 0, 1, 2, 3 }), "SHARED_FIRST_SEEN_SOURCE_ORDER_CHANGED");
+                var denseBytes = Convert.FromBase64String(element.GetProperty("indicesBase64").GetString()!);
+                Require(element.GetProperty("indexElementBytes").GetInt32() == 2 && denseBytes.Length == 12, "SHARED_DENSE_INDEX_WIDTH_WRONG");
+                var dense = Enumerable.Range(0, 6).Select(index => BinaryPrimitives.ReadUInt16LittleEndian(denseBytes.AsSpan(index * 2, 2))).ToArray();
+                Require(dense.SequenceEqual(new ushort[] { 0, 1, 2, 2, 1, 3 }), "SHARED_DENSE_CORNER_ORDER_CHANGED");
+                Require(element.GetProperty("telemetry").GetProperty("mapTypedPositionDecode").GetInt64() == 4, "SHARED_VERTEX_DECODE_NOT_ONCE");
+                Check("actual-shared-triangle-chunk", shared.chunk);
+                controls.Add(new { kind = "shared-triangle-first-seen-order", passed = true, sources = Sources(shared.chunk), dense });
+            }
         }
         finally { Invoke(reset, null, null); }
     }
-    else Require(args.Length == 1, "PASS_BOTH_TWO_AND_ONE_TRIANGLE_INPUTS_OR_NEITHER");
+    else Require(args.Length == 1, "PASS_TWO_AND_ONE_TRIANGLE_INPUTS_AND_OPTIONAL_SHARED_INPUT_OR_NEITHER");
 }
 finally
 {
@@ -200,7 +215,7 @@ finally
 Console.WriteLine(JsonSerializer.Serialize(new
 {
     passed = true, producerHash, inputHashes, cases, controls,
-    buildChunk = args.Length == 3 ? "executed" : "not_run", thresholds = new { FrameBytes, SafeChunkBytes },
+    buildChunk = args.Length is 3 or 4 ? "executed" : "not_run", thresholds = new { FrameBytes, SafeChunkBytes },
     scope = "Actual compiled default JSON counter and optional native BuildChunk; synthetic CPU only, no daemon/GPU/game"
 }));
 

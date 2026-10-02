@@ -100,6 +100,8 @@ class FakeElement {
   style: Record<string, string> = {};
   clientWidth = 800;
   clientHeight = 600;
+  className = '';
+  parentElement: FakeElement | null = null;
   private readonly handlers = new Map<string, Set<UnknownHandler>>();
   private readonly pointerCaptures = new Set<number>();
 
@@ -116,6 +118,12 @@ class FakeElement {
   }
   getBoundingClientRect(): { left: number; top: number; width: number; height: number } {
     return { left: 0, top: 0, width: this.clientWidth, height: this.clientHeight };
+  }
+  closest(selector: string): FakeElement | null {
+    for (let element: FakeElement | null = this; element; element = element.parentElement) {
+      if (selector === `.${element.className}`) return element;
+    }
+    return null;
   }
   getRootNode(): DocumentLike {
     return fakeDocument;
@@ -243,6 +251,7 @@ function installDisposeCounter(): void {
 // ---------------------------------------------------------------------------
 class FakeRenderer implements ThreeRendererLike {
   readonly calls: string[] = [];
+  readonly sizeCalls: Array<[number, number, boolean | undefined]> = [];
   lastScene: three.Scene | null = null;
   readonly renderMetrics: Array<{
     meshObjects: number;
@@ -255,8 +264,9 @@ class FakeRenderer implements ThreeRendererLike {
   setPixelRatio(): void {
     this.calls.push('setPixelRatio');
   }
-  setSize(): void {
+  setSize(width: number, height: number, updateStyle?: boolean): void {
     this.calls.push('setSize');
+    this.sizeCalls.push([width, height, updateStyle]);
   }
   render(scene: three.Scene): void {
     this.calls.push('render');
@@ -465,6 +475,82 @@ async function testBackendResolution(record: (name: string) => void): Promise<vo
   assertEqual(resolveRendererBackend('webgl2', true), 'webgl2', '显式覆盖优先于能力探测');
   assertEqual(resolveRendererBackend('webgpu', false), 'webgpu', '显式 WebGPU 覆盖不受能力探测影响');
   record('backend-resolution');
+}
+
+interface SyntheticResizeSample {
+  cause: string;
+  hostClient: [number, number];
+  rendererSizeArguments: [number, number, boolean | undefined];
+  cameraAspect: number;
+  projectionAspect: number;
+}
+
+async function testResizeContract(record: (name: string) => void): Promise<SyntheticResizeSample[]> {
+  const previousObserver = domGlobals.ResizeObserver;
+  const observed = new Set<FakeElement>();
+  let notify: (() => void) | null = null;
+  let disconnected = false;
+  domGlobals.ResizeObserver = class {
+    constructor(callback: () => void) { notify = callback; }
+    observe(element: FakeElement): void { observed.add(element); }
+    disconnect(): void { disconnected = true; }
+  };
+  const columns = new FakeElement();
+  columns.className = 'workbench__columns';
+  const viewport = new FakeElement();
+  viewport.parentElement = columns;
+  const container = new FakeElement();
+  container.parentElement = viewport;
+  const renderer = new FakeRenderer();
+  let capturedCamera: three.PerspectiveCamera | null = null;
+  let handle: Awaited<ReturnType<typeof mountThreeProxyScene>> | null = null;
+  const samples: SyntheticResizeSample[] = [];
+  try {
+    handle = await mountThreeProxyScene({
+      container: container as unknown as HTMLElement,
+      drawList: buildProxyDrawList(),
+      rendererFactory: () => renderer,
+      cameraAudit: camera => { capturedCamera = camera; }
+    });
+    assert(capturedCamera !== null && notify !== null, 'resize smoke 捕获真实 Three camera 与 observer callback');
+    const camera = capturedCamera as three.PerspectiveCamera;
+    const resize = notify as () => void;
+    assert(observed.has(container) && observed.has(viewport) && observed.has(columns), 'host、viewport 与 columns 都受尺寸观察');
+    const sample = (cause: string, width: number, height: number, trigger?: () => void): void => {
+      container.clientWidth = width;
+      container.clientHeight = height;
+      const previousCount = renderer.sizeCalls.length;
+      trigger?.();
+      if (trigger) assertEqual(renderer.sizeCalls.length, previousCount + 1, 'resize 每次调用实际 setSize 一次');
+      const size = renderer.sizeCalls[renderer.sizeCalls.length - 1]!;
+      assertEqual(size[0], Math.max(width, 1), 'renderer width 跟随 host clientWidth');
+      assertEqual(size[1], Math.max(height, 1), 'renderer height 跟随 host clientHeight');
+      assertEqual(size[2], false, 'resize 保留 CSS 管理的 canvas 显示尺寸');
+      const expectedAspect = size[0] / size[1];
+      const projectionAspect = camera.projectionMatrix.elements[5]! / camera.projectionMatrix.elements[0]!;
+      assert(Math.abs(camera.aspect - expectedAspect) < 1e-12, '真实 camera.aspect 与 renderer 尺寸同步');
+      assert(Math.abs(projectionAspect - expectedAspect) < 1e-12, '真实 projectionMatrix 随 aspect 更新');
+      samples.push({ cause, hostClient: [width, height], rendererSizeArguments: size, cameraAspect: camera.aspect, projectionAspect });
+    };
+    sample('mount', 800, 600);
+    sample('observer: narrow column', 320, 600, resize);
+    sample('observer: expanded columns', 640, 360, resize);
+    sample('observer: taller status area', 640, 220, resize);
+    sample('window: unmeasured host', 0, 0, () => dispatchWindow('resize', {}));
+    sample('window: restored host', 800, 600, () => dispatchWindow('resize', {}));
+    handle.dispose();
+    handle = null;
+    assert(disconnected, 'dispose 断开 ResizeObserver');
+    const count = renderer.sizeCalls.length;
+    dispatchWindow('resize', {});
+    assertEqual(renderer.sizeCalls.length, count, 'dispose 后 window resize 不再改变 renderer');
+    record('synthetic-host-resize-camera-projection');
+    return samples;
+  } finally {
+    handle?.dispose();
+    if (previousObserver === undefined) delete domGlobals.ResizeObserver;
+    else domGlobals.ResizeObserver = previousObserver;
+  }
 }
 
 async function testProxyScene(record: (name: string) => void): Promise<void> {
@@ -1056,6 +1142,7 @@ async function main(): Promise<void> {
   };
 
   await testBackendResolution(record);
+  const resizeSamples = await testResizeContract(record);
   await testProxyScene(record);
   await testProxyModelReplacement(record);
   await testFrameUploadCancellation(record);
@@ -1072,6 +1159,10 @@ async function main(): Promise<void> {
         ok: true,
         message: 'Three 场景投影层功能 smoke 通过（无 GPU / 无真实资产）',
         cases,
+        resizeContract: {
+          scope: 'synthetic host clients + actual renderer arguments + real Three camera/projection; no DOM display bounds or GPU/backing pixel measurement',
+          samples: resizeSamples
+        },
         backendContract: 'WebGL2 default / explicit WebGPU preview',
         headless: true,
         filesystemAccess: false

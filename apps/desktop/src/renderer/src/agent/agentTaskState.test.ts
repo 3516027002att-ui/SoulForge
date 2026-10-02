@@ -591,6 +591,55 @@ describe('审批预览只从参数里已有的字段提取', () => {
     assert.equal(preview?.changeCount, 1);
   });
 
+  it('平铺与嵌套 newText 保留有效空串', () => {
+    assert.equal(extractApprovalPreview(JSON.stringify({ targetPath: 'a', newText: '' }))?.newText, '');
+    assert.equal(extractApprovalPreview(JSON.stringify({
+      changes: [{ targetPath: 'a', structuredEdit: { newText: '' } }]
+    }))?.newText, '');
+  });
+
+  it('内容保留纯空白、换行与原字符，不按标识符过滤', () => {
+    for (const text of [' \t\r\n', '\u00a0\n', '\n  body\t\r\n']) {
+      assert.equal(extractApprovalPreview(JSON.stringify({ targetPath: 'a', newText: text }))?.newText, text);
+      assert.equal(extractApprovalPreview(JSON.stringify({
+        changes: [{ targetPath: 'a', structuredEdit: { newText: text } }]
+      }))?.newText, text);
+    }
+  });
+
+  it('平铺字符串优先于嵌套内容，包括空串', () => {
+    for (const text of ['', ' \t', 'flat\r\n']) {
+      assert.equal(extractApprovalPreview(JSON.stringify({
+        targetPath: 'a', newText: text,
+        changes: [{ targetPath: 'a', structuredEdit: { newText: 'nested' } }]
+      }))?.newText, text);
+    }
+  });
+
+  it('缺失或非字符串平铺内容回退到嵌套字符串', () => {
+    for (const value of [undefined, null, 0, false, {}, []]) {
+      for (const text of ['', 'nested']) {
+        assert.equal(extractApprovalPreview(JSON.stringify({
+          targetPath: 'a', newText: value,
+          changes: [{ targetPath: 'a', structuredEdit: { newText: text } }]
+        }))?.newText, text);
+      }
+    }
+  });
+
+  it('缺失或非字符串内容仍为 null，空标识符仍不可用', () => {
+    for (const value of [undefined, null, 0, false, {}, []]) {
+      assert.equal(extractApprovalPreview(JSON.stringify({
+        targetPath: 'a', newText: value,
+        changes: [{ structuredEdit: { newText: value } }]
+      }))?.newText, null);
+    }
+    const preview = extractApprovalPreview(JSON.stringify({ targetPath: '', targetUri: '', newText: '' }));
+    assert.equal(preview?.newText, '');
+    assert.equal(preview?.targetPath, null);
+    assert.equal(preview?.targetUri, null);
+  });
+
   it('超长内容保留全文（问题 5：不截断，由界面展开/折叠看全文）', () => {
     const long = 'x'.repeat(10_000);
     const preview = extractApprovalPreview(JSON.stringify({ targetPath: 'a', newText: long }));

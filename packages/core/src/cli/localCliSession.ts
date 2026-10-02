@@ -362,7 +362,7 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
   const rawBridge = createAgentToolBridge({
     registry,
     context: {
-      workspaceIndex,
+      get workspaceIndex() { return coreSession.workspaceIndex; },
       mode,
       modeCeiling: mode,
       allowMemoryWrite: false,
@@ -375,6 +375,7 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
       ...(options.onDiagnostic ? { onDiagnostic: options.onDiagnostic } : {}),
       onSemanticEvidenceUpdated: async (sourceUris) => {
         if (!semanticCache || !sourceUris?.length) return;
+        const workspaceIndex = coreSession.workspaceIndex;
         const files = workspaceIndex.getFiles();
         const sources = new Set(sourceUris.map((sourceUri) => (
           workspaceIndex.getFile(sourceUri)?.sourceUri
@@ -437,7 +438,7 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
     registry,
     bridge,
     executeTool,
-    workspaceIndex,
+    get workspaceIndex() { return coreSession.workspaceIndex; },
     durableLog,
     knowledgeStore,
     dispose: async () => {

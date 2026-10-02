@@ -52,8 +52,7 @@ describe('S27 栏宽回归（WorkbenchLayout）', () => {
   it('像素模式也必须守 minWidth：style 同时带 width 与 minWidth', () => {
     assert.match(layoutSource, /minWidth: `\$\{column\.minWidth \?\? DEFAULT_MIN_WIDTH\}px`/);
     assert.match(layoutSource, /flex: '0 0 auto'/);
-    // 拖拽/键盘写入的值都被 Math.max(minWidth, …) 钳住。
-    assert.match(layoutSource, /Math\.max\(drag\.minWidth, drag\.startWidth \+ delta\)/);
+    // Pointer callback 的真实最小值行为由 workbench-column-width.fixture.mjs 覆盖。
     assert.match(layoutSource, /Math\.max\(minWidth, measured - step\)/);
   });
 

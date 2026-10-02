@@ -1,5 +1,12 @@
 # MAP decoder performance checks
 
+The 2026-10-01 numbers below are historical observations on their named
+producers and runtime. Their temporary per-run receipts and original restored
+MAP copies were lost with the execution filesystem. The maintained source
+fixtures and grid generator remain available; fresh recovery captures must
+bind their own runtime, producer and input hashes. The recovered workspace has
+no real MAP corpus, and paused backup uploads leave volume 0048 unavailable.
+
 `scripts/profile-map-decode.mjs` calls the production Bridge daemon's paged
 `read-map-static-geometry` command. It verifies repeated geometry bytes and
 source hashes, records native phase timings, wire/model counts and caller/RSS
@@ -46,14 +53,14 @@ identical geometry. In one paired daemon run, nine warm calls averaged
 requests and controls was 101,420,616 versus 20,081,072 bytes; sampled peak RSS
 was 144,433,152 versus 88,543,232 bytes. Both runs observed overlap, queued
 cancellation, successful reopen and actual cache disposal with zero entries
-and retained bytes. Detailed SHA-bound evidence is retained locally in
+and retained bytes. The historical SHA-bound receipt was recorded as
 `.local-validation/map-performance-recovery-receipt.json`.
 
 These are synthetic native decode measurements. They do not establish GPU,
-Electron main-process or game-image performance. The three minimum restored
-real MAPBND/TPF inputs are SHA-verified KRAK; the current Linux producer reports
-`MAPBND_KRAK_OODLE_UNAVAILABLE`. A drawable real-map benchmark remains
-unavailable on those inputs.
+Electron main-process or game-image performance. In the prior workspace, the three minimum restored
+real MAPBND/TPF inputs were SHA-verified KRAK and the named Linux producer
+reported `MAPBND_KRAK_OODLE_UNAVAILABLE`. Those copies are not present in the
+recovered workspace; a fresh drawable real-map benchmark remains unavailable.
 
 MAP cold reads and unknown-token fallback now decode their exact captured and
 hashed DCX bytes. Binder reuse compares all captured source bytes, including
@@ -75,7 +82,7 @@ on producer `5cffee96…` versus `6e4c640d…` gave warm model averages
 127.54→109.34 ms and 144.18→111.05 ms. The existing SF14 unit suite also
 passed on the candidate, including list/strip, UV/normal/bounds, cursor,
 rigid-reference and invalid/weighted/singular negatives. Input, compiled smoke
-and profile hashes are retained in `.local-validation/chunk-index-receipt.json`.
+and profile hashes were recorded in `.local-validation/chunk-index-receipt.json`.
 These observations do not establish allocation/RSS or GPU improvement.
 
 The legacy path adapter now also validates the complete current source hash
@@ -125,6 +132,38 @@ allocation was 1,416,231,224→1,116,526,464 and
 1,412,900,536→1,115,780,064 bytes. Geometry, page/count and lifecycle controls
 remained identical. Earlier short pairs were mixed, including a reverse pair
 of 192.45→203.13 ms, so these observations do not establish a universal latency
-improvement. Every capture is retained in
+improvement. These captures were recorded in
 `.local-validation/json-count-receipt.json`, bound to source `6dc4c217…` and the
 compiled producer. The measurements remain synthetic native CPU observations.
+
+The 2026-10-02 recovery baseline at source `6dc4c217…` used SDK 10.0.100,
+framework 10.0.0 and producer `9679aff1…`, with default JIT settings. The
+regenerated UV grid retained input `379b2126…` and complete geometry
+`dd3fdd1e…`. Twenty daemon rounds averaged 207.59 ms for warm model reads;
+all four concurrency/cancellation/reopen/release controls passed. These fresh
+captures are independent of the earlier runtime's numbers.
+
+`scripts/scene/mapVertexHitProbe.cs` is a validation-only .NET 10 console host.
+Compile it in an owned scratch directory, run it from the repository root,
+and pass the producer path, UV-grid path and their expected SHA-256 hashes. It binds the actual private helper
+through runtime-closed generic types and concrete spans, with reflection only
+outside each timed loop. Its two source-file pins make later source edits
+require an explicit rebind. On the recovered producer, 8.1 million measured
+cached hits had median 10.83 ns/hit, zero measured allocation, unchanged
+buffer/bounds bytes and no extra position/normal/UV decodes. A subsequent
+first-seen source decoded exactly once. Direct dictionary lookup measured
+4.21 ns/hit as a diagnostic with different call overhead; this does not predict
+an end-to-end speedup or justify a hot/cold-path rewrite.
+
+A separate exact-capacity candidate used the observed accepted source count
+for full prefixes and kept existing growth behavior on shrink retries. Twelve
+tiny/sparse/shared/disjoint/boundary shapes retained identical geometry and
+lower chunk allocation. Across four alternating twenty-round daemon pairs,
+process allocation consistently fell about 16.5%, but warm wall time remained
+mixed, including 197.71→219.52 ms. Sampled native peak RSS increased in three
+of four pairs, including 126.1→165.0 MB. The candidate was rejected and its
+product source restored. No allocation result is presented as a whole-MAP
+speed or memory improvement. Current receipts are in
+`.local-validation/recovery-receipt.json` and
+`.local-validation/chunk-capacity/rejection-receipt.json`; these files are
+local validation artifacts and are not part of a published package.

@@ -6,6 +6,8 @@ import { dirname, join } from 'node:path';
 import { cliWorkspaceRoot, openLocalCliSession } from './localCliSession.js';
 import { makeWorkspaceId } from '../workspace/resourceUri.js';
 import { SqliteOperationLogStore } from '../patch/sqliteOperationLogStore.js';
+import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
+import { WorkspaceDataRepository } from '../storage/workspaceDataRepository.js';
 
 async function profile<T>(execute: (root: string) => Promise<T>): Promise<T> {
   const root = await mkdtemp(join(tmpdir(), 'sf-cli-linux-storage-'));
@@ -19,6 +21,72 @@ async function profile<T>(execute: (root: string) => Promise<T>): Promise<T> {
     await rm(root, { recursive: true, force: true });
   }
 }
+
+async function refreshedSession(root: string) {
+  const overlayRoot = join(root, 'mod');
+  await mkdir(join(overlayRoot, 'param'), { recursive: true });
+  await writeFile(join(overlayRoot, 'param', 'mockparam.json'), JSON.stringify({
+    paramName: 'NpcParam', rows: [{ rowId: 1, fields: [] }]
+  }));
+  const session = await openLocalCliSession({ overlayRoot, mode: 'plan', analyze: true, requireDurableLog: true });
+  const initial = session.workspaceIndex;
+  const projection = initial.toSymbolBundle().params?.[0];
+  assert.ok(projection);
+  const row = projection.rows[0];
+  assert.ok(row);
+  const refreshed = new WorkspaceIndex(session.coreSession.workspaceId);
+  refreshed.setFiles(initial.getFiles());
+  assert.equal(refreshed.upsertParamExport({
+    ...projection, rows: [2, 3].map(rowId => ({ ...row, rowId, uri: `${row.uri}-${rowId}` }))
+  }), true);
+  assert.equal(session.coreSession.updateWorkspaceIndex(refreshed, session.coreSession.workspaceSession), true);
+  return { session, initial, refreshed };
+}
+
+test('CLI wrapper and bridge read the current Core index through refresh and close', async () => profile(async root => {
+  const { session, initial, refreshed } = await refreshedSession(root);
+  const bridgeRows = async () => {
+    const result = await session.executeTool({ id: 'owner-stats', name: 'workspace_stats', argumentsJson: '{}' });
+    assert.equal(result.ok, true);
+    return (JSON.parse(result.content) as { data: { record: { paramRows: number } } }).data.record.paramRows;
+  };
+  try {
+    assert.equal(await bridgeRows(), 2, 'bridge context must read the refreshed Core index');
+    assert.strictEqual(session.workspaceIndex, refreshed, 'CLI wrapper must expose the same current owner');
+    assert.notStrictEqual(session.workspaceIndex, initial);
+    session.coreSession.close();
+    assert.equal(await bridgeRows(), 0, 'closed Core index must replace the bridge snapshot');
+    assert.strictEqual(session.workspaceIndex, session.coreSession.workspaceIndex);
+    assert.equal(session.workspaceIndex.getStats().paramRows, 0);
+    await session.dispose();
+    assert.equal(await bridgeRows(), 0);
+    assert.equal(session.workspaceIndex.getStats().paramRows, 0);
+  } finally { await session.dispose(); }
+}));
+
+test('CLI semantic cache callback saves the current Core projection after refresh', async () => profile(async root => {
+  const { session, refreshed } = await refreshedSession(root);
+  try {
+    const file = refreshed.getFiles()[0];
+    assert.ok(file);
+    session.registry.register({
+      name: 'test_current_semantic_cache', description: 'Exercise the owned semantic-cache callback', permission: 'read',
+      run: async (_input, context) => {
+        assert.ok(context.onSemanticEvidenceUpdated);
+        await context.onSemanticEvidenceUpdated([file.sourceUri]);
+        return { ok: true, data: { saved: true } };
+      }
+    });
+    const result = await session.executeTool({ id: 'cache-current', name: 'test_current_semantic_cache', argumentsJson: '{}' });
+    assert.equal(result.ok, true);
+    const store = session.coreSession.operationLog;
+    assert.ok(store instanceof SqliteOperationLogStore);
+    const cached = new WorkspaceDataRepository(store.database, session.coreSession.workspaceId)
+      .getSemanticFileCache(file.relativePath, file.sha256!);
+    assert.deepEqual(cached?.params?.[0]?.rows.map(row => row.rowId), [2, 3],
+      'persistent cache must contain the refreshed owner, never the initial projection');
+  } finally { await session.dispose(); }
+}));
 
 test('disposing a CLI session releases its owned audit database and permits reopening the durable log', async () => profile(async root => {
   const overlayRoot = join(root, 'mod'); await mkdir(overlayRoot);
