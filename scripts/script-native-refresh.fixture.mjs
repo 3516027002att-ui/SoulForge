@@ -9,7 +9,6 @@ import vm from 'node:vm';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
-import { performance } from 'node:perf_hooks';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const source = relative => fs.readFileSync(path.join(repo, relative), 'utf8');
@@ -18,8 +17,7 @@ const sourcePaths = {
   ipc: 'apps/desktop/src/main/ipc.ts',
   ownership: 'apps/desktop/src/main/knowledgeRefreshOwnership.ts',
   mutation: 'packages/core/src/editing/editorMutationService.ts',
-  dto: 'apps/desktop/src/main/rendererDto.ts',
-  trace: 'apps/desktop/src/main/scriptSaveTrace.ts'
+  dto: 'apps/desktop/src/main/rendererDto.ts'
 };
 
 function execute(text, filename, scope = {}, imports = {}) {
@@ -66,16 +64,8 @@ const storage = { root: '/owned-synthetic', backupBaseDir: '/owned-synthetic/bac
 const hksBytes = Buffer.from([0x1b, 0x4c, 0x75, 0x61, 0x51, 0]);
 const unused = () => { throw new Error('Unexpected capability invocation'); };
 
-function harness({ candidateOk = true, cancel = false, commitOk = true, rejectRefresh = false, rejectCache = false, readOk = true, compileOk = true, readRootsOk = true, stageRootsOk = true, traceEnabled = false, deferredStage } = {}) {
+function harness({ candidateOk = true, cancel = false, commitOk = true, rejectRefresh = false, rejectCache = false, readOk = true, compileOk = true, readRootsOk = true, stageRootsOk = true } = {}) {
   const events = [];
-  const traceEvents = [];
-  const trace = execute(source(sourcePaths.trace), sourcePaths.trace, { process: {
-    env: traceEnabled ? { SOULFORGE_EDITOR_SAVE_TRACE: '1' } : {},
-    stdout: { write: line => {
-      const event = JSON.parse(line.slice('[SoulForge script save phase] '.length));
-      traceEvents.push(event); events.push(`phase:${event.phase}/${event.state}`);
-    } }
-  } }, { 'node:perf_hooks': { performance } });
   const requests = { bridge: [], commit: [], confirmation: [], candidate: [] };
   const handlers = new Map();
   const rawResult = { ok: commitOk, opId: 'owned-commit', changedFiles: commitOk ? [file.absolutePath] : [], diagnostics: [] };
@@ -123,10 +113,7 @@ function harness({ candidateOk = true, cancel = false, commitOk = true, rejectRe
         containerHash: 'owned-container-hash', contentHash: 'owned-child-hash', contentBase64: hksBytes.toString('base64'), sanitizedName: 'owned.lua'
       } };
       if (input.command === 'compile-hks-source') return { parseStatus: compileOk ? 'confirmed' : 'failed', diagnostics: [], data: { contentBase64: hksBytes.toString('base64') } };
-      if (input.command === 'write-luabnd-script') {
-        if (deferredStage) await deferredStage;
-        return { parseStatus: 'confirmed', diagnostics: [], data: { outputHash: 'owned-output-hash' } };
-      }
+      if (input.command === 'write-luabnd-script') return { parseStatus: 'confirmed', diagnostics: [], data: { outputHash: 'owned-output-hash' } };
       return unused();
     }
   };
@@ -136,8 +123,7 @@ function harness({ candidateOk = true, cancel = false, commitOk = true, rejectRe
     'node:path': path,
     '@soulforge/core': core,
     '../rendererDto.js': dto,
-    '../knowledgeRefreshOwnership.js': ownership,
-    '../scriptSaveTrace.js': trace
+    '../knowledgeRefreshOwnership.js': ownership
   });
   resource.registerResourceIpcHandlers({
     handle: (name, handler) => handlers.set(name, handler),
@@ -155,7 +141,7 @@ function harness({ candidateOk = true, cancel = false, commitOk = true, rejectRe
     refreshActiveIndexAfterNativeWrite: refresh
   });
   return {
-    events, traceEvents, requests, rawResult, sessionCommitPort,
+    events, requests, rawResult, sessionCommitPort,
     save: () => handlers.get('resource.saveScriptSource')({}, sourceUri, 'owned.lua', 'owned-child-hash', 'owned-container-hash', 'return 2', 'utf8', 0)
   };
 }
@@ -276,44 +262,4 @@ test('resource cache invalidation rejection keeps committed ok and still runs on
   assert.ok(settled.value.diagnostics.some(item => item.code === 'POSTCOMMIT_PREVIEW_FAILED' && item.severity === 'warning'));
   assert.equal(settled.value.knowledgeRefresh.status, 'converged');
   assert.deepEqual(postCommit(h.events), ['commit', 'cache-clear', 'refresh']);
-});
-
-test('actual save handler emits candidate completion before confirmation and one real commit entry', async () => {
-  const h = harness({ traceEnabled: true });
-  const result = await h.save();
-  assert.equal(result.ok, true);
-  assert.deepEqual(h.traceEvents.map(event => [event.phase, event.state]), [
-    ['ensure-log','start'],['ensure-log','finish'],['read-roots','start'],['read-roots','finish'],
-    ['native-reread','start'],['native-reread','finish'],['stage-roots','start'],['stage-roots','finish'],
-    ['candidate-staging','start'],['stage-native-write','start'],['stage-native-write','finish'],
-    ['candidate-staging','finish'],['commit-entry','start'],['commit-entry','finish']
-  ]);
-  assert.equal(new Set(h.traceEvents.map(event => event.request)).size, 1);
-  assert.ok(h.events.indexOf('phase:candidate-staging/finish') < h.events.indexOf('confirm'));
-  assert.ok(h.events.indexOf('phase:candidate-staging/finish') < h.events.indexOf('commit'));
-  assert.doesNotMatch(JSON.stringify(h.traceEvents), /owned-synthetic|resource:\/\/|return 2|base64|absolutePath/);
-  assert.deepEqual(postCommit(h.events), ['commit','cache-clear','refresh']);
-});
-
-test('deferred native staging leaves candidate open until output completion and does not enter commit early', async () => {
-  let release; const pending = new Promise(resolve => { release = resolve; });
-  const h = harness({ traceEnabled: true, deferredStage: pending });
-  const saving = h.save();
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(h.requests.commit.length, 0);
-  assert.equal(h.traceEvents.filter(event => event.phase === 'candidate-staging').length, 1);
-  assert.equal(h.traceEvents.filter(event => event.phase === 'stage-native-write').length, 1);
-  assert.equal(h.traceEvents.filter(event => event.phase === 'commit-entry').length, 0);
-  release(); assert.equal((await saving).ok, true);
-  assert.equal(h.traceEvents.filter(event => event.phase === 'candidate-staging').length, 2);
-  assert.equal(h.requests.commit.length, 1);
-});
-
-test('failed staging and cancelled confirmation close candidate tracing without a commit entry or refresh', async () => {
-  for (const options of [{ candidateOk: false }, { cancel: true }]) {
-    const h = harness({ ...options, traceEnabled: true }); assert.equal((await h.save()).ok, false);
-    assert.deepEqual(h.traceEvents.filter(event => event.phase === 'candidate-staging').map(event => event.state), ['start','finish']);
-    assert.equal(h.traceEvents.filter(event => event.phase === 'commit-entry').length, 0);
-    assert.deepEqual(postCommit(h.events), []);
-  }
 });

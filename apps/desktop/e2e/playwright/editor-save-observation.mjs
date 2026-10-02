@@ -4,8 +4,6 @@ const methods = new Set(['openAppDatabase', 'openWorkspace', 'record', 'get', 'l
   'createTransaction', 'transitionTransaction', 'getTransactionForOperation', 'finalizeCommit', 'recordRecoveryPoint',
   'recordResourceEntryChange', 'appendAuditEvent', 'replaceFiles', 'getAllSemanticFileCache', 'setSemanticFileCache',
   'mergeRagChunkDelta', 'replaceRagChunks', 'loadRagChunks', 'loadKnowledgeSnapshot', 'health', 'close']);
-const scriptPhases = new Set(['ensure-log', 'read-roots', 'native-reread', 'stage-roots',
-  'candidate-staging', 'stage-native-write', 'commit-entry']);
 const dbEvents = new Set(['enqueue', 'dispatch', 'start', 'finish', 'timeout', 'late-completion', 'workerfail', 'close']);
 const outcomes = new Set(['ok', 'timeout', 'request-failed', 'workerfail', 'close', 'post-error', 'late-completion']);
 const diagnosticCodes = new Set(['POSTCOMMIT_REFRESH_FAILED', 'RESOURCE_NOT_INDEXED', 'WORKSPACE_NOT_OPEN',
@@ -80,13 +78,6 @@ export function createEditorSaveObservation({ ipcMain, stdout, stderr, clock }) 
             ...(['client', 'worker'].includes(trace.side) ? { side: trace.side } : {}),
             ...(outcomes.has(trace.outcome) ? { outcome: trace.outcome } : {}),
             ...(Number.isFinite(trace.dbDurationMs) && trace.dbDurationMs >= 0 ? { elapsedMs: trace.dbDurationMs } : {}) });
-        } else if (line.startsWith('[SoulForge script save phase] ')) {
-          const trace = JSON.parse(line.slice('[SoulForge script save phase] '.length));
-          if (scriptPhases.has(trace.phase) && ['start','finish','throw'].includes(trace.state)
-            && Number.isSafeInteger(trace.request) && trace.request > 0
-            && Number.isFinite(trace.atMs) && trace.atMs >= 0) record({ stage: 'script-phase',
-              request: trace.request, phase: trace.phase, state: trace.state, phaseAtMs: trace.atMs,
-              ...(Number.isFinite(trace.elapsedMs) && trace.elapsedMs >= 0 ? { elapsedMs: trace.elapsedMs } : {}) });
         } else if (/^\[SoulForge native-refresh\] released \d+ idle Bridge client\(s\); active=\d+\.$/.test(line)) {
           record({ stage: 'postcommit', state: 'idle-readers-released' });
         }

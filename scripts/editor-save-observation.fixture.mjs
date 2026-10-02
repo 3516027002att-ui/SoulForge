@@ -58,20 +58,11 @@ test('existing database trace admits only known fields and never payload/SQL/pat
   h.restore();
 });
 
-test('knowledge load and fixed Script phases are observed without request args or unknown vocabulary', () => {
+test('existing knowledge load trace is observed without SQL, args or identity data', () => {
   const h = ports();
   h.stdout.write('[SoulForge database utility trace] {"method":"loadKnowledgeSnapshot","event":"start","side":"worker","sql":"PRIVATE_SQL"}\n');
-  const event = { request: 2, phase: 'candidate-staging', state: 'finish', atMs: 4, elapsedMs: 3, body: 'PRIVATE_BODY', path: '/PRIVATE_PATH' };
-  h.stdout.write(`[SoulForge script save phase] ${JSON.stringify(event)}\n`);
-  h.stdout.write(`[SoulForge script save phase] ${JSON.stringify({ ...event, phase: 'PRIVATE_PHASE' })}\n`);
-  h.stdout.write(`[SoulForge script save phase] ${JSON.stringify({ ...event, state: 'PRIVATE_STATE' })}\n`);
-  h.stdout.write(`[SoulForge script save phase] ${JSON.stringify({ ...event, request: 'PRIVATE_REQUEST' })}\n`);
-  assert.deepEqual(h.snapshot().events.map(event => event.stage), ['database','script-phase']);
+  assert.deepEqual(h.snapshot().events.map(event => event.stage), ['database']);
   assert.equal(h.snapshot().events[0].method, 'loadKnowledgeSnapshot');
-  assert.equal(h.snapshot().events[1].request, 2);
-  assert.equal(h.snapshot().events[1].phase, 'candidate-staging');
-  assert.equal(h.snapshot().events[1].phaseAtMs, 4);
-  assert.equal(h.snapshot().events[1].elapsedMs, 3);
   assert.doesNotMatch(JSON.stringify(h.snapshot()), /PRIVATE_|sql|body|path/);
   h.restore();
 });

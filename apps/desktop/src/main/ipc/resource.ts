@@ -33,7 +33,6 @@ import {
   runCallerOwnedPostCommit,
   type KnowledgeRefreshOwner
 } from '../knowledgeRefreshOwnership.js';
-import { createScriptSaveTrace } from '../scriptSaveTrace.js';
 
 export interface ResourceIpcDeps {
   handle: TrustedIpcHandle;
@@ -334,8 +333,7 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
       const writeEncoding =
         encoding === 'utf8-bom' || encoding === 'shift_jis' ? encoding : 'utf8';
       void writeEncoding;
-      const trace = createScriptSaveTrace();
-      const operationLog = await trace.run('ensure-log', () => deps.ensureActiveOperationLog(activeSession));
+      const operationLog = await deps.ensureActiveOperationLog(activeSession);
       const storage = deps.durableStoragePaths(activeSession.meta.workspaceId);
       if (entryName) {
         const gameBlocked = deps.rejectNonSekiroNativeWrite(sourceUri, file);
@@ -349,11 +347,11 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
         // Bridge's entry-indexed native read/write path whenever the read view
         // supplied the identity proof.
         if (entryIndex !== undefined) {
-          const readRoots = await trace.run('read-roots', () => deps.verifiedReadRoots(activeSession, dirname(file.absolutePath)));
+          const readRoots = await deps.verifiedReadRoots(activeSession, dirname(file.absolutePath));
           if (readRoots.diagnostics.length > 0) {
             return { ok: false, changedFiles: [], diagnostics: readRoots.diagnostics };
           }
-          const nativeRead = await trace.run('native-reread', () => runBridge<{
+          const nativeRead = await runBridge<{
             containerHash?: string;
             contentHash?: string;
             contentBase64?: string;
@@ -375,7 +373,7 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
               : {}),
             timeoutMs: 120_000,
             maxFrameBytes: 32 * 1024 * 1024
-          }));
+          });
           const nativeData = nativeRead.data;
           if (nativeRead.parseStatus === 'failed'
             || !nativeData?.contentBase64
@@ -440,21 +438,15 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
               })();
           if (!compiled.ok) return { ok: false, changedFiles: [], diagnostics: compiled.diagnostics };
 
-          const stage = await trace.run('stage-roots', () => deps.verifiedStageRoots(activeSession, storage, 'LUABND_STAGING_PREPARE_FAILED'));
+          const stage = await deps.verifiedStageRoots(activeSession, storage, 'LUABND_STAGING_PREPARE_FAILED');
           if (stage.diagnostics.length > 0) {
             return { ok: false, changedFiles: [], diagnostics: stage.diagnostics };
           }
           const commitPort = deps.sessionCommitPort(activeSession, operationLog, storage, { knowledgeRefreshOwner: 'caller' });
-          const finishCandidate = trace.begin('candidate-staging');
           const confirmingCommit: RawReplaceCommitPort = {
-            commit: async (input) => {
-              // buildNativeMutationCandidate has returned: staging output read
-              // and cleanup complete before the first confirmation callback.
-              finishCandidate();
-              return input.confirmation
-                ? trace.run('commit-entry', () => commitPort.commit(input))
-                : confirmationRequiredResult(sourceUri);
-            }
+            commit: async (input) => input.confirmation
+              ? commitPort.commit(input)
+              : confirmationRequiredResult(sourceUri)
           };
           const outcome = await applyNativeMutation(
             {
@@ -466,7 +458,7 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
               stagingPrefix: 'luabnd',
               stagingFileName: `${entryIndex}.mut.dcx`,
               stageWrite: async (context) => {
-                const nativeWrite = await trace.run('stage-native-write', () => runBridge<{ outputHash?: string }>({
+                const nativeWrite = await runBridge<{ outputHash?: string }>({
                   command: 'write-luabnd-script',
                   filePath: file.absolutePath,
                   resourceUri: sourceUri,
@@ -485,7 +477,7 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
                   },
                   timeoutMs: 120_000,
                   maxFrameBytes: 32 * 1024 * 1024
-                }));
+                });
                 return {
                   ok: nativeWrite.parseStatus !== 'failed' && nativeWrite.data !== null,
                   diagnostics: nativeWrite.diagnostics
@@ -507,7 +499,7 @@ export function registerResourceIpcHandlers(deps: ResourceIpcDeps): void {
               },
               commit: confirmingCommit
             }
-          ).then((value) => { finishCandidate(); return value; }, (error: unknown) => { finishCandidate('throw'); throw error; });
+          );
           if (outcome.status === 'committed' && outcome.result.ok) {
             await runCallerOwnedPostCommit(outcome.result, {
               prepare: () => deps.clearResourceRelatedCaches(),
