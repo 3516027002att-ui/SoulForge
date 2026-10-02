@@ -16,6 +16,12 @@ const root = resolve(import.meta.dirname, '..');
 const productionFiles = [
   'apps/desktop/src/main/ipc.ts',
   'apps/desktop/src/main/services/workspaceUtilityLifecycleService.ts',
+  'apps/desktop/src/main/ipc/documents.ts',
+  'apps/desktop/src/main/services/documentService.ts',
+  'apps/desktop/src/main/services/semanticRefreshService.ts',
+  'apps/desktop/src/main/ipc/workspace.ts',
+  'apps/desktop/src/main/services/workspaceService.ts',
+  'apps/desktop/src/main/services/workspaceRuntimeService.ts',
   'apps/desktop/src/main/ipc/event.ts',
   'apps/desktop/src/main/services/eventService.ts',
   'apps/desktop/src/main/ipc/param.ts',

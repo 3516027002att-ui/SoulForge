@@ -34,6 +34,9 @@ const ABSOLUTE_FILE_URI = /file:\/\/\/[A-Za-z]:\/[^\s'"()（）\[\]「」『』�
  */
 export function maskPathFragments(text: string): string {
   if (typeof text !== 'string' || text.length === 0) return text;
+  // Every supported path pattern requires a colon or backslash. Preserve the
+  // existing replacements for possible matches without scanning ordinary names.
+  if (!text.includes(':') && !text.includes('\\')) return text;
   return text
     .replace(ABSOLUTE_FILE_URI, MASKED_PATH_PLACEHOLDER)
     .replace(WINDOWS_DRIVE_PATH, MASKED_PATH_PLACEHOLDER)

@@ -463,6 +463,9 @@ describe('S29 能打开就能写（grok §1-9/§1-10）', () => {
   const appShellSource = readFileSync(
     join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'App.tsx'), 'utf8'
   );
+  const paramViewSource = /from '\.\/app\/ParamEditorView\.js'/.test(appShellSource)
+    ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'ParamEditorView.tsx'), 'utf8')
+    : appShellSource;
   const appSource = stripComments(/from '\.\/app\/useParamMutationController\.js'/.test(appShellSource)
     ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'useParamMutationController.ts'), 'utf8')
     : appShellSource);
@@ -494,9 +497,9 @@ describe('S29 能打开就能写（grok §1-9/§1-10）', () => {
   it('renderer 不再拿「缺少容器或条目哈希」拒绝写入', () => {
     assert.ok(!appSource.includes('缺少容器或条目哈希'), '哈希拒写文案已删除');
     if (/from '\.\/app\/useParamMutationController\.js'/.test(appShellSource)) {
-      assert.match(appShellSource, /onApplyFieldMutation=\{applyContainerParamFieldMutation\}/);
-      assert.match(appShellSource, /onApplyRowNameMutation=\{applyContainerParamRowNameMutation\}/);
-      assert.match(appShellSource, /onApplyRowMutation=\{applyContainerParamRowMutation\}/);
+      assert.match(paramViewSource, /onApplyFieldMutation=\{applyContainerParamFieldMutation\}/);
+      assert.match(paramViewSource, /onApplyRowNameMutation=\{applyContainerParamRowNameMutation\}/);
+      assert.match(paramViewSource, /onApplyRowMutation=\{applyContainerParamRowMutation\}/);
     }
   });
 

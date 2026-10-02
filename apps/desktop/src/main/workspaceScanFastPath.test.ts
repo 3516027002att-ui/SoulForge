@@ -4,17 +4,17 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 declare const __SOULFORGE_REPO_ROOT__: string;
 
-const workspaceIpcSource = readFileSync(
+const workspaceServiceSource = readFileSync(
   typeof __SOULFORGE_REPO_ROOT__ !== 'undefined'
-    ? join(__SOULFORGE_REPO_ROOT__,'apps/desktop/src/main/ipc/workspace.ts')
-    : join(dirname(fileURLToPath(import.meta.url)), 'ipc', 'workspace.ts'),
+    ? join(__SOULFORGE_REPO_ROOT__,'apps/desktop/src/main/services/workspaceService.ts')
+    : join(dirname(fileURLToPath(import.meta.url)), 'services', 'workspaceService.ts'),
   'utf8'
 );
-const scanStart = workspaceIpcSource.indexOf("handle('workspace.scan'");
-const scanEnd = workspaceIpcSource.indexOf("\n  handle('workspace.remountBase'", scanStart);
-assert.ok(scanStart >= 0, 'workspace.scan handler must exist');
-assert.ok(scanEnd > scanStart, 'workspace.scan handler boundary must exist');
-const scanHandler = workspaceIpcSource.slice(scanStart, scanEnd);
+const scanStart = workspaceServiceSource.indexOf('const scan = async');
+const scanEnd = workspaceServiceSource.indexOf('const remountBase = async', scanStart);
+assert.ok(scanStart >= 0, 'workspace.scan application operation must exist');
+assert.ok(scanEnd > scanStart, 'workspace.scan application boundary must exist');
+const scanHandler = workspaceServiceSource.slice(scanStart, scanEnd);
 const lightScanOffset = scanHandler.indexOf('const lightResult = await scanWorkspace');
 const databaseOpenOffset = scanHandler.indexOf('await deps.ensureActiveOperationLog');
 const backgroundOffset = scanHandler.indexOf('const backgroundTask = (async () => {');

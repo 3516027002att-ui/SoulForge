@@ -562,8 +562,19 @@ request's actual UUID/session and both source hashes carried native and transpor
 details through the helper. Both native pools were disposed. This verifies the real
 helper transport/projection contract, not latency or Electron/main execution;
 `.local-validation/msb-node-client/helper-real-read.json` has SHA256 `cacd5b48...`.
-The main service adapter and its session capture before the first await remain a
-separate source-owner integration before an application-service timeline capture.
+The main service adapter subsequently captured the same owner/session before its
+first await and retained the read-owner/generation guards. A headless capture of
+that unmodified application service (`d0fab033...`) used actual scanner, workspace,
+index, read roots, compiled Core/helper, native apphost and renderer DTO sanitizer
+functions. Two warmups and ten measured reads had median application return
+157.696 ms, nested helper return 100.278 ms, map projection 9.645 ms, index ingest
+6.742 ms and sanitizer 35.031 ms. Native execution (24.571 ms) is also nested;
+these durations must not be added. Actual request/session UUIDs, both input hashes
+and the identical complete DTO data SHA256 `be36ea81...` are retained in receipt
+`6170c986...`. The 25 observed source/input pins matched before and after capture;
+ten additional implementation copies are explicitly a post-run inventory. This
+executes production functions in owned Node/VM storage, not Electron IPC/main
+runtime, renderer preparation or GPU first frame.
 
 ### Allocation regression contract correction
 
@@ -587,3 +598,84 @@ the other five report/mutation/error checks passed. The unchanged real producer
 passed all 81 tests with zero skips. No product, runtime flags or budgets changed;
 trace, mutant source/DLL identities and tests are retained under
 `.local-validation/msb-allocation-contract/`.
+
+### Renderer string masking fast path
+
+The application capture identified sanitizer traversal as an available CPU cost.
+A separate single read through the frozen service captured its complete actual
+pre-sanitizer input, preserving the same DTO data hash. Of 10,053 strings, 9,870
+contain neither a colon nor a backslash; 9,817 values are unique. The candidate
+therefore uses no memo or retained DTO cache. Every existing masking regex requires
+one of those two characters, so their absence returns the original string before
+regex replacement; all possible matches use the unchanged shared replacements.
+Object traversal, sensitive-field filtering, source-text exemptions and binary
+identity remain unchanged.
+
+Twenty paired sanitizer-only operations in each B/C and C/B order gave median
+36.740 → 32.644 ms (-11.15%) and 34.612 → 30.368 ms (-12.26%). CPU time moved in the
+same direction. Tiny and 10,000-unique-string controls showed no measured regression.
+The complete serialized output stayed equal, including the real DTO golden. The
+owned comparison also covered 20,000 deterministic mixed-character strings,
+Windows/UNC/device/file-URI masking, logical URI and existing POSIX-string behavior,
+source-content exemptions, sensitive keys, own enumerable/getter order, thrown
+error identity, diagnostic details, primitives, sparse arrays and binary identity.
+The maintained shared regression went from 7/8 RED to 8/8 GREEN and demonstrates
+that impossible matches avoid regex work. Strict checking of both shared source
+files passed. Evidence is under `.local-validation/renderer-sanitizer/`, with
+comparison report SHA256 `41d47d1b...` and receipt `42e319ce...`.
+
+This is a measured local sanitizer CPU improvement. Natural-GC heap/RSS snapshots
+do not establish exact allocation or retained/peak memory savings. The comparison
+does not measure whole-request, Electron, GPU or first-frame improvement.
+
+### Primitive field projection
+
+A follow-up that merely reordered the source-text Set lookup was rejected: it
+reduced lookups from 132,720 to 10,040 but had mixed median CPU/wall results across
+the two orders (+0.98% and -4.29%). It was never added to production. An independent
+sampled CPU stack then identified the object-entry loop and recursive field call
+as the remaining prominent sites. This profiler run is diagnostic evidence with
+sampling overhead, not a latency baseline.
+
+The retained candidate keeps `Object.entries` and sensitive-field filtering, copies
+non-object primitive fields directly, sends ordinary strings through the same
+masking function, and continues to recurse into objects. Source-text strings still
+pass through verbatim. No result/input cache or shared mutable projection is added.
+With the preceding shared masking fast path held constant in both variants, two
+20-pair sanitizer-only B/C and C/B comparisons had medians 30.634 → 18.637 ms
+(-39.16%) and 29.912 → 17.474 ms (-41.58%); CPU moved in the same direction, and tiny
+and unique-string controls showed no measured regression. The full real serialized
+DTO and its existing data golden remained equal. Raw rows, source/runtime/input
+pins and comparisons are in `.local-validation/renderer-primitive-copy/`, report
+SHA256 `4503283c...`.
+
+Eight maintained source-bound regressions went from 7/8 RED to 8/8 GREEN. They
+cover fewer primitive recursive visits, unchanged path/source-text/diagnostic
+projection, new output objects without aliases to mutable inputs or other output
+copies, own getter snapshot order including filtered fields, original thrown
+error identity, primitives, sparse arrays, binary identity and cyclic-object
+failure. Strict checking of the actual renderer DTO source passed. This remains
+local projection CPU evidence; natural-GC snapshots do not prove exact allocation
+or retained-memory savings, and whole-request/Electron/GPU/first-frame improvement
+has not been measured.
+
+A subsequent complete application-service comparison used the same frozen service
+source, actual compiled Core/helper, independently copied normal apphost, input,
+workspace/index and read roots. The shared masking fast path was common to both
+variants; only primitive dispatch differed. After four warmup reads, ten pairs in
+each B/C and C/B order gave application-return medians 122.121 → 102.916 ms (-15.73%)
+and 110.983 → 102.067 ms (-8.03%). The same requests' sanitizer medians were
+32.339 → 20.316 ms and 32.668 → 20.849 ms. Native/helper timings also drifted between
+variants, so the complete return difference is not entirely attributed to the
+sanitizer. Native and helper spans are nested within application return, not added
+as a critical-path total.
+
+All 44 read rows retained request/session/source identity, and the 177 actual
+frames retained request/session metadata. All DTO data hashes were identical,
+all 29 observed pins matched before and after,
+and the actual index retained 7,404 map entities and 1,506 regions. Observation had
+zero errors, native pools were disposed and hooks restored. Receipt `c95984fa...`
+and report `36b2533f...` are under `.local-validation/msb-service-paired/`. This
+measures headless production application functions through native return and DTO
+projection. It does not execute Electron IPC/main runtime, renderer preparation or
+GPU first frame, and natural-GC memory snapshots remain limited.

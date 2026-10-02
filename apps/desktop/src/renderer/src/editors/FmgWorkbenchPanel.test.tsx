@@ -295,6 +295,9 @@ describe('S29 能打开就能写：FMG 直写不进审查队列（Text owner / A
     join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'App.tsx'),
     'utf8'
   );
+  const textViewSource = /from '\.\/app\/LoadedDocumentViews\.js'/.test(appSource)
+    ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'LoadedDocumentViews.tsx'), 'utf8')
+    : appSource;
   const textControllerSource = readFileSync(
     join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'useTextDocumentController.ts'),
     'utf8'
@@ -305,7 +308,7 @@ describe('S29 能打开就能写：FMG 直写不进审查队列（Text owner / A
   it('FMG 条目编辑直接调 applyFmgMutation，不再 propose 进审查队列', () => {
     assert.ok(fmgHandlerStart >= 0, 'FmgWorkbenchPanel 直写 handler 未找到，断言失锚');
     assert.match(appSource, /import \{ useTextDocumentController \} from '\.\/app\/useTextDocumentController\.js'/);
-    assert.match(appSource, /onMutation=\{submitFmgEntry\}/);
+    assert.match(textViewSource, /onMutation=\{submitFmgEntry\}/);
     const handler = textControllerSource.slice(fmgHandlerStart, fmgHandlerStart + 2200);
     assert.match(handler, /bridge\.applyFmgMutation/);
     assert.doesNotMatch(handler, /changeStore\.propose/);

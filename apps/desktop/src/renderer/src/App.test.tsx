@@ -29,6 +29,18 @@ const navigationControllerSource = /from '\.\/app\/useNavigationController\.js'/
 const changeOperationsControllerSource = /from '\.\/app\/useChangeOperationsController\.js'/.test(appSource)
   ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'useChangeOperationsController.ts'), 'utf8')
   : appSource;
+const workspaceHeaderSource = /from '\.\/app\/WorkspaceHeaderView\.js'/.test(appSource)
+  ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'WorkspaceHeaderView.tsx'), 'utf8')
+  : appSource;
+const navigationViewSource = /from '\.\/app\/NavigationSidebarViews\.js'/.test(appSource)
+  ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'NavigationSidebarViews.tsx'), 'utf8')
+  : appSource;
+const commandPaletteViewSource = /from '\.\/app\/CommandPaletteView\.js'/.test(appSource)
+  ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'CommandPaletteView.tsx'), 'utf8')
+  : appSource;
+const operationsViewSource = /from '\.\/app\/ChangeOperationsViews\.js'/.test(appSource)
+  ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'ChangeOperationsViews.tsx'), 'utf8')
+  : appSource;
 // buildDomainSummaries 的 visibility 逻辑在 domainNavigation.ts。
 const domainNavigationSource = readFileSync(
   join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'navigation', 'domainNavigation.ts'),
@@ -40,7 +52,7 @@ const ipcSource = readFileSync(
   'utf8'
 );
 const workspaceIpcSource = readFileSync(
-  join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc', 'workspace.ts'),
+  join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'services', 'workspaceService.ts'),
   'utf8'
 );
 const workbenchOpsSource = readFileSync(
@@ -77,15 +89,18 @@ describe('问题 1 壳层：开始页只在首次打开；顶栏「开始」召�
   });
 
   it('标题栏不可点品牌标签换成 workspace-switcher 按钮/菜单（打开/更换 Mod、选/换/清原版）', () => {
-    assert.match(appSource, /data-testid="workspace-switcher"/);
-    assert.match(appSource, /data-testid="switcher-open-workspace"/);
-    assert.match(appSource, /data-testid="switcher-choose-base-directory"/);
-    assert.match(appSource, /data-testid="switcher-clear-base-directory"/);
-    assert.match(appSource, /void openWorkspace\(\)/);
-    assert.match(appSource, /void chooseBaseDirectory\(\)/);
-    assert.match(appSource, /clearBaseDirectory\(\)/);
+    assert.match(workspaceHeaderSource, /data-testid="workspace-switcher"/);
+    if (workspaceHeaderSource !== appSource) {
+      assert.match(appSource, /<WorkspaceHeaderView workspace=\{workspaceController\} shell=\{shellInteraction\}/);
+    }
+    assert.match(workspaceHeaderSource, /data-testid="switcher-open-workspace"/);
+    assert.match(workspaceHeaderSource, /data-testid="switcher-choose-base-directory"/);
+    assert.match(workspaceHeaderSource, /data-testid="switcher-clear-base-directory"/);
+    assert.match(workspaceHeaderSource, /void openWorkspace\(\)/);
+    assert.match(workspaceHeaderSource, /void chooseBaseDirectory\(\)/);
+    assert.match(workspaceHeaderSource, /clearBaseDirectory\(\)/);
     // 旧的不可点品牌标签已移除。
-    assert.doesNotMatch(appSource, /className="brand-tag"/);
+    assert.doesNotMatch(workspaceHeaderSource, /className="brand-tag"/);
   });
 
   it('开始态侧栏已拆：源码不得再有 start-sidebar / start-sidebar-tools / start-sidebar-file-list', () => {
@@ -125,11 +140,12 @@ describe('问题 1 壳层：开始页只在首次打开；顶栏「开始」召�
 
   it('12-E：侧栏不再拼「XX · 逻辑库」（所有语义域都删，Files 数量与 project「开始」仍在）', () => {
     // 用户点名的是侧栏头那句「XX · 逻辑库」：这一句所有域都删，且不留空 hint span。
-    assert.doesNotMatch(appSource, /\$\{domainLabel\(activeDomain\)\} · 逻辑库/);
-    assert.doesNotMatch(appSource, /逻辑库工作域/);
-    assert.doesNotMatch(appSource, /逻辑库工作台/);
+    assert.doesNotMatch(navigationViewSource, /\$\{domainLabel\(activeDomain\)\} · 逻辑库/);
+    assert.doesNotMatch(navigationViewSource, /逻辑库工作域/);
+    assert.doesNotMatch(navigationViewSource, /逻辑库工作台/);
     // Files 数量保留。
-    assert.match(appSource, /formatFilesCount\(physicalBrowseFiles\.length\)/);
+    assert.match(navigationViewSource, /formatFilesCount\(physicalBrowseFiles\.length\)/);
+    if (navigationViewSource !== appSource) assert.match(appSource, /<NavigationSidebarViews navigation=\{navigation\} resource=\{resourceDocument\}/);
   });
 });
 
@@ -144,14 +160,15 @@ describe('P0 回滚与会话续接防线', () => {
     assert.match(changeOperationsControllerSource, /rollbackInFlightRef/);
     assert.match(changeOperationsControllerSource, /operationHistoryRefreshRef/);
     assert.match(changeOperationsControllerSource, /operationHistoryRequestRef/);
-    assert.doesNotMatch(appSource, /disabled=\{rollbackInFlight !== null\}/);
+    assert.doesNotMatch(operationsViewSource, /disabled=\{rollbackInFlight !== null\}/);
     assert.doesNotMatch(workbenchOpsSource, /rollbackBusy\?: boolean/);
     assert.doesNotMatch(workbenchOpsSource, /disabled=\{props\.rollbackBusy === true\}/);
     assert.match(workbenchOpsSource, /rollbackBusyOpId\?: string \| null/);
     assert.match(workbenchOpsSource, /props\.rollbackBusyOpId === row\.opId/);
     assert.match(changeOperationsControllerSource, /已有回滚正在处理中，请等待当前操作完成/);
-    assert.match(appSource, /rollbackInFlight === `operation:\$\{entry\.opId\}`/);
-    assert.match(appSource, /rollbackInFlight === `file:\$\{entry\.opId\}:\$\{path\}`/);
+    assert.match(operationsViewSource, /rollbackInFlight === `operation:\$\{entry\.opId\}`/);
+    assert.match(operationsViewSource, /rollbackInFlight === `file:\$\{entry\.opId\}:\$\{path\}`/);
+    if (operationsViewSource !== appSource) assert.match(appSource, /<ChangeOperationsSidebarViews operations=\{changeOperations\}/);
     assert.match(appSource, /reloadSelectedResourceAfterRollback/);
     assert.match(appSource, /selectFile\(\{ \.\.\.selectedFile \}\)/);
   });
@@ -202,7 +219,8 @@ describe('命令面板资源搜索', () => {
     assert.match(navigationControllerSource, /const cmdkAllResourceMatches = useMemo\(\(\) =>/);
     assert.match(navigationControllerSource, /!options\.cmdkOpen \|\| !workspace \|\| !cmdkNormalized \? \[\]/);
     assert.match(navigationControllerSource, /filterCommandPaletteResources\(indexedFiles, cmdkNormalized\)/);
-    assert.match(appSource, /workspace \? '无匹配命令或资源。' : '请先打开 Mod 工作区；打开后可搜索资源。'/);
+    assert.match(commandPaletteViewSource, /workspace \? '无匹配命令或资源。' : '请先打开 Mod 工作区；打开后可搜索资源。'/);
+    if (commandPaletteViewSource !== appSource) assert.match(appSource, /<CommandPaletteView cmdkOpen=\{cmdkOpen\} cmdkQuery=\{cmdkQuery\}/);
   });
 
   it('完整路径、basename、斜杠/反斜杠和裸 basename 都只从索引中稳定命中', () => {

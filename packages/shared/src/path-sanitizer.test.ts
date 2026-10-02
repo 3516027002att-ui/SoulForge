@@ -57,4 +57,21 @@ describe('maskPathFragments（S13 片段打码）', () => {
   it('空串与空内容安全', () => {
     assert.equal(maskPathFragments(''), '');
   });
+
+  it('无匹配必需字符的字符串保留原值并避免正则替换工作', () => {
+    const originalReplace = String.prototype.replace;
+    let regexCalls = 0;
+    String.prototype.replace = function (this: string, ...args: unknown[]) {
+      if (args[0] instanceof RegExp) regexCalls += 1;
+      return Reflect.apply(originalReplace, this, args);
+    } as typeof originalReplace;
+    try {
+      for (const text of ['m000010', 'MapPiece', '字段说明（中文）', '/workspace/relative/file']) {
+        assert.equal(maskPathFragments(text), text);
+      }
+      assert.equal(regexCalls, 0);
+    } finally {
+      String.prototype.replace = originalReplace;
+    }
+  });
 });
