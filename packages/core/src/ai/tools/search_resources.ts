@@ -1,3 +1,4 @@
+import { ALL_RESOURCE_KINDS } from '@soulforge/shared';
 import type { RegisteredTool } from '../toolRegistry.js';
 import { asRecord, asResourceKinds, fail, ok } from '../toolRegistrySupport.js';
 /** search_resources: one domain tool declaration, schema and handler. */
@@ -7,7 +8,7 @@ export function createSearchResourcesTool(): RegisteredTool {
         description: 'Search indexed workspace files by path, extension, or resource kind. Returns total and an opaque nextCursor; follow nextActions. Recovery/backup artifacts are excluded unless sourceFilter=all or artifacts is explicit.',
         permission: 'read',
         permissionLevel: 'read',
-        inputSchema: { query: 'string?', limit: 'safe-integer?', kinds: 'array?', cursor: 'string?', sourceFilter: 'enum:active|all|artifacts?' },
+        inputSchema: { query: 'string?', limit: 'safe-integer?', kinds: `enum[]:${ALL_RESOURCE_KINDS.join('|')}?`, cursor: 'string?', sourceFilter: 'enum:active|all|artifacts?' },
         run: (input, context) => {
             const ws = context.workspaceIndex;
             if (ws === null)

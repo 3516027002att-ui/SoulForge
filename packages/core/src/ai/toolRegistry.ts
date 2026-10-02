@@ -204,7 +204,8 @@ type ToolHandler = (input: unknown, context: ToolContext) => Promise<ToolResult>
  * the field optional; unrecognized type names pass through). Undeclared extra
  * fields are ignored — callers may attach context markers.
  *
- * Enumerations use `enum:a|b|c` (optional as `enum:a|b|c?`). Before this, a
+ * Enumerations use `enum:a|b|c` (optional as `enum:a|b|c?`); arrays of those
+ * values use `enum[]:a|b|c` (optional as `enum[]:a|b|c?`). Before this, a
  * field like `direction` was declared as bare `'string'` and the model was
  * told nothing about the three accepted values; a wrong value did not fail but
  * silently fell back to a default (`'sideways'` → `'both'`, `mode: 'destroy'`
@@ -212,6 +213,7 @@ type ToolHandler = (input: unknown, context: ToolContext) => Promise<ToolResult>
  */
 export type ToolInputShape = Record<string, string>;
 const ENUM_PREFIX = 'enum:';
+const ENUM_ARRAY_PREFIX = 'enum[]:';
 /** Split a declared type string into its bare type and optionality. */
 function parseDeclaredType(declared: string): {
     bare: string;
@@ -220,11 +222,11 @@ function parseDeclaredType(declared: string): {
     const optional = declared.endsWith('?');
     return { bare: optional ? declared.slice(0, -1) : declared, optional };
 }
-/** Accepted values for an `enum:a|b|c` declaration, or null if not an enum. */
-function enumValues(bare: string): string[] | null {
-    if (!bare.startsWith(ENUM_PREFIX))
+/** Accepted values for the requested enum declaration, or null if absent. */
+function enumValues(bare: string, prefix = ENUM_PREFIX): string[] | null {
+    if (!bare.startsWith(prefix))
         return null;
-    const values = bare.slice(ENUM_PREFIX.length).split('|').filter((value) => value.length > 0);
+    const values = bare.slice(prefix.length).split('|').filter((value) => value.length > 0);
     return values.length > 0 ? values : null;
 }
 export interface RegisteredTool extends ToolDescriptor {
@@ -258,6 +260,20 @@ export function validateToolInput(shape: ToolInputShape | undefined, input: unkn
             // handler, so a wrong value comes back naming the accepted set.
             if (typeof value !== 'string' || !allowed.includes(value)) {
                 problems.push(`字段 ${key} 取值应为 ${allowed.join(' | ')} 之一`);
+            }
+            continue;
+        }
+        const allowedItems = enumValues(expectedType, ENUM_ARRAY_PREFIX);
+        if (allowedItems !== null) {
+            if (!Array.isArray(value)) {
+                problems.push(`字段 ${key} 类型应为 array`);
+            }
+            else {
+                value.forEach((item, index) => {
+                    if (typeof item !== 'string' || !allowedItems.includes(item)) {
+                        problems.push(`字段 ${key}[${index}] 取值应为 ${allowedItems.join(' | ')} 之一`);
+                    }
+                });
             }
             continue;
         }
@@ -316,6 +332,9 @@ function jsonSchemaForDeclaredType(declaredType: string): Record<string, unknown
     const allowed = enumValues(declaredType);
     if (allowed !== null)
         return { type: 'string', enum: allowed };
+    const allowedItems = enumValues(declaredType, ENUM_ARRAY_PREFIX);
+    if (allowedItems !== null)
+        return { type: 'array', items: { type: 'string', enum: allowedItems } };
     switch (declaredType) {
         case 'string':
             return { type: 'string' };

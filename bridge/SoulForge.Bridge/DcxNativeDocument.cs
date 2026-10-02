@@ -190,11 +190,20 @@ internal sealed class DcxNativeDocument
     {
         using var input = new MemoryStream(compressed, writable: false);
         using var zlib = new ZLibStream(input, CompressionMode.Decompress);
-        using var output = new MemoryStream(expectedSize);
-        zlib.CopyTo(output);
-        var payload = output.ToArray();
-        if (payload.Length != expectedSize)
-            throw new InvalidDataException($"DFLT 解压大小不一致：预期 {expectedSize}，实际 {payload.Length}。");
+        // The caller has already validated the declared size. Keep one exact
+        // output buffer rather than growing a stream and copying it afterwards.
+        // An overlong decompressed stream must not grow past that same bound.
+        var payload = new byte[expectedSize];
+        var written = 0;
+        while (written < payload.Length)
+        {
+            var count = zlib.Read(payload.AsSpan(written));
+            if (count == 0)
+                throw new InvalidDataException($"DFLT 解压大小不一致：预期 {expectedSize}，实际 {written}。");
+            written += count;
+        }
+        if (zlib.ReadByte() != -1)
+            throw new InvalidDataException($"DFLT 解压大小不一致：预期 {expectedSize}，实际超过 {expectedSize}。");
         return payload;
     }
 

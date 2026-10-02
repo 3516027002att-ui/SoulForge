@@ -109,10 +109,12 @@ const {
   ENUM_FIELD_NORMALIZERS
 } = await import(pathToFileURL(REGISTRY_JS).href);
 const { createAgentToolBridge } = await import(pathToFileURL(BRIDGE_JS).href);
+const { asResourceKinds } = await import(pathToFileURL(join(DIST, 'toolRegistrySupport.js')).href);
 
 // 判据⑧读的是生产侧真实归一化函数,不是门禁自己重述一遍取值集合。
 // 重述等于第二份副本,会漂移。
 const ENUM_NORMALIZERS = ENUM_FIELD_NORMALIZERS ?? {};
+const ENUM_ARRAY_NORMALIZERS = { 'search_resources.kinds': asResourceKinds };
 let enumAcceptanceProbes = 0;
 const exemptionsApplied = [];
 
@@ -200,13 +202,14 @@ for (const descriptor of descriptors) {
   // 故它必须投影成 type=string 且带 enum 列表 —— 与「未识别类型串」不同,
   // 后者运行期一律放过,投影就不能宣告任何类型。
   const enumValuesOf = (bare) => {
-    if (!bare.startsWith('enum:')) return null;
-    const values = bare.slice('enum:'.length).split('|').filter((value) => value.length > 0);
+    const prefix = bare.startsWith('enum[]:') ? 'enum[]:' : 'enum:';
+    if (!bare.startsWith(prefix)) return null;
+    const values = bare.slice(prefix.length).split('|').filter((value) => value.length > 0);
     return values.length > 0 ? values : null;
   };
   const expectedTypeFor = (declared) => {
     const bare = declared.endsWith('?') ? declared.slice(0, -1) : declared;
-    if (enumValuesOf(bare) !== null) return 'string';
+    if (enumValuesOf(bare) !== null) return bare.startsWith('enum[]:') ? 'array' : 'string';
     if (bare === 'safe-integer') return 'integer';
     if (bare === 'string[]') return 'array';
     return ['string', 'number', 'boolean', 'array', 'object'].includes(bare) ? bare : null;
@@ -217,6 +220,7 @@ for (const descriptor of descriptors) {
     const optional = declared.endsWith('?');
     const bare = optional ? declared.slice(0, -1) : declared;
     const declaredEnum = enumValuesOf(bare);
+    const enumArray = bare.startsWith('enum[]:');
     const expectedType = expectedTypeFor(declared);
 
     // 判据②:字段必须存在。
@@ -269,7 +273,7 @@ for (const descriptor of descriptors) {
     // 于是模型基于一个它没要求的结果继续推理。
     if (declaredEnum !== null) {
       declaredCounts.enumFields += 1;
-      const exposedEnum = properties[field]?.enum;
+      const exposedEnum = enumArray ? properties[field]?.items?.enum : properties[field]?.enum;
       if (!Array.isArray(exposedEnum)) {
         findings.push({
           code: 'SCHEMA_ENUM_NOT_EXPOSED',
@@ -305,7 +309,7 @@ for (const descriptor of descriptors) {
         const otherBare = otherDeclared.slice(0);
         probeInput[otherField] = PLACEHOLDER[otherBare] ?? 'x';
       }
-      probeInput[field] = '__not_a_valid_enum_value__';
+      probeInput[field] = enumArray ? [declaredEnum[0], '__not_a_valid_enum_value__'] : '__not_a_valid_enum_value__';
       const enumVerdict = validateToolInput(shape, probeInput);
       if (enumVerdict.ok) {
         findings.push({
@@ -336,12 +340,16 @@ for (const descriptor of descriptors) {
       // 全绿,而 asReferenceDirection 只认三个值,sideways 会被静默回落成
       // both。模型照 schema 传了一个「合法」值,拿回的却是它没要求的方向。
       // 故必须拿 handler 的归一化函数做反向对钉。
-      const normalizer = ENUM_NORMALIZERS[`${descriptor.name}.${field}`];
+      const normalizer = (enumArray ? ENUM_ARRAY_NORMALIZERS : ENUM_NORMALIZERS)[`${descriptor.name}.${field}`];
       if (normalizer) {
         enumAcceptanceProbes += 1;
         for (const value of declaredEnum) {
-          const accepted = normalizer(value);
-          if (accepted !== value) {
+          const expected = enumArray ? [value] : value;
+          const accepted = normalizer(expected);
+          const matches = enumArray
+            ? Array.isArray(accepted) && accepted.length === 1 && accepted[0] === value
+            : accepted === value;
+          if (!matches) {
             findings.push({
               code: 'ENUM_VALUE_NOT_ACCEPTED',
               tool: descriptor.name,

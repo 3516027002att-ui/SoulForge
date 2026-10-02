@@ -4,8 +4,11 @@ The 2026-10-01 numbers below are historical observations on their named
 producers and runtime. Their temporary per-run receipts and original restored
 MAP copies were lost with the execution filesystem. The maintained source
 fixtures and grid generator remain available; fresh recovery captures must
-bind their own runtime, producer and input hashes. The recovered workspace has
-no real MAP corpus, and paused backup uploads leave volume 0048 unavailable.
+bind their own runtime, producer and input hashes. After the private backup
+completed, a single verified volume restored a real DFLT MSB, a KRAK MAPBND
+and two DFLT character containers. The selected MAPBND remains unavailable on
+the supported Linux decoder; character inputs do not prove actual map-scene
+or GPU performance.
 
 `scripts/profile-map-decode.mjs` calls the production Bridge daemon's paged
 `read-map-static-geometry` command. It verifies repeated geometry bytes and
@@ -142,6 +145,64 @@ regenerated UV grid retained input `379b2126…` and complete geometry
 `dd3fdd1e…`. Twenty daemon rounds averaged 207.59 ms for warm model reads;
 all four concurrency/cancellation/reopen/release controls passed. These fresh
 captures are independent of the earlier runtime's numbers.
+
+The next recovery capture used only backup volume 0048: 512 MiB, SHA
+`f9f34e10…`. The original-byte Mod m10 MSB (`8dca8500…`, 426,514 bytes)
+expanded to 6,772,360 bytes and exposed 864 models, 7,404 parts, 1,506 regions,
+189 events and 33 routes. Its complete document projection remained SHA
+`dd148675…` across repeated reads. The Mod m10 MAPBND (`f634e1f5…`, 1,975,936
+bytes) was actually KRAK and returned `MAPBND_KRAK_OODLE_UNAVAILABLE`.
+The second Mod MAPBND in the backup has identical bytes; it was not downloaded.
+
+The same volume contained character containers c4510 (`06304a3a…`, 7,516,841
+bytes) and c5030 (`3fea221d…`, 2,193,302 bytes). Their physical magic is DCX,
+their outer compression is DFLT, and actual native inventory reports
+`DCX-DFLT->BND4`. The fixed registry's BND4 label denotes this embedded binder,
+as its specification defines; it is not a conflicting top-level classification.
+On the existing production MAP static decoder, c5030 yielded 11 pages, eight
+output meshes, 28,868 emitted vertices and 37,478 triangles. SHA `6f66af7f…`
+binds the five position, normal, UV, index and source-index buffers measured by
+the maintained driver. The candidate retained those bytes and counts and the
+same concurrency, cancellation, reopen and disposal controls. This is real
+character geometry supplied to the MAP decoder, not an actual map benchmark.
+
+One measured DFLT allocation hotspot was the pre-sized `MemoryStream` followed
+by `ToArray`, which retained two output allocations per inflate. The exact-size
+output-buffer correction changes only this method. It fills the declared-size
+array, rejects short output, and probes one further decompressed byte to reject
+overlong output without growing the array. Existing size limits and KRAK
+dispatch remain unchanged. The 12 maintained DFLT cases first produced two
+allocation failures on the baseline: 4,197,064 bytes for a two MiB output and
+6,163,744 bytes for a malicious stream declaring 32 bytes. The candidate passed
+all 12; all 39 current C# cases and five existing native fixtures passed without
+skips on Linux. Decompressed EOF does not independently prove complete zlib
+framing under the default .NET runtime: half-stream truncation and checksum
+corruption are covered, while universal truncated-trailer rejection is not
+claimed.
+
+Baseline source `6dc4c217…`/DLL `9679aff1…` and candidate source
+`04caa088…`/DLL `019899eb…` used the same SDK 10.0.100/framework 10.0.0,
+input and hash-bound observation helper, with no JIT or concurrency overrides.
+Two alternating pairs of the actual compiled DFLT method reduced median
+current-thread allocation from 13,545,200 to 6,772,728 bytes. Stage medians were
+5.813→3.921 ms and 5.936→3.598 ms; every output leaf SHA remained `d418012f…`.
+These are short method-level observations rather than steady-state or whole-MAP
+speed guarantees.
+
+The actual MSB daemon comparison consumed each complete 2,532,035-byte
+file-backed projection through 20 artifact reads; owned hash verification was
+outside the final paired return timing. Warm complete-return means were
+126.965→128.301 ms and 125.935→125.328 ms, so overall wall time remained mixed.
+Whole native-observer allocation across the reads and controls was
+1.651→1.481 GB and 1.659→1.473 GB; sampled native peak RSS was
+392.79→371.00 MB and 394.89→357.28 MB. These process totals include the observer
+and control requests, not only DFLT. All pairs retained the full document SHA,
+observed two active native requests, cancelled a queued request without a result,
+read the document again, closed successfully and cleared their owned artifact
+directories. Zero MAP lease-cache entries do not prove every managed allocation
+was released. Source, producer, raw captures and input receipts are retained
+under `.local-validation/map-backup` and `.local-validation/dflt-compare`;
+these local proofs are separate from a product package or Windows run.
 
 `scripts/scene/mapVertexHitProbe.cs` is a validation-only .NET 10 console host.
 Compile it in an owned scratch directory, run it from the repository root,
