@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { prepareEditorComparisonWorkspace, SCRIPT_TEXT, OTHER_SCRIPT_TEXT, LONG_SCRIPT_TEXT } from '../editor-comparison-inputs.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const productionMain = path.resolve(here, '../production-main.mjs');
+const productionMain = path.resolve(here, '../editor-comparison-main.mjs');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 
 async function launchOwnedProduction() {
@@ -21,6 +21,8 @@ async function launchOwnedProduction() {
     expect(existsSync(path.resolve(here, '../../../out', artifact)), `Production build missing: ${artifact}`).toBe(true);
   }
   const inputs = await prepareEditorComparisonWorkspace(testWorkspace().root);
+  const inputHashes = { script: hash(await readFile(path.join(inputs.overlay, inputs.scriptPath))),
+    param: hash(await readFile(path.join(inputs.overlay, inputs.paramPath))) };
   const app = await electron.launch({
     chromiumSandbox: true,
     args: [productionMain,
@@ -56,7 +58,34 @@ async function launchOwnedProduction() {
   const param = files.find(file => file.relativePath === inputs.paramPath);
   expect(script, 'Constructed script must be in the real workspace index').toBeTruthy();
   expect(param, 'Constructed PARAM must be in the real workspace index').toBeTruthy();
-  return { app, page, inputs, scriptUri: script.sourceUri, paramUri: param.sourceUri, pageErrors };
+  return { app, page, inputs, inputHashes, scriptUri: script.sourceUri, paramUri: param.sourceUri, pageErrors };
+}
+
+async function reportOwnedFailure(app, page, inputs, inputHashes, phase) {
+  // Diagnostic observation has its own small deadline; it never retries a save
+  // or changes the original assertion/error, IPC contract or native budgets.
+  const bounded = async (operation, fallback) => {
+    let timer;
+    try { return await Promise.race([operation, new Promise(resolve => { timer = setTimeout(() => resolve(fallback), 1000); })]); }
+    catch { return fallback; }
+    finally { clearTimeout(timer); }
+  };
+  const observation = await bounded(app.evaluate(() => {
+    const snapshot = Reflect.get(globalThis, '__editorSaveObservation');
+    return typeof snapshot === 'function' ? snapshot() : { state: 'unavailable' };
+  }), { state: 'unavailable' });
+  const dom = await bounded(page.evaluate(() => ({
+    // Closed status vocabulary only; an error toast/body can contain paths.
+    script: document.querySelector('[data-testid="scp-status"]')?.textContent === '正在应用…' ? 'applying'
+      : document.querySelector('[data-testid="scp-status"]')?.textContent === '已应用，可回滚。' ? 'applied' : 'other-or-absent',
+    param: document.querySelector('.wb-toast--ok') ? 'ok' : document.querySelector('.wb-toast--error') ? 'error' : 'absent'
+  })), { script: 'unavailable', param: 'unavailable' });
+  const physical = {};
+  for (const [kind, relative] of [['script', inputs.scriptPath], ['param', inputs.paramPath]]) {
+    const current = await bounded(readFile(path.join(inputs.overlay, relative)).then(hash), null);
+    physical[kind] = current === null ? { state: 'unavailable' } : { sha256: current, changed: current !== inputHashes[kind] };
+  }
+  console.log('[SF_EDITOR_SAVE_FAILURE]', JSON.stringify({ phase, dom, physical, observation }));
 }
 
 async function openResource(page, relativePath) {
@@ -91,7 +120,8 @@ async function readParamRow(page, sourceUri) {
 for (const mode of ['opal', 'obsidian']) {
   test(`loaded Script/PARAM comparison uses real production save/reload in ${mode}`, async () => {
     test.setTimeout(180_000);
-    const { app, page, inputs, scriptUri, paramUri, pageErrors } = await launchOwnedProduction();
+    const { app, page, inputs, inputHashes, scriptUri, paramUri, pageErrors } = await launchOwnedProduction();
+    let phase = 'script-edit';
     try {
       await page.getByRole('button', { name: '设置', exact: true }).click();
       await page.getByTestId('theme-settings').getByLabel('界面主题', { exact: true }).selectOption(mode);
@@ -133,6 +163,7 @@ for (const mode of ['opal', 'obsidian']) {
       expect(colors.removed.border).not.toBe(colors.added.border);
       expect(colors.removed.background).not.toBe(colors.added.background);
       await page.screenshot({ path: test.info().outputPath(`script-comparison-${mode}.png`) });
+      phase = 'script-save';
       await page.keyboard.press('Control+s');
       await expect(page.getByTestId('scp-status')).toHaveText('已应用，可回滚。');
       await expect(comparison).toHaveJSProperty('open', false);
@@ -164,7 +195,11 @@ for (const mode of ['opal', 'obsidian']) {
       await expect(comparison).toContainText('没有草稿差异。');
 
       await openResource(page, inputs.paramPath);
-      const workbench = page.getByLabel('PARAM 工作台', { exact: true });
+      phase = 'param-edit';
+      // Save toasts are siblings of the labelled layout inside this wrapper.
+      const workbench = page.locator('.param-workbench');
+      await expect(workbench).toHaveCount(1);
+      await expect(workbench.getByLabel('PARAM 工作台', { exact: true })).toBeVisible();
       await workbench.getByRole('region', { name: '参数文件', exact: true }).getByRole('row', { name: /ActionGuideParam/ }).click();
       await workbench.getByRole('region', { name: '行', exact: true }).getByRole('row', { name: /^100\b/ }).click();
       const fields = workbench.getByRole('region', { name: '字段', exact: true });
@@ -190,8 +225,10 @@ for (const mode of ['opal', 'obsidian']) {
       await expect(fieldComparison).toContainText('没有草稿差异。');
       await priority.fill('7');
       await page.screenshot({ path: test.info().outputPath(`param-comparison-${mode}.png`) });
+      phase = 'param-save';
       await priority.press('Tab'); // Real blur -> native field write -> reload.
-      await expect(workbench.locator('.wb-toast--ok')).toHaveText('已保存');
+      await expect(workbench.locator('.wb-toast')).toHaveText('已保存');
+      await expect(workbench.locator('.wb-toast')).toHaveClass(/\bwb-toast--ok\b/);
       await expect(fieldComparison).toHaveJSProperty('open', false);
       await expect(priority).toHaveValue('7');
       const after = await readParamRow(page, paramUri);
@@ -208,6 +245,7 @@ for (const mode of ['opal', 'obsidian']) {
 
       // Invalid draft remains exact; the real encoder rejects it without a write.
       await priority.fill('not-a-number');
+      phase = 'param-invalid';
       await expect(fieldComparison.locator('.loaded-comparison__line.is-remove')).toHaveText('−7');
       await expect(fieldComparison.locator('.loaded-comparison__line.is-add')).toHaveText('+not-a-number');
       await priority.press('Tab');
@@ -217,14 +255,19 @@ for (const mode of ['opal', 'obsidian']) {
       await expect(fieldComparison.locator('.loaded-comparison__line.is-add')).toHaveText('+not-a-number');
       expect(hash(await readFile(path.join(inputs.overlay, inputs.paramPath)))).toBe(after.containerHash);
       await priority.fill('7');
+      phase = 'param-revert';
       await expect(fieldComparison).toContainText('没有草稿差异。');
       // Switch while unchanged: existing blur-save semantics remain in force.
       await priority.press('Tab');
-      await expect(workbench.locator('.wb-toast--ok')).toHaveText('已保存');
+      await expect(workbench.locator('.wb-toast')).toHaveText('已保存');
+      await expect(workbench.locator('.wb-toast')).toHaveClass(/\bwb-toast--ok\b/);
       await workbench.getByRole('region', { name: '行', exact: true }).getByRole('row', { name: /^101\b/ }).click();
       await expect(priority).toHaveValue('2');
       await expect(fieldComparison).toHaveJSProperty('open', false);
       expect(pageErrors).toEqual([]);
+    } catch (error) {
+      await reportOwnedFailure(app, page, inputs, inputHashes, phase).catch(() => undefined);
+      throw error;
     } finally { await app.close(); }
   });
 }

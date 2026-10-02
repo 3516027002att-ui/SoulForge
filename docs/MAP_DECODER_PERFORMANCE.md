@@ -298,3 +298,39 @@ retain their own 60 ms timeline. These are callback/accounting regression values
 not measured game-load latency or GPU performance. The full MAP causal DAG and
 actual responsiveness quality remain unverified; the 260 s / 400 ms guard limits
 are unchanged.
+
+## Oversized native-result allocation
+
+The actual compiled `DaemonState.WriteResultAsync` boundary was measured with
+the restored DFLT Mod MSB (physical SHA256
+`8dca8500733687d26324eb311ec375a9d6abd6c372af5a47cedc2154f978dd0c`).
+Its oversized result is still serialized to the same 2,532,035-byte artifact;
+the descriptor, negotiated frame budget, chunk size, cancellation, admission
+and cleanup behavior are unchanged. The only production change parses those
+existing UTF8 bytes directly into `JsonNode`, removing the preceding full UTF16
+string decode.
+
+Two paired runs used the same helper, input and runtime in B/C then C/B order,
+with three warmups and twenty samples per case. Managed allocation through the
+actual owned output-pump flush fell from 19,142,012 to 14,077,908 bytes and from
+19,142,688 to 14,077,216 bytes, a 26.46% reduction in both pairs. This is
+all-process allocation for this boundary, including pump/runtime/instrumentation;
+it is not peak heap, RSS or whole-map memory. Return and flush scopes overlap
+and must not be added to each other or to separate historical stage medians.
+
+Wall time was mixed: method-return medians were 77.92 to 61.13 ms in one pair
+and 65.04 to 83.74 ms in the other. The short Linux/default-GC/default-JIT
+observation therefore establishes allocation improvement, not a wall-time
+speedup. Full request execution, caller reconstruction, renderer/GPU and
+Windows performance remain unmeasured by this experiment.
+
+All actual artifacts and chunk reconstruction matched the original result;
+the canonical full-data hash remained
+`dd148675f26f1f0e3d5b2bb08744fe15c49e785cb58a2cd629cb64fd4f9307ac`.
+Seven real serializer/queue/artifact transport tests cover Unicode, nested and
+nonfinite values, the inline boundary, exact chunk data, cancellation, closed
+output and owned cleanup. The redundant-allocation negative failed on the old
+implementation; all seven and the complete 49-case C# suite passed on the
+candidate. The sealed local receipt is
+`.local-validation/result-transport-utf8/receipt.json`; raw game results and
+validation binaries are excluded from source and release artifacts.

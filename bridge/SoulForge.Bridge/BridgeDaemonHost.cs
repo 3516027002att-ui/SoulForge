@@ -900,7 +900,7 @@ internal static class BridgeDaemonHost
                     result,
                     artifactToken,
                     resultJson.Length));
-            var resultNode = JsonNode.Parse(Encoding.UTF8.GetString(resultJson))?.AsObject()
+            var resultNode = JsonNode.Parse(resultJson.AsSpan())?.AsObject()
                 ?? throw new InvalidDataException("Bridge result could not be converted to a JSON object.");
             var diagnosticArray = resultNode["diagnostics"] as JsonArray ?? new JsonArray();
             diagnosticArray.Add(JsonSerializer.SerializeToNode(new

@@ -15,6 +15,7 @@ function productionFile(path) {
 }
 const script = productionFile('../apps/desktop/src/renderer/src/editors/ScriptContainerPanel.tsx');
 const param = productionFile('../apps/desktop/src/renderer/src/workbench/ParamWorkbench.tsx');
+const layout = productionFile('../apps/desktop/src/renderer/src/workbench/WorkbenchLayout.tsx');
 function find(file, predicate) {
   let found;
   function visit(node) { if (!found && predicate(node)) found = node; if (!found) ts.forEachChild(node, visit); }
@@ -39,6 +40,52 @@ function componentAttribute(file, component, name) {
 function evaluate(node, file, ports) {
   return vm.runInNewContext(transformSync(`(${node.getText(file)})`, { loader: 'ts' }).code, ports);
 }
+
+it('the real editor E2E container selection includes sibling PARAM save toasts', () => {
+  // Evaluate the actual outer JSX and layout JSX with empty columns/toolbar.
+  // This is a source-bound tree projection, not browser/native save execution.
+  const outer = find(param, node => ts.isJsxElement(node)
+    && node.openingElement.attributes.properties.some(attribute =>
+      ts.isJsxAttribute(attribute) && attribute.name.getText(param) === 'className'
+      && attribute.initializer?.getText(param) === '"param-workbench"'));
+  const layoutRoot = find(layout, node => ts.isJsxElement(node)
+    && node.openingElement.attributes.properties.some(attribute =>
+      ts.isJsxAttribute(attribute) && attribute.name.getText(layout) === 'aria-label'
+      && attribute.initializer?.getText(layout) === '{props.label}'));
+  const projected = ts.transform(outer, [context => {
+    const visit = node => ts.isJsxSelfClosingElement(node) && node.tagName.getText(param) === 'WorkbenchLayout'
+      ? ts.factory.updateJsxSelfClosingElement(node, node.tagName, node.typeArguments,
+          ts.factory.createJsxAttributes(node.attributes.properties.filter(attribute =>
+            ts.isJsxAttribute(attribute) && ['label', 'columns'].includes(attribute.name.getText(param)))))
+      : ts.visitEachChild(node, visit, context);
+    return root => ts.visitNode(root, visit);
+  }]);
+  const printer = ts.createPrinter();
+  const jsx = (type, props, ...children) => typeof type === 'function'
+    ? type(props)
+    : { type, props: props ?? {}, children: children.flat().filter(child => child && typeof child === 'object') };
+  const render = (node, file, ports) => vm.runInNewContext(transformSync(
+    `(${printer.printNode(ts.EmitHint.Expression, node, file)})`,
+    { loader: 'tsx', jsxFactory: 'jsx' }).code, { jsx, ...ports });
+  const WorkbenchLayout = props => render(layoutRoot, layout, { props, columnsRef: null });
+  const query = (node, match) => match(node) ? node : node.children.map(child => query(child, match)).find(Boolean);
+  const hasClass = (node, value) => String(node.props.className ?? '').split(/\s+/).includes(value);
+  const spec = productionFile('../apps/desktop/e2e/playwright/tests/editor-loaded-comparison.spec.mjs');
+  const selection = find(spec, node => ts.isVariableDeclaration(node) && node.name.getText(spec) === 'workbench').initializer;
+  try {
+    for (const kind of ['ok', 'error']) {
+      const tree = render(projected.transformed[0], param, { toast: { kind, text: kind }, columns: [], WorkbenchLayout });
+      const page = {
+        getByLabel: label => query(tree, node => node.props['aria-label'] === label),
+        locator: selector => query(tree, node => hasClass(node, selector.slice(1)))
+      };
+      const selected = evaluate(selection, spec, { page });
+      assert(selected, 'the test must select a real production container');
+      assert(query(selected, node => hasClass(node, `wb-toast--${kind}`)),
+        `${kind} toast is outside the selected container; PARAM native save status cannot be observed`);
+    }
+  } finally { projected.dispose(); }
+});
 function projection(file, component, names, ports) {
   return Object.fromEntries(names.map(name => [name, evaluate(componentAttribute(file, component, name), file, ports)]));
 }
