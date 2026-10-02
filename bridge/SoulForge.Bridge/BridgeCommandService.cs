@@ -1147,7 +1147,9 @@ internal sealed class BridgeCommandService
                     file,
                     "map",
                     "MSB_DOCUMENT_KRAK_OODLE_UNAVAILABLE",
-                    "这份地图是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再打开。");
+                    OperatingSystem.IsWindows()
+                        ? "这份地图是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再打开。"
+                        : "这份地图是 KRAK 压缩，当前平台没有可用的 Oodle 解压器。请使用已解压的 MSB 副本，或在支持读取 KRAK 的 Windows 环境打开。");
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
@@ -2497,7 +2499,9 @@ internal sealed class BridgeCommandService
                     file,
                     "map",
                     "MAPBND_KRAK_OODLE_UNAVAILABLE",
-                    "这份地图模型（mapbnd）是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再看模型。");
+                    OperatingSystem.IsWindows()
+                        ? "这份地图模型（mapbnd）是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再看模型。"
+                        : "这份地图模型（mapbnd）是 KRAK 压缩，当前平台没有可用的 Oodle 解压器。请使用已解压的 MAPBND 副本，或在支持读取 KRAK 的 Windows 环境查看。");
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
@@ -2796,7 +2800,10 @@ internal sealed class BridgeCommandService
             }
             catch (OodleRuntimeUnavailableException)
             {
-                return BridgeResult<object>.Failed(file, "map", "MAPBND_KRAK_OODLE_UNAVAILABLE", "这份地图模型（mapbnd）是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再看模型。");
+                return BridgeResult<object>.Failed(file, "map", "MAPBND_KRAK_OODLE_UNAVAILABLE",
+                    OperatingSystem.IsWindows()
+                        ? "这份地图模型（mapbnd）是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再看模型。"
+                        : "这份地图模型（mapbnd）是 KRAK 压缩，当前平台没有可用的 Oodle 解压器。请使用已解压的 MAPBND 或 FLVER 副本，或在支持读取 KRAK 的 Windows 环境查看。");
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {

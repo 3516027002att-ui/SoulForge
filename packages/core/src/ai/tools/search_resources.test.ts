@@ -150,4 +150,35 @@ describe('search_resources resource kind contract', () => {
         assert.deepEqual(workspaceIndex.searches.at(-1), artifactsInput);
         assert.equal((artifacts.data as { total: number }).total, 1);
     });
+
+    it('passes every source filter unchanged and returns exactly its resource scope', async () => {
+        const { registry, context, workspaceIndex } = fixture();
+        workspaceIndex.setFiles([indexedFile('map'), indexedFile('map', 'recovery', true)]);
+        for (const [sourceFilter, total] of [['active', 1], ['all', 2], ['artifacts', 1]] as const) {
+            const input = { sourceFilter, limit: 100 };
+            const result = await registry.run('search_resources', input, context);
+            assert.equal(result.ok, true, JSON.stringify(result));
+            assert.deepEqual(workspaceIndex.searches.at(-1), input);
+            const page = result.data as { total: number; matches: Array<{ item: IndexedFile }> };
+            assert.equal(page.total, total);
+            assert.equal(page.matches.length, total);
+            if (sourceFilter !== 'all') {
+                assert.ok(page.matches.every(({ item }) => Boolean(item.artifactMarkers) === (sourceFilter === 'artifacts')));
+            }
+        }
+    });
+
+    it('rejects invalid source filters through the actual bridge before a workspace search', async () => {
+        const { bridge, workspaceIndex } = fixture();
+        for (const sourceFilter of ['backups', '', 'ALL', null, 1, [], {}]) {
+            const result = await bridge.executeTool({
+                id: 'invalid-source-filter', name: 'search_resources', argumentsJson: JSON.stringify({ sourceFilter })
+            });
+            assert.equal(result.ok, false, result.content);
+            assert.equal(result.code, 'INVALID_INPUT');
+            const message = JSON.parse(result.content).error.message as string;
+            for (const value of ['sourceFilter', 'active', 'all', 'artifacts']) assert.ok(message.includes(value), message);
+            assert.deepEqual(workspaceIndex.searches, []);
+        }
+    });
 });

@@ -204,6 +204,36 @@ was released. Source, producer, raw captures and input receipts are retained
 under `.local-validation/map-backup` and `.local-validation/dflt-compare`;
 these local proofs are separate from a product package or Windows run.
 
+An additional read-only phase probe bound that same `04caa088…`/`019899eb…`
+producer and input. Across 20 fresh document sequences, median stage work was:
+DCX read/inflate 2.688 ms / 7,199,392 current-thread bytes, MSB read
+3.321 ms / 2,970,720 bytes, `VerifyRoundTrip` 14.416 ms / 9,744,720 bytes,
+and explicit-report `ToEnvelope` 0.454 ms / 970,912 bytes. Verification includes
+its copy, nested reparse and two hashes; its nested read must not be counted
+again. Result-only serialization using the actual daemon JSON options measured
+9.010 ms / 5,064,440 bytes for a string and 9.010 ms / 2,532,408 bytes for UTF8.
+These serializer alternatives do not measure the full frame, oversize preflight,
+DOM conversion, artifact storage or transport, and the stages are not a complete
+request or causal-DAG sum. Default tiering and natural GC produced variation.
+Every projected object matched the actual service golden; Node's canonical
+`.data` SHA stayed `dd148675…`. Native JSON lexical hashes are kept separately
+because float spellings and Unicode escaping differ. The specifically checked
+independent VSTest interval ended 31.716 seconds before this probe; other host
+load is unexcluded. The bound phase receipt is
+`.local-validation/msb-phase/receipt.json`.
+
+The subsequent KRAK diagnostic correction changes only three map-read messages.
+On Windows, the original game-directory guidance remains exactly the same.
+On non-Windows hosts, the current unavailable Oodle provider is stated
+explicitly: MSB reads suggest an already decompressed MSB, the BND4-only model
+preview suggests MAPBND, and static geometry suggests MAPBND or FLVER, with
+supported Windows reading as another option. Codes, failed/map classification
+and provider admission are unchanged. All 42 current C# cases passed without
+skips on Linux; two actual read commands on the original-byte KRAK MAPBND
+retained its SHA and the same unavailable verdict. These outputs bind source
+`5f21c4a8…` and DLL `3420f1bb…`. This corrects actionable text without adding
+Linux KRAK decoding, running vendor code or claiming a Windows execution test.
+
 `scripts/scene/mapVertexHitProbe.cs` is a validation-only .NET 10 console host.
 Compile it in an owned scratch directory, run it from the repository root,
 and pass the producer path, UV-grid path and their expected SHA-256 hashes. It binds the actual private helper
