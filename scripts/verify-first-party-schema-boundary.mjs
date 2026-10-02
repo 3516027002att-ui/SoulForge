@@ -27,6 +27,7 @@ const productionFiles = [
   'apps/desktop/src/main/ipc/agent.ts',
   'apps/desktop/src/main/services/agentSessionService.ts',
   'apps/desktop/src/main/services/agentEvidenceService.ts',
+  'apps/desktop/src/main/services/agentLocalService.ts',
   'apps/desktop/src/main/ipc/event.ts',
   'apps/desktop/src/main/services/eventService.ts',
   'apps/desktop/src/main/ipc/param.ts',

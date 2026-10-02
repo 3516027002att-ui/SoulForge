@@ -4,7 +4,6 @@ import { app, dialog } from 'electron';
 import type { WebContents, IpcMainInvokeEvent } from 'electron';
 import { join } from 'node:path';
 import {
-  buildAiSidebarDraft,
   createConfiguredModelServiceAdapter
 } from '@soulforge/core';
 import type {
@@ -42,6 +41,7 @@ import type { OperationLogUtilityClient, WorkspaceBoundUtilityStore } from '../o
 import { createAgentSessionService, type AgentSessionService } from '../services/agentSessionService.js';
 import { createAgentEvidenceService, type AgentEvidenceService } from '../services/agentEvidenceService.js';
 import { InternalRagEmbeddingService } from '../ragEmbedding.js';
+import { createAgentLocalService } from '../services/agentLocalService.js';
 
 import type {
   AiAgentRunRequest,
@@ -191,7 +191,12 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
   });
   boundWebContents = deps.webContents;
   bindAgentOwnerWindow(deps.webContents);
-  const activeAiMode: ToolContext['mode'] = 'plan';
+  const local = createAgentLocalService({
+    getMemoryStore: () => deps.memoryManager.getStore(), toolRegistry: deps.toolRegistry,
+    getActiveSession: deps.getActiveSession, getActiveWorkspaceSessionId: deps.getActiveWorkspaceSessionId,
+    getActiveWorkspaceSessionGeneration: deps.getActiveWorkspaceSessionGeneration,
+    ensureActiveOperationLog: deps.ensureActiveOperationLog, currentToolContext: deps.currentToolContext
+  });
   deps.handle(
     'ai.agent.permission.request',
     async (event, requestedMode: unknown): Promise<AiAgentPermissionRequestResult> => {
@@ -222,73 +227,17 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
   );
   deps.handle('ai.tools', async () => deps.toolRegistry.list());
   
-  deps.handle('ai.memory.list', async () => {
-      try {
-        return { ok: true, entries: deps.memoryManager.getStore().list() } as const;
-      } catch {
-        return { ok: false, error: { code: 'MEMORY_LIST_FAILED', message: '无法读取长期记忆。' } } as const;
-      }
-    });
+  deps.handle('ai.memory.list', async () => { return local.listMemories(); });
   
-  deps.handle('ai.memory.save', async (_event, rawEntry: unknown) => {
-      if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) {
-        return { ok: false, error: { code: 'MEMORY_ENTRY_INVALID', message: '长期记忆条目格式无效。' } } as const;
-      }
-      const input = rawEntry as Record<string, unknown>;
-      const topic = typeof input.topic === 'string' ? input.topic.trim() : '';
-      const summary = typeof input.summary === 'string' ? input.summary.trim() : '';
-      const details = input.details === undefined ? undefined : typeof input.details === 'string' ? input.details.trim() : null;
-      const id = input.id === undefined ? undefined : typeof input.id === 'string' ? input.id.trim() : null;
-      const tags = input.tags === undefined
-        ? undefined
-        : Array.isArray(input.tags) && input.tags.every((tag) => typeof tag === 'string')
-          ? input.tags.map((tag) => tag.trim()).filter(Boolean)
-          : null;
-      const invalidTags = tags === null || (tags !== undefined && (tags.length > 32 || tags.some((tag) => tag.length > 128)));
-      if (!topic || topic.length > 256 || !summary || summary.length > 10_000 || details === null || id === null || invalidTags) {
-        return { ok: false, error: { code: 'MEMORY_ENTRY_INVALID', message: '长期记忆条目字段无效或超出长度限制。' } } as const;
-      }
-      try {
-        const entry = deps.memoryManager.getStore().save({
-          ...(id ? { id } : {}),
-          topic,
-          summary,
-          ...(details !== undefined ? { details } : {}),
-          ...(tags !== undefined ? { tags } : {})
-        });
-        return { ok: true, entry } as const;
-      } catch {
-        return { ok: false, error: { code: 'MEMORY_SAVE_FAILED', message: '无法保存长期记忆。' } } as const;
-      }
-    });
+  deps.handle('ai.memory.save', async (_event, rawEntry: unknown) => { return local.saveMemory(rawEntry); });
   
-  deps.handle('ai.memory.delete', async (_event, idOrTopic: unknown) => {
-      if (typeof idOrTopic !== 'string' || !idOrTopic.trim() || idOrTopic.length > 256) {
-        return { ok: false, error: { code: 'MEMORY_KEY_INVALID', message: '长期记忆标识无效。' } } as const;
-      }
-      try {
-        return { ok: true, deleted: deps.memoryManager.getStore().delete(idOrTopic.trim()) } as const;
-      } catch {
-        return { ok: false, error: { code: 'MEMORY_DELETE_FAILED', message: '无法删除长期记忆。' } } as const;
-      }
-    });
+  deps.handle('ai.memory.delete', async (_event, idOrTopic: unknown) => { return local.deleteMemory(idOrTopic); });
   
-  deps.handle('ai.sidebarDraft', async (_event, request: AiSidebarDraftRequest): Promise<AiSidebarDraft> => {
-      return buildAiSidebarDraft({
-        ...request,
-        settings: { ...request.settings, mode: activeAiMode },
-        availableTools: request.availableTools.length > 0 ? request.availableTools : deps.toolRegistry.list()
-      });
-    });
+  deps.handle('ai.sidebarDraft', async (_event, request: AiSidebarDraftRequest): Promise<AiSidebarDraft> => { return local.sidebarDraft(request); });
   
   deps.handle(
     'ai.runTool',
-    async (_event, name: string, input: unknown): Promise<ToolResult> => {
-      // T6：无工作区时由工具层按工具守卫（WORKSPACE_REQUIRED），不整次拒绝。
-      const session = deps.getActiveSession();
-      if (session) await deps.ensureActiveOperationLog(session);
-      return deps.toolRegistry.run(name, input, deps.currentToolContext());
-    }
+    async (_event, name: string, input: unknown): Promise<ToolResult> => { return local.runTool(name, input); }
   );
 
   deps.handle('rag.embed', async (_event, _input: unknown): Promise<

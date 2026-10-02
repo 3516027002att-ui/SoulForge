@@ -299,8 +299,6 @@ function bumpPathSourceGenerationForUris(uris: readonly string[]): void {
     void saveFingerprintStore({ storageRoot: root, state: fingerprintStore }).catch(()=>{});
   }
 }
-/** Prevent duplicate rollback dialogs/transactions while one request is in flight. */
-const activeRollbackRequests = new Set<string>();
 /** Provider configs may omit contextWindowTokens; keep compaction fail-safe by default. */
 const DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS = 500_000;
 const AGENT_CONTEXT_COMPACTION_RATIO = 0.8;
@@ -366,117 +364,9 @@ function resolveFlverReadFile(sourceUri: string): { absolutePath: string; relati
   return resolveChrbndVirtualFile(sourceUri);
 }
 
-function logicalMapModelName(raw: string): string {
-  const base = raw.replace(/\\/g, '/').split('/').pop() ?? raw;
-  return base
-    .replace(/\.(?:flver|chrbnd|objbnd|mapbnd)(?:\.dcx)?$/i, '')
-    .replace(/\.dcx$/i, '');
-}
-
-function resolveMapModelFile(
-  mapRelativePath: string,
-  modelName: string,
-  sibPath?: string
-): { absolutePath: string; relativePath: string; kind: 'flver' | 'chrbnd' } | null {
-  const names = [...new Set(
-    [modelName, sibPath ?? '']
-      .map((value) => logicalMapModelName(value))
-      .filter((value) => value.length > 0)
-  )];
-  const mapStem = basename(mapRelativePath).replace(/\.msb(\.dcx)?$/i, '');
-  const mapId = /^m\d{2}_\d{2}_\d{2}_\d{2}$/i.test(mapStem) ? mapStem : null;
-  const candidates: Array<{ rel: string; kind: 'flver' | 'chrbnd' }> = [];
-  for (const name of names) {
-    if (mapId) {
-      // m000010 → m10_00_00_00_000010：MSB 侧短名需展开为 mapbnd 侧长名
-      const mShort = /^m(\d{6})$/i.exec(name)?.[1];
-      if (mShort) {
-        const longName = `${mapId}_${mShort}`;
-        candidates.push({ rel: `map/${mapId}/${longName}.mapbnd.dcx`, kind: 'flver' });
-        // mapbnd 容器内的 FLVER 名就是长名本身（条目名为 .../long.flver），
-        // 但单文件 flver 路径也试一下（部分 map 可能有散文件）
-        candidates.push({ rel: `map/${mapId}/${longName}.flver.dcx`, kind: 'flver' });
-        candidates.push({ rel: `map/${mapId}/${longName}.flver`, kind: 'flver' });
-      }
-      candidates.push({ rel: `map/${mapId}/${name}.flver.dcx`, kind: 'flver' });
-      candidates.push({ rel: `map/${mapId}/${name}.flver`, kind: 'flver' });
-    }
-    candidates.push({ rel: `map/${name}.flver.dcx`, kind: 'flver' });
-    if (/^c\d/i.test(name)) candidates.push({ rel: `chr/${name}.chrbnd.dcx`, kind: 'chrbnd' });
-    if (/^o\d/i.test(name)) candidates.push({ rel: `obj/${name}.objbnd.dcx`, kind: 'flver' });
-  }
-  const normalize = (value: string): string => value.replace(/\\/g, '/').toLowerCase();
-  const indexedFiles = getWorkspaceIndexedFiles();
-  for (const candidate of candidates) {
-    const indexed = indexedFiles.find((item) => {
-      const rel = normalize(item.relativePath);
-      return rel === normalize(candidate.rel) || rel.endsWith(`/${normalize(candidate.rel)}`);
-    });
-    if (indexed) {
-      return { absolutePath: indexed.absolutePath, relativePath: indexed.relativePath, kind: candidate.kind };
-    }
-  }
-  const mapSession = getWorkspaceSession();
-  const overlay = mapSession?.layers.overlayRoot?.trim();
-  const base = mapSession?.layers.baseRoot?.trim();
-  for (const root of [overlay, base]) {
-    if (!root) continue;
-    for (const candidate of candidates) {
-      const absolutePath = join(root, candidate.rel);
-      if (safeExists(absolutePath)) {
-        return { absolutePath, relativePath: candidate.rel, kind: candidate.kind };
-      }
-    }
-  }
-  return null;
-}
-
 // EMEDF registry cache moved to ipc/event.ts (domain-owned).
 let handlersRegistered = false;
 const trustedRendererDocuments = new Map<number, string>();
-const directorySelections = new Map<string, DirectorySelectionRecord>();
-
-/* ------------------------------------------------------------------ */
-/*  §14.4 DocumentStore IPC（DOCSTORE-04）                             */
-/*  renderer 只发逻辑引用；ownerKey 由 main 从 trusted webContents 与 */
-/*  workspace session 派生，renderer 永远不能传入；locator 由 main     */
-/*  probe 组装（含 outerSourceUri），永不出 main。                     */
-/* ------------------------------------------------------------------ */
-
-let editorDocumentStore: EditorDocumentStore | null = null;
-
-/**
- * 惰性创建文档仓库。分页数据源与写链是骨架：由后续卡（PARAM-10B、TEXT-20B
- * 等）接入真实实现；未接入的查询/写入如实返回 capability-blocked /
- * mutation-rejected，不假装成功。
- */
-function ensureEditorDocumentStore(): EditorDocumentStore {
-  if (editorDocumentStore) return editorDocumentStore;
-  const skeletonDataSource: EditorDocumentDataSource = {
-    loadPage: async () => ({ items: null, nextCursor: null, totalKnown: null }),
-    readContent: async () => null
-  };
-  const skeletonApplyPort: EditorMutationApplyPort = {
-    apply: async () => ({ kind: 'rejected', code: 'WRITE_CHAIN_NOT_CONNECTED' })
-  };
-  editorDocumentStore = new EditorDocumentStore({
-    ttlMs: 30 * 60_000,
-    dataSource: skeletonDataSource,
-    applyPort: skeletonApplyPort
-  });
-  return editorDocumentStore;
-}
-
-/**
- * ownerKey 绑定「会话 + 窗口」：另一窗口（webContents）即使猜中 handle 也
- * 得到 owner-mismatch；重新扫描工作区（activeWorkspaceSessionId 更换）后
- * 旧 handle 全部失效——这正是 cross-sender rejection 的实现点。
- */
-function deriveDocumentOwnerKey(event: IpcMainInvokeEvent): string {
-  return createHash('sha256')
-    .update(`${getActiveWorkspaceSessionIdState() ?? 'no-session'}:${event.sender.id}`)
-    .digest('hex');
-}
 
 /**
  * S29：写时对文件内容现算 sha256（小写 hex，与 C# SourceHash/Hash 同算法）。
@@ -488,30 +378,6 @@ function deriveDocumentOwnerKey(event: IpcMainInvokeEvent): string {
  */
 async function sha256FileNow(filePath: string): Promise<string> {
   return createHash('sha256').update(await readFile(filePath)).digest('hex');
-}
-
-/** §4.3 域 → 资源 kind 的粗粒度匹配（CAT-05 的 Catalog 校验落地后替换）。 */
-const DOMAIN_RESOURCE_KINDS: Record<string, readonly string[]> = {
-  param: ['param', 'container'],
-  gparam: ['param', 'container'],
-  container: ['container', 'param'],
-  text: ['msg'],
-  event: ['event'],
-  script: ['script'],
-  map: ['map'],
-  model: ['model'],
-  texture: ['texture'],
-  material: ['material'],
-  vfx: ['vfx'],
-  behavior: ['behavior'],
-  animation: ['animation']
-};
-
-function editorDocumentFailure(
-  code: EditorDocumentErrorCode,
-  retryable: boolean
-): EditorDocumentResult<never> {
-  return { ok: false, code, retryable };
 }
 const here = dirname(fileURLToPath(import.meta.url));
 const sqliteNativeBindingPath = app.isPackaged
@@ -577,13 +443,6 @@ function readSystemPrompt(): string | null {
     }
   }
   return null;
-}
-
-interface DirectorySelectionRecord extends DirectorySelection {
-  absolutePath: string;
-  kind: 'overlay' | 'base';
-  ownerWebContentsId: number;
-  expiresAt: number;
 }
 
 function ensureActiveOperationLog(session: WorkspaceSession): Promise<OperationLogUtilityClient> {
@@ -796,39 +655,6 @@ function normalizeRendererDocumentUrl(value: string): string | null {
   }
 }
 
-function createDirectorySelection(
-  event: IpcMainInvokeEvent,
-  absolutePath: string,
-  kind: DirectorySelectionRecord['kind']
-): DirectorySelection {
-  const selection: DirectorySelectionRecord = {
-    selectionId: randomUUID(),
-    label: basename(absolutePath) || (kind === 'overlay' ? 'Mod 工作区' : '原版游戏目录'),
-    absolutePath,
-    kind,
-    ownerWebContentsId: event.sender.id,
-    expiresAt: Date.now() + 5 * 60_000
-  };
-  directorySelections.set(selection.selectionId, selection);
-  return { selectionId: selection.selectionId, label: selection.label };
-}
-
-function consumeDirectorySelection(
-  event: IpcMainInvokeEvent,
-  selectionId: string,
-  expectedKind: DirectorySelectionRecord['kind']
-): DirectorySelectionRecord {
-  const selection = directorySelections.get(selectionId);
-  directorySelections.delete(selectionId);
-  if (!selection
-    || selection.kind !== expectedKind
-    || selection.ownerWebContentsId !== event.sender.id
-    || selection.expiresAt < Date.now()) {
-    throw new Error('目录选择凭据无效、已过期或不属于当前窗口。');
-  }
-  return selection;
-}
-
 async function requestWriteConfirmation(input: {
   /**
    * 弹对话框的宿主窗口。UI 通道（IPC handler）有 sender；AI 工具执行路径没有
@@ -934,9 +760,6 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   webContents.once('destroyed', () => {
     trustedRendererDocuments.delete(webContents.id);
     revokeDirectorySelectionsFor(webContents.id);
-    for (const [selectionId, selection] of directorySelections) {
-      if (selection.ownerWebContentsId === webContents.id) directorySelections.delete(selectionId);
-    }
     disposeEmevdWindow(webContents.id);
     // 窗口销毁 = 用户强制中断：取消该窗口发起的 agent 运行，并把它的挂起
     // 审批按拒绝结算（无人回答 ≠ 同意执行写入）。其他窗口的运行不受影响。

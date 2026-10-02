@@ -21,12 +21,14 @@ const require = createRequire(import.meta.url), root = path.resolve(path.dirname
 const adapterPath = path.join(root, 'apps/desktop/src/main/ipc/agent.ts');
 const sessionServicePath = path.join(root, 'apps/desktop/src/main/services/agentSessionService.ts');
 const evidenceServicePath = path.join(root, 'apps/desktop/src/main/services/agentEvidenceService.ts');
+const localServicePath = path.join(root, 'apps/desktop/src/main/services/agentLocalService.ts');
 const channels = ['ai.agent.permission.request', 'ai.tools', 'ai.memory.list', 'ai.memory.save', 'ai.memory.delete',
   'ai.sidebarDraft', 'ai.runTool', 'rag.embed', 'rag.localModelStatus', 'rag.searchEvidence', 'ai.agent.run',
   'ai.agent.events', 'ai.agent.cancel', 'ai.agent.approval.respond', 'agent.approval.decide', 'ai.agent.sessions',
   'ai.agent.session.load', 'agent.resourceReference.create', 'agent.citation.create', 'agent.attachment.create'];
 const response = text => ({ message: { role: 'assistant', content: text }, finishReason: 'stop', diagnostics: [], usage: { inputTokens: 1, outputTokens: 1 } });
 const plain = value => JSON.parse(JSON.stringify(value));
+const sourceOwnerMatches = (actual, expected, pathApi = path) => pathApi.normalize(actual) === pathApi.normalize(expected);
 function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
 
 async function harness(options = {}) {
@@ -45,7 +47,7 @@ async function harness(options = {}) {
     stream: async function* (input) { const out = await adapter.complete(input); yield { type: 'done', message: out.message, finishReason: out.finishReason, usage: out.usage }; } };
   const registry = new realCore.ToolRegistry();
   registry.register({ name: 'inspect_owned', description: 'Read owned fixture state.', permission: 'read', proofPolicy: 'none', inputSchema: {},
-    run: async (_input, context) => { calls.push(['readTool', context]); return { ok: true, content: '{"owned":true}' }; } });
+    run: async (_input, context) => { calls.push(['readTool', context]); return options.read ? options.read(context) : { ok: true, content: '{"owned":true}' }; } });
   registry.register({ name: 'commit_owned', description: 'Commit owned fixture state.', permission: 'commit', proofPolicy: 'none', inputSchema: {},
     run: async (_input, context) => { calls.push(['commitTool', context]); return options.commit ? options.commit(context) : { ok: true, content: '{"committed":true,"opId":"owned-op"}' }; } });
   registry.register({ name: 'rollback_operation', description: 'Owned rollback dialogue fixture.', permission: 'rollback', proofPolicy: 'none', inputSchema: {},
@@ -57,7 +59,8 @@ async function harness(options = {}) {
     loadRagChunks: async () => { calls.push(['chunks']); return options.loadChunks ? options.loadChunks() : []; },
     loadReferences: async () => [], ragEmbeddingModel: async () => null, loadRagEmbeddingRecords: async () => [] };
   const memoryStore = new Map();
-  const memoryManager = { getStore: () => ({ list: () => [...memoryStore.values()], save: value => { memoryStore.set(value.topic, value); return value; }, delete: key => memoryStore.delete(key) }),
+  const memoryManager = { getStore: (...args) => { calls.push(['memoryStore', args]); if (options.memoryError) throw options.memoryError;
+    return { list: () => [...memoryStore.values()], save: value => { memoryStore.set(value.topic, value); return value; }, delete: key => memoryStore.delete(key) }; },
     getFullMemoryForSystemPrompt: () => 'Owned host memory.' };
   const embeddings = [];
   class Embedding {
@@ -116,6 +119,12 @@ async function harness(options = {}) {
     requestWriteConfirmation: async input => { calls.push(['writeConfirmation', input]); return null; }, readSystemPrompt: () => 'Owned system prompt.' };
   api.registerAgentIpcHandlers(deps);
   return { api, calls, owned, target, handlers, deps, utility, embeddings, journal,
+    directLocal() {
+      return load(localServicePath).createAgentLocalService({ getMemoryStore: () => memoryManager.getStore(), toolRegistry: registry,
+        getActiveSession: deps.getActiveSession, getActiveWorkspaceSessionId: deps.getActiveWorkspaceSessionId,
+        getActiveWorkspaceSessionGeneration: deps.getActiveWorkspaceSessionGeneration,
+        currentToolContext: deps.currentToolContext, ensureActiveOperationLog: deps.ensureActiveOperationLog });
+    },
     directSession() {
       const evidence = load(evidenceServicePath).createAgentEvidenceService({ internalRagEmbedding: embeddings[0], operationLogUtility: utility,
         getActiveIndex: deps.getActiveIndex, getActiveSession: deps.getActiveSession, getActiveWorkspaceSessionId: deps.getActiveWorkspaceSessionId,
@@ -396,7 +405,26 @@ test('main compatibility Agent types resolve to the single public contract decla
     assert.ok(symbol, name);
     const target = symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
     assert.ok(target.declarations?.length, name);
-    for (const declaration of target.declarations) assert.equal(declaration.getSourceFile().fileName, contractPath, name);
+    for (const declaration of target.declarations) assert.equal(sourceOwnerMatches(declaration.getSourceFile().fileName, contractPath), true, name);
+  }
+});
+test('TypeScript Windows path representation retains exact declaration ownership', () => {
+  for (const directory of ['C:\\owned source', '\\\\server\\share\\owned source']) {
+    const filename = path.win32.join(directory, 'apps', 'desktop', 'src', 'ipc', 'publicTypes.ts');
+    const normalized = filename.replaceAll('\\', '/');
+    const host = {
+      getSourceFile(name, language) { if (name.replaceAll('\\', '/') === normalized) return ts.createSourceFile(name, 'export interface OwnedContract { readonly ok: true }', language, true); },
+      getDefaultLibFileName: () => '', writeFile() {}, getCurrentDirectory: () => directory.replaceAll('\\', '/'),
+      getDirectories: () => [], fileExists: name => name.replaceAll('\\', '/') === normalized, readFile: () => '',
+      getCanonicalFileName: name => name, useCaseSensitiveFileNames: () => true, getNewLine: () => '\n'
+    };
+    const program = ts.createProgram([filename], { noLib: true, noResolve: true }, host);
+    const source = program.getSourceFile(filename), checker = program.getTypeChecker();
+    const symbol = checker.getExportsOfModule(checker.getSymbolAtLocation(source)).find(candidate => candidate.name === 'OwnedContract');
+    assert.ok(symbol); const declarationPath = symbol.declarations[0].getSourceFile().fileName;
+    assert.notEqual(declarationPath, filename, 'actual TypeScript uses forward slashes for the Windows input');
+    assert.equal(sourceOwnerMatches(declarationPath, filename, path.win32), true);
+    assert.equal(sourceOwnerMatches(declarationPath, path.win32.join(directory, 'other', 'publicTypes.ts'), path.win32), false);
   }
 });
 test('actual desktop admission forwards exact controls through shared composition and keeps broker authority', async () => {
@@ -437,4 +465,93 @@ test('direct application runs need only admitted identities and execution ports 
     assert.equal(h.calls.filter(([name]) => name === 'admitProvider' || name === 'openAppDatabase' || name === 'dialog').length, 0);
     assert.equal(h.target.events.length, 0);
   } finally { service.clearState(); await h.close(); }
+});
+test('local Agent application entries need only memory and tool ports', async () => {
+  assert.equal(fs.existsSync(localServicePath), true, 'Local Agent application service must exist');
+  assert.doesNotMatch(fs.readFileSync(localServicePath, 'utf8'), /electron|TrustedIpcHandle|IpcMainInvokeEvent|WebContents|modelServiceVault|resolveApiKey|apiKey/);
+  const h = await harness(); try {
+    const service = h.directLocal(); assert.equal(Object.isFrozen(service), true);
+    assert.equal(service.saveMemory({ topic: 'owned', summary: 'owned facts' }).ok, true);
+    assert.equal(service.listMemories().entries.length, 1);
+    assert.equal(service.deleteMemory('owned').deleted, true);
+    assert.equal((await service.runTool('inspect_owned', {})).ok, true);
+    assert.equal(h.calls.some(([name]) => name === 'admitProvider' || name === 'dialog' || name === 'utilityRun'), false);
+  } finally { await h.close(); }
+});
+test('actual explicit memory entries retain normalization, bounds and global storage scope', async () => {
+  const h = await harness(); try {
+    const saved = await h.invoke('ai.memory.save', { topic: ' owned ', summary: ' facts ', details: ' detail ', id: ' id ', tags: [' tag ', ''] });
+    assert.equal(saved.ok, true); assert.deepEqual(plain(saved.entry), { topic: 'owned', summary: 'facts', details: 'detail', id: 'id', tags: ['tag'] });
+    for (const entry of [null, [], {}, { topic: 'x'.repeat(257), summary: 's' }, { topic: 't', summary: 'x'.repeat(10001) },
+      { topic: 't', summary: 's', details: 1 }, { topic: 't', summary: 's', id: 1 }, { topic: 't', summary: 's', tags: [1] },
+      { topic: 't', summary: 's', tags: Array(33).fill('tag') }, { topic: 't', summary: 's', tags: ['x'.repeat(129)] }]) {
+      assert.equal((await h.invoke('ai.memory.save', entry)).error.code, 'MEMORY_ENTRY_INVALID');
+    }
+    assert.equal((await h.invoke('ai.memory.list')).entries.length, 1);
+    for (const key of [null, '', ' ', 'x'.repeat(257)]) assert.equal((await h.invoke('ai.memory.delete', key)).error.code, 'MEMORY_KEY_INVALID');
+    assert.equal((await h.invoke('ai.memory.delete', 'absent')).deleted, false);
+    assert.equal((await h.invoke('ai.memory.delete', ' owned ')).deleted, true);
+    assert.equal(h.calls.filter(([name]) => name === 'memoryStore').every(([, args]) => args.length === 0), true);
+    assert.equal(h.calls.some(([name]) => name === 'openWorkspace' || name === 'admitProvider'), false);
+  } finally { await h.close(); }
+});
+test('memory storage failure keeps the three original explicit operation errors', async () => {
+  const h = await harness({ memoryError: new Error('owned private storage sentinel') }); try {
+    for (const [channel, input, code] of [['ai.memory.list', undefined, 'MEMORY_LIST_FAILED'],
+      ['ai.memory.save', { topic: 'owned', summary: 'facts' }, 'MEMORY_SAVE_FAILED'], ['ai.memory.delete', 'owned', 'MEMORY_DELETE_FAILED']]) {
+      const result = await h.invoke(channel, input); assert.equal(result.ok, false); assert.equal(result.error.code, code);
+      assert.doesNotMatch(JSON.stringify(result), /sentinel/);
+    }
+  } finally { await h.close(); }
+});
+test('sidebar draft stays a local plan and preserves supplied or registry tool descriptions', async () => {
+  const h = await harness(); try {
+    for (const availableTools of [[], [{ name: 'search_owned', description: 'Owned search.', permission: 'read' }]]) {
+      const input = { settings: { provider: 'mock', thinking: 'low', mode: 'fullPermission' }, userPrompt: 'Read owned facts.', context: {}, availableTools };
+      const result = await h.invoke('ai.sidebarDraft', input);
+      assert.equal(result.mode, 'plan'); assert.equal(result.status, 'ready');
+      assert.deepEqual(plain(result), realCore.buildAiSidebarDraft({ ...input, settings: { ...input.settings, mode: 'plan' },
+        availableTools: availableTools.length ? availableTools : h.deps.toolRegistry.list() }));
+    }
+    assert.equal(h.calls.some(([name]) => name === 'admitProvider' || name === 'dialog' || name === 'utilityRun'), false);
+  } finally { await h.close(); }
+});
+test('direct tools keep no-workspace discussion and the Core plan permission guard', async () => {
+  const h = await harness(); try {
+    assert.equal((await h.invoke('ai.runTool', 'inspect_owned', {})).ok, true);
+    assert.equal((await h.invoke('ai.runTool', 'commit_owned', {})).error.code, 'TOOL_PERMISSION_DENIED');
+    assert.equal((await h.invoke('ai.runTool', 'absent_tool', {})).error.code, 'TOOL_NOT_FOUND');
+    assert.equal(h.calls.some(([name]) => name === 'openWorkspace' || name === 'commitTool'), false);
+  } finally { await h.close(); }
+});
+test('direct tools do not dispatch against a same-ID replacement after utility opening', async () => {
+  const opening = deferred(), replacement = { ...ownedWorkspace, layers: { ...ownedWorkspace.layers, overlayRoot: '/owned/replacement' } };
+  const h = await harness({ session: ownedWorkspace, index: new realCore.WorkspaceIndex('owned'), openWorkspace: () => opening.promise });
+  try {
+    const pending = h.invoke('ai.runTool', 'inspect_owned', {});
+    h.switchWorkspace(replacement, new realCore.WorkspaceIndex('owned')); opening.resolve(h.utility);
+    const result = await pending; assert.equal(result.ok, false); assert.equal(result.error.code, 'AGENT_WORKSPACE_REPLACED');
+    assert.equal(h.calls.filter(([name]) => name === 'readTool').length, 0);
+  } finally { await h.close(); }
+});
+test('direct tools reject reactivation of the same session object during utility opening', async () => {
+  const opening = deferred(), index = new realCore.WorkspaceIndex('owned');
+  const h = await harness({ session: ownedWorkspace, index, openWorkspace: () => opening.promise });
+  try {
+    const pending = h.invoke('ai.runTool', 'inspect_owned', {});
+    h.switchWorkspace(null, null); h.switchWorkspace(ownedWorkspace, index); opening.resolve(h.utility);
+    const result = await pending; assert.equal(result.ok, false); assert.equal(result.error.code, 'AGENT_WORKSPACE_REPLACED');
+    assert.equal(h.calls.filter(([name]) => name === 'readTool').length, 0);
+  } finally { await h.close(); }
+});
+test('utility opening in the same activation dispatches once and already-started results stay truthful', async () => {
+  const opening = deferred(), settlement = deferred();
+  const h = await harness({ session: ownedWorkspace, index: new realCore.WorkspaceIndex('owned'), openWorkspace: () => opening.promise, read: () => settlement.promise });
+  try {
+    const pending = h.invoke('ai.runTool', 'inspect_owned', {}); opening.resolve(h.utility);
+    await new Promise(done => setImmediate(done)); assert.equal(h.calls.filter(([name]) => name === 'readTool').length, 1);
+    assert.equal(h.calls.find(([name]) => name === 'readTool')[1].session, ownedWorkspace);
+    h.switchWorkspace(null, null); const outcome = { ok: true, state: 'completed', data: { owned: 'settled' } }; settlement.resolve(outcome);
+    assert.equal(await pending, outcome); assert.equal(h.calls.filter(([name]) => name === 'readTool').length, 1);
+  } finally { await h.close(); }
 });
