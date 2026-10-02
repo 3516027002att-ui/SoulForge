@@ -3,7 +3,9 @@ const channels = new Set(['resource.saveScriptSource', 'resource.applyContainerP
 const methods = new Set(['openAppDatabase', 'openWorkspace', 'record', 'get', 'list', 'updateStatus', 'history',
   'createTransaction', 'transitionTransaction', 'getTransactionForOperation', 'finalizeCommit', 'recordRecoveryPoint',
   'recordResourceEntryChange', 'appendAuditEvent', 'replaceFiles', 'getAllSemanticFileCache', 'setSemanticFileCache',
-  'mergeRagChunkDelta', 'replaceRagChunks', 'loadRagChunks', 'health', 'close']);
+  'mergeRagChunkDelta', 'replaceRagChunks', 'loadRagChunks', 'loadKnowledgeSnapshot', 'health', 'close']);
+const scriptPhases = new Set(['ensure-log', 'read-roots', 'native-reread', 'stage-roots',
+  'candidate-staging', 'stage-native-write', 'commit-entry']);
 const dbEvents = new Set(['enqueue', 'dispatch', 'start', 'finish', 'timeout', 'late-completion', 'workerfail', 'close']);
 const outcomes = new Set(['ok', 'timeout', 'request-failed', 'workerfail', 'close', 'post-error', 'late-completion']);
 const diagnosticCodes = new Set(['POSTCOMMIT_REFRESH_FAILED', 'RESOURCE_NOT_INDEXED', 'WORKSPACE_NOT_OPEN',
@@ -12,7 +14,7 @@ const diagnosticCodes = new Set(['POSTCOMMIT_REFRESH_FAILED', 'RESOURCE_NOT_INDE
   'DATABASE_UTILITY_TIMEOUT', 'DATABASE_UTILITY_PROCESS_EXITED', 'DATABASE_UTILITY_SESSION_STALE',
   'DATABASE_UTILITY_REQUEST_FAILED', 'PARAM_FIELD_VALUE_INVALID', 'PARAM_ROW_IDENTITY_MISSING',
   'LUABND_CONTAINER_HASH_MISMATCH', 'LUABND_CHILD_HASH_MISMATCH', 'LUABND_SCRIPT_READ_FAILED',
-  'LUABND_STAGING_PREPARE_FAILED', 'LUABND_READ_FAILED', 'BND4_STAGING_WRITE_FAILED', 'SCRIPT_SOURCE_READ_FAILED']);
+  'LUABND_STAGING_PREPARE_FAILED', 'LUABND_READ_FAILED', 'BND4_STAGING_WRITE_FAILED', 'SCRIPT_SOURCE_READ_FAILED', 'PARAMDEF_ENCODE_FAILED']);
 
 export function createEditorSaveObservation({ ipcMain, stdout, stderr, clock }) {
   const limit = 160; const inputLimit = 65_536;
@@ -78,6 +80,13 @@ export function createEditorSaveObservation({ ipcMain, stdout, stderr, clock }) 
             ...(['client', 'worker'].includes(trace.side) ? { side: trace.side } : {}),
             ...(outcomes.has(trace.outcome) ? { outcome: trace.outcome } : {}),
             ...(Number.isFinite(trace.dbDurationMs) && trace.dbDurationMs >= 0 ? { elapsedMs: trace.dbDurationMs } : {}) });
+        } else if (line.startsWith('[SoulForge script save phase] ')) {
+          const trace = JSON.parse(line.slice('[SoulForge script save phase] '.length));
+          if (scriptPhases.has(trace.phase) && ['start','finish','throw'].includes(trace.state)
+            && Number.isSafeInteger(trace.request) && trace.request > 0
+            && Number.isFinite(trace.atMs) && trace.atMs >= 0) record({ stage: 'script-phase',
+              request: trace.request, phase: trace.phase, state: trace.state, phaseAtMs: trace.atMs,
+              ...(Number.isFinite(trace.elapsedMs) && trace.elapsedMs >= 0 ? { elapsedMs: trace.elapsedMs } : {}) });
         } else if (/^\[SoulForge native-refresh\] released \d+ idle Bridge client\(s\); active=\d+\.$/.test(line)) {
           record({ stage: 'postcommit', state: 'idle-readers-released' });
         }

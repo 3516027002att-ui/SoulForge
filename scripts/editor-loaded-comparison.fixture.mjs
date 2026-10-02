@@ -6,8 +6,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { describe, it } from 'node:test';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { transformSync } from 'esbuild';
+
+const loadCore = createRequire(import.meta.url)('./typescript-test-loader.cjs')();
+const { applyParamFieldMutation } = loadCore(fileURLToPath(new URL('../packages/core/src/param/paramFieldMutation.ts', import.meta.url)));
+const { FIRST_PARTY_PARAM_METADATA_PACKAGE } = loadCore(fileURLToPath(new URL('../packages/core/src/schema/sekiro/firstPartySchemaData.ts', import.meta.url)));
 
 function productionFile(path) {
   const text = readFileSync(new URL(path, import.meta.url), 'utf8');
@@ -307,6 +313,26 @@ function paramHarness(draft = '2') {
 }
 
 describe('production PARAM comparison and existing commit callbacks', () => {
+  it('actual Priority blur preserves invalid text and comparison when the real Core encoder rejects it', async () => {
+    const h = paramHarness('not-a-number');
+    h.ports.definition = FIRST_PARTY_PARAM_METADATA_PACKAGE.definitions.find(item => item.key.typeName === 'ACTION_GUIDE_PARAM_ST').document;
+    h.ports.field = h.ports.definition.fields.find(item => item.id === 'priority');
+    const row = Buffer.alloc(16, 0x5a); row.writeInt8(7, 4);
+    h.ports.selectedRow.dataBase64 = row.toString('base64');
+    h.ports.drafts = { priority: 'not-a-number' };
+    h.ports.props.onApplyFieldMutation = async input => {
+      h.mutations.push(input);
+      const result = applyParamFieldMutation(input);
+      return result.ok ? { ok: true } : { ok: false, message: result.message };
+    };
+    h.blur(); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.mutations[0].value, 'not-a-number');
+    assert.equal(h.toasts[0][1], 'error');
+    assert.equal(h.reloads(), 0);
+    assert.equal(h.pendingDraftUpdates.length, 0);
+    assert.equal(h.compare().drafts.priority, 'not-a-number');
+    assert.equal(row.readInt8(4), 7);
+  });
   it('comparison gets the decoded baseline and exact pending draft, never a separate baseline cache', () => {
     const h = paramHarness(' \t invalid');
     assert.equal(h.compare().loaded, h.ports.decodedValues); assert.equal(h.compare().drafts.value, ' \t invalid');
