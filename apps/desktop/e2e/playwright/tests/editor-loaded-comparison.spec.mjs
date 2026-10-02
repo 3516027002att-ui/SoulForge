@@ -11,7 +11,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { prepareEditorComparisonWorkspace, SCRIPT_TEXT, OTHER_SCRIPT_TEXT, LONG_SCRIPT_TEXT } from '../editor-comparison-inputs.mjs';
-import { createEditorSaveObservationTail } from '../editor-save-observation.mjs';
+import { createEditorSaveObservationTail, createEditorCaseObservation } from '../editor-save-observation.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const productionMain = path.resolve(here, '../editor-comparison-main.mjs');
@@ -21,13 +21,28 @@ const NATIVE_SAVE_COMPLETION_TIMEOUT_MS = 120_000;
 const PARAM_ROW_INDEX_COMPLETION_TIMEOUT_MS = 60_000;
 const PARAM_PAGE_COMPLETION_TIMEOUT_MS = 120_000;
 
-async function launchOwnedProduction() {
+/** @type {Map<string, ReturnType<typeof createEditorCaseObservation>>} */
+const caseObservations = new Map();
+test.afterEach(({}, testInfo) => {
+  const owner = caseObservations.get(testInfo.testId);
+  caseObservations.delete(testInfo.testId);
+  // The whole-test timeout does not throw into the abandoned body promise.
+  // This synchronous host snapshot precedes owned fixture/app disposal.
+  owner?.finish(testInfo.status, testInfo.expectedStatus);
+});
+
+/** @param {ReturnType<typeof createEditorCaseObservation>} caseObservation */
+async function launchOwnedProduction(caseObservation) {
+  caseObservation.stage('launch-artifacts');
   for (const artifact of ['main/index.js', 'preload/index.cjs', 'renderer/index.html']) {
     expect(existsSync(path.resolve(here, '../../../out', artifact)), `Production build missing: ${artifact}`).toBe(true);
   }
+  caseObservation.stage('launch-inputs');
   const inputs = await prepareEditorComparisonWorkspace(testWorkspace().root);
+  caseObservation.stage('launch-input-hashes');
   const inputHashes = { script: hash(await readFile(path.join(inputs.overlay, inputs.scriptPath))),
     param: hash(await readFile(path.join(inputs.overlay, inputs.paramPath))) };
+  caseObservation.stage('launch-electron');
   const app = await electron.launch({
     chromiumSandbox: true,
     args: [productionMain,
@@ -35,13 +50,17 @@ async function launchOwnedProduction() {
       `--user-data-dir=${path.join(testWorkspace().root, 'profile')}`],
     env: { ...process.env, NODE_ENV: 'production', SF_E2E_OVERLAY_ROOT: inputs.overlay, SF_E2E_BASE_ROOT: inputs.base }
   });
-  const observationTail = createEditorSaveObservationTail();
-  app.process().stdout?.on('data', observationTail.consume);
+  const observationTail = caseObservation.observationTail;
+  const stdout = app.process().stdout;
+  if (stdout) { stdout.on('data', observationTail.consume); caseObservation.attached(); }
+  caseObservation.stage('launch-register-app');
   await testWorkspace().registerApp(app);
   expect(app.process().spawnargs).not.toContain('--no-sandbox');
+  caseObservation.stage('launch-first-window');
   const page = await app.firstWindow();
   const pageErrors = [];
   page.on('pageerror', error => pageErrors.push(String(error)));
+  caseObservation.stage('launch-preferences');
   const preferences = await app.evaluate(({ BrowserWindow }) => {
     const window = BrowserWindow.getAllWindows()[0];
     if (!window) throw new Error('PRODUCTION_WINDOW_MISSING');
@@ -54,11 +73,16 @@ async function launchOwnedProduction() {
   expect(preferences.contextIsolation).toBe(true);
   expect(preferences.nodeIntegration).toBe(false);
   expect(preferences.webSecurity).toBe(true);
+  caseObservation.stage('launch-preload');
   await page.waitForFunction(() => !!window.soulforge);
   const closeAgent = page.getByRole('button', { name: '关闭 Agent 面板' });
+  caseObservation.stage('launch-close-agent');
   if (await closeAgent.isVisible()) await closeAgent.click();
+  caseObservation.stage('launch-open-workspace');
   await page.getByRole('region', { name: '开始' }).getByTestId('open-workspace').click();
+  caseObservation.stage('launch-workspace-ready');
   await expect(page.locator('.workspace-switcher__trigger')).toContainText('editor-comparison-overlay');
+  caseObservation.stage('launch-search-index');
   const files = await page.evaluate(async paths => (await Promise.all(paths.map(query => window.soulforge.searchResources(query)))).flat(),
     [inputs.scriptPath, inputs.paramPath]);
   const script = files.find(file => file.relativePath === inputs.scriptPath);
@@ -162,7 +186,7 @@ async function paramIpcCompletion(observationTail, after, method) {
 }
 
 /** @param {ReturnType<typeof createEditorSaveObservationTail>} observationTail */
-async function waitForParamReload(observationTail, beforeSave) {
+async function waitForParamReload(observationTail, beforeSave, caseObservation, phase) {
   // The current save must finish before its UI-owned index -> payload reads.
   // No native API is called here; a stale toast or draft value cannot pass.
   const waitRead = async (after, method, timeout) => {
@@ -173,23 +197,31 @@ async function waitForParamReload(observationTail, beforeSave) {
     }, { timeout }).toBe(true);
     return finished;
   };
+  caseObservation.stage(`${phase}-save-completion`);
   const saved = await waitRead(beforeSave, 'resource.applyContainerParamFieldMutation', NATIVE_SAVE_COMPLETION_TIMEOUT_MS);
   expect(saved, 'The current PARAM blur must complete its original save IPC').toBeGreaterThan(beforeSave);
+  caseObservation.stage(`${phase}-index-completion`);
   const indexed = await waitRead(saved, 'resource.readContainerParamRowIndex', PARAM_ROW_INDEX_COMPLETION_TIMEOUT_MS);
+  caseObservation.stage(`${phase}-page-completion`);
   await waitRead(indexed, 'resource.readContainerParamPage', PARAM_PAGE_COMPLETION_TIMEOUT_MS);
 }
 
 for (const mode of ['opal', 'obsidian']) {
   test(`loaded Script comparison uses real production save/reload in ${mode}`, async () => {
     test.setTimeout(180_000);
-    const { app, page, inputs, inputHashes, scriptUri, pageErrors, observationTail } = await launchOwnedProduction();
+    const caseObservation = createEditorCaseObservation();
+    caseObservations.set(test.info().testId, caseObservation);
+    const { app, page, inputs, inputHashes, scriptUri, pageErrors, observationTail } = await launchOwnedProduction(caseObservation);
     let phase = 'script-edit';
     try {
+      caseObservation.stage('script-theme');
       await page.getByRole('button', { name: '设置', exact: true }).click();
       await page.getByTestId('theme-settings').getByLabel('界面主题', { exact: true }).selectOption(mode);
       await expect.poll(() => page.evaluate(() => document.documentElement.dataset.spectralMode)).toBe(mode);
       // Open through the existing command palette; settings owns only the sidebar.
+      caseObservation.stage('script-open-resource');
       await openResource(page, inputs.scriptPath);
+      caseObservation.stage('script-initial-source');
       await page.getByRole('row', { name: /baseline\.lua/ }).click();
       const source = page.getByRole('region', { name: '源码', exact: true });
       const comparison = source.locator('details.loaded-comparison');
@@ -198,6 +230,7 @@ for (const mode of ['opal', 'obsidian']) {
       await expect(comparison.locator('.loaded-comparison__body')).toHaveCount(0);
 
       // Typing while collapsed then opening must show the current actual draft.
+      caseObservation.stage('script-draft-comparison');
       await replaceScript(page, source, 'return 3\n');
       await comparison.locator('summary').click();
       await expect(comparison.locator('.loaded-comparison__line.is-remove').filter({ hasText: 'return 1' })).toHaveCount(1);
@@ -224,14 +257,18 @@ for (const mode of ['opal', 'obsidian']) {
       });
       expect(colors.removed.border).not.toBe(colors.added.border);
       expect(colors.removed.background).not.toBe(colors.added.background);
+      caseObservation.stage('script-screenshot');
       await page.screenshot({ path: test.info().outputPath(`script-comparison-${mode}.png`) });
       phase = 'script-save';
+      caseObservation.stage('script-save');
       await page.keyboard.press('Control+s');
       await expect(page.getByTestId('scp-status')).toHaveText('已应用，可回滚。', { timeout: NATIVE_SAVE_COMPLETION_TIMEOUT_MS });
       await expect(comparison).toHaveJSProperty('open', false);
       // Small source fits one viewport; assert the actual reloaded DOM text,
       // independently of the comparison's own no-difference projection.
+      caseObservation.stage('script-ui-readback');
       await expect.poll(async () => (await source.locator('.cm-content .cm-line').allTextContents()).join('\n')).toBe(savedScript);
+      caseObservation.stage('script-native-readback');
       const nativeScript = await page.evaluate(uri => window.soulforge.readScriptSource(uri, 'baseline.lua', 0), scriptUri);
       expect(nativeScript.ok).toBe(true);
       expect(nativeScript.sourceText).toBe(savedScript);
@@ -240,11 +277,13 @@ for (const mode of ['opal', 'obsidian']) {
       await expect(comparison).toContainText('没有草稿差异。');
 
       // Entry switch owns its baseline and resets expansion.
+      caseObservation.stage('script-switch-entry');
       await page.getByRole('row', { name: /other\.lua/ }).click();
       await expect(source.locator('.cm-content')).toContainText('return 2');
       await expect(comparison).toHaveJSProperty('open', false);
       const other = await page.evaluate(uri => window.soulforge.readScriptSource(uri, 'other.lua', 1), scriptUri);
       expect(other.sourceText).toBe(OTHER_SCRIPT_TEXT);
+      caseObservation.stage('script-long-comparison');
       await page.getByRole('row', { name: /long\.lua/ }).click();
       await expect(source.locator('.cm-content')).toContainText('loaded line 1');
       await comparison.locator('summary').click();
@@ -257,37 +296,47 @@ for (const mode of ['opal', 'obsidian']) {
       await expect(comparison).toContainText('没有草稿差异。');
       expect(pageErrors).toEqual([]);
     } catch (error) {
+      caseObservation.stage('catch-report');
       await reportOwnedFailure(app, page, inputs, inputHashes, phase, observationTail).catch(() => undefined);
       throw error;
-    } finally { await app.close(); }
+    } finally { caseObservation.stage('app-close'); await app.close(); }
   });
 
   test(`loaded PARAM comparison uses real production save/reload in ${mode}`, async () => {
     test.setTimeout(180_000);
-    const { app, page, inputs, inputHashes, paramUri, pageErrors, observationTail } = await launchOwnedProduction();
+    const caseObservation = createEditorCaseObservation();
+    caseObservations.set(test.info().testId, caseObservation);
+    const { app, page, inputs, inputHashes, paramUri, pageErrors, observationTail } = await launchOwnedProduction(caseObservation);
     let phase = 'param-edit';
     try {
+      caseObservation.stage('param-theme');
       await page.getByRole('button', { name: '设置', exact: true }).click();
       await page.getByTestId('theme-settings').getByLabel('界面主题', { exact: true }).selectOption(mode);
       await expect.poll(() => page.evaluate(() => document.documentElement.dataset.spectralMode)).toBe(mode);
+      caseObservation.stage('param-open-resource');
       await openResource(page, inputs.paramPath);
       // Save toasts are siblings of the labelled layout inside this wrapper.
       const workbench = page.locator('.param-workbench');
       await expect(workbench).toHaveCount(1);
       await expect(workbench.getByLabel('PARAM 工作台', { exact: true })).toBeVisible();
+      caseObservation.stage('param-select-entry');
       await workbench.getByRole('region', { name: '参数文件', exact: true }).getByRole('row', { name: /ActionGuideParam/ }).click();
+      caseObservation.stage('param-select-row');
       await workbench.getByRole('region', { name: '行', exact: true }).getByRole('row', { name: /^100\b/ }).click();
       const fields = workbench.getByRole('region', { name: '字段', exact: true });
       const fieldComparison = fields.locator('details.loaded-comparison');
       const priority = fields.getByLabel('Priority 值', { exact: true });
+      caseObservation.stage('param-fields-ready');
       await expect(priority).toBeEditable();
       await expect(priority).toHaveValue('1');
+      caseObservation.stage('param-native-baseline');
       const initial = await readParamRow(page, paramUri);
       expect(initial.ok).toBe(true);
       expect(initial.fieldDefsOrigin).toBe('first-party');
       expect(initial.rowDataSize).toBe(16);
       expect(initial.containerHash).toBe(hash(await readFile(path.join(inputs.overlay, inputs.paramPath))));
       const originalRow = Buffer.from(initial.rows.find(row => row.rowIndex === 0).dataBase64, 'base64');
+      caseObservation.stage('param-draft-comparison');
       await expect(fieldComparison).toHaveJSProperty('open', false);
       await fieldComparison.locator('summary').click();
       await expect(fieldComparison).toContainText('没有草稿差异。');
@@ -299,16 +348,20 @@ for (const mode of ['opal', 'obsidian']) {
       await priority.fill('1');
       await expect(fieldComparison).toContainText('没有草稿差异。');
       await priority.fill('7');
+      caseObservation.stage('param-screenshot');
       await page.screenshot({ path: test.info().outputPath(`param-comparison-${mode}.png`) });
       phase = 'param-save';
+      caseObservation.stage('param-save');
       const saveCheckpoint = await paramObservationCheckpoint(observationTail);
       await priority.press('Tab'); // Real blur -> native field write -> reload.
       await expect(workbench.locator('.wb-toast')).toHaveText('已保存', { timeout: NATIVE_SAVE_COMPLETION_TIMEOUT_MS });
       await expect(workbench.locator('.wb-toast')).toHaveClass(/\bwb-toast--ok\b/);
-      await waitForParamReload(observationTail, saveCheckpoint);
+      await waitForParamReload(observationTail, saveCheckpoint, caseObservation, 'param-save');
+      caseObservation.stage('param-save-ui-readback');
       await expect(fieldComparison).toHaveJSProperty('open', false);
       await expect(priority).toBeEditable();
       await expect(priority).toHaveValue('7');
+      caseObservation.stage('param-native-readback');
       const after = await readParamRow(page, paramUri);
       expect(after.ok).toBe(true);
       expect(after.containerHash).not.toBe(initial.containerHash);
@@ -324,6 +377,7 @@ for (const mode of ['opal', 'obsidian']) {
       // Invalid draft remains exact; the real encoder rejects it without a write.
       await priority.fill('not-a-number');
       phase = 'param-invalid';
+      caseObservation.stage('param-invalid');
       await expect(fieldComparison.locator('.loaded-comparison__line.is-remove')).toHaveText('−7');
       await expect(fieldComparison.locator('.loaded-comparison__line.is-add')).toHaveText('+not-a-number');
       await priority.press('Tab');
@@ -334,22 +388,26 @@ for (const mode of ['opal', 'obsidian']) {
       expect(hash(await readFile(path.join(inputs.overlay, inputs.paramPath)))).toBe(after.containerHash);
       await priority.fill('7');
       phase = 'param-revert';
+      caseObservation.stage('param-revert');
       await expect(fieldComparison).toContainText('没有草稿差异。');
       // Switch while unchanged: existing blur-save semantics remain in force.
       const revertCheckpoint = await paramObservationCheckpoint(observationTail);
       await priority.press('Tab');
       await expect(workbench.locator('.wb-toast')).toHaveText('已保存', { timeout: NATIVE_SAVE_COMPLETION_TIMEOUT_MS });
       await expect(workbench.locator('.wb-toast')).toHaveClass(/\bwb-toast--ok\b/);
-      await waitForParamReload(observationTail, revertCheckpoint);
+      await waitForParamReload(observationTail, revertCheckpoint, caseObservation, 'param-revert');
+      caseObservation.stage('param-revert-ui-readback');
       await expect(priority).toBeEditable();
       await expect(priority).toHaveValue('7');
+      caseObservation.stage('param-next-row');
       await workbench.getByRole('region', { name: '行', exact: true }).getByRole('row', { name: /^101\b/ }).click();
       await expect(priority).toHaveValue('2');
       await expect(fieldComparison).toHaveJSProperty('open', false);
       expect(pageErrors).toEqual([]);
     } catch (error) {
+      caseObservation.stage('catch-report');
       await reportOwnedFailure(app, page, inputs, inputHashes, phase, observationTail).catch(() => undefined);
       throw error;
-    } finally { await app.close(); }
+    } finally { caseObservation.stage('app-close'); await app.close(); }
   });
 }

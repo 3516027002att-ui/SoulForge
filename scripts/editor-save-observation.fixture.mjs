@@ -1,18 +1,155 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
 import ts from 'typescript';
 import * as observationModule from '../apps/desktop/e2e/playwright/editor-save-observation.mjs';
 const { createEditorSaveObservation } = observationModule;
 
-async function actualParamCompletionHelper(name = 'paramIpcCompletion') {
+async function actualParamCompletionHelper(name = 'paramIpcCompletion', bindings = {}) {
   const url = new URL('../apps/desktop/e2e/playwright/tests/editor-loaded-comparison.spec.mjs', import.meta.url);
   const source = await readFile(url, 'utf8');
   const ast = ts.createSourceFile(url.pathname, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   const helper = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
   assert.ok(helper, 'The production spec helper must remain discoverable');
-  return new Function(`return (${helper.getText(ast)});`)();
+  return new Function(...Object.keys(bindings), `return (${helper.getText(ast)});`)(...Object.values(bindings));
 }
+
+async function actualCaseHook(kind) {
+  const url = new URL('../apps/desktop/e2e/playwright/tests/editor-loaded-comparison.spec.mjs', import.meta.url);
+  const source = await readFile(url, 'utf8');
+  const ast = ts.createSourceFile(url.pathname, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  let callback;
+  function visit(node) {
+    if (ts.isCallExpression(node) && (kind === 'afterEach'
+      ? node.expression.getText(ast) === 'test.afterEach'
+      : node.expression.getText(ast) === 'test' && node.arguments[0]?.getText(ast).includes('loaded PARAM comparison'))) {
+      callback = node.arguments[kind === 'afterEach' ? 0 : 1];
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(ast);
+  assert.ok(callback, `The actual ${kind} callback must be registered`);
+  return bindings => new Function(...Object.keys(bindings), `return (${callback.getText(ast)});`)(...Object.values(bindings));
+}
+
+test('actual failure hook reports a pending setup or body at timeout without awaiting the abandoned catch', async () => {
+  const caseCallback = await actualCaseHook('param'), hook = await actualCaseHook('afterEach');
+  for (const boundary of ['setup', 'body']) {
+    const observations = new Map(), reports = []; let caught = 0, reached;
+    const entered = new Promise(resolve => { reached = resolve; });
+    const pending = new Promise(() => {});
+    const info = { testId: boundary, status: 'timedOut', expectedStatus: 'passed' };
+    const createOwner = () => observationModule.createEditorCaseObservation({ clock: () => 10,
+      emit: (marker, body) => reports.push([marker, JSON.parse(body)]) });
+    const bindings = { caseObservations: observations, createEditorCaseObservation: createOwner,
+      test: { setTimeout() {}, info: () => info },
+      launchOwnedProduction: owner => {
+        if (boundary === 'setup') { owner.stage('launch-search-index'); reached(); return pending; }
+        return Promise.resolve({ app: {}, page: { getByRole: () => ({ click: () => { reached(); return pending; } }) } });
+      }, reportOwnedFailure: () => { caught++; } };
+    const body = caseCallback(bindings)();
+    await entered;
+    // The runner races the body promise; it does not reject an awaited port.
+    await Promise.race([body, Promise.resolve('whole-test-timeout')]);
+    assert.equal(caught, 0);
+    hook(bindings)({}, info);
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0][1].stage, boundary === 'setup' ? 'launch-search-index' : 'param-theme');
+    assert.equal(reports[0][1].sample, 'afterEach');
+    assert.equal(reports[0][1].observationAttached, false);
+    assert.equal(observations.size, 0);
+  }
+});
+
+test('actual launch marks an observation stream attached only after its stdout listener is registered', async () => {
+  const stream = new EventEmitter(), reports = []; let reached;
+  const entered = new Promise(resolve => { reached = resolve; });
+  const owner = observationModule.createEditorCaseObservation({ clock: () => 10,
+    emit: (marker, body) => reports.push([marker, JSON.parse(body)]) });
+  const bindings = {
+    expect: () => ({ toBe() {}, not: { toContain() {} } }), existsSync: () => true,
+    path: { resolve: () => 'owned-artifact', join: () => 'owned-input' }, here: 'owned', productionMain: 'owned-main',
+    prepareEditorComparisonWorkspace: async () => ({ overlay: 'owned', base: 'owned', scriptPath: 'script', paramPath: 'param' }),
+    testWorkspace: () => ({ root: 'owned', registerApp: async () => undefined }),
+    readFile: async () => Buffer.from('owned'), hash: () => 'owned-hash',
+    electron: { launch: async () => ({ process: () => ({ stdout: stream, spawnargs: [] }),
+      firstWindow: () => { reached(); return new Promise(() => {}); } }) }
+  };
+  const launch = await actualParamCompletionHelper('launchOwnedProduction', bindings);
+  void launch(owner); await entered;
+  assert.equal(stream.listenerCount('data'), 1);
+  owner.finish('timedOut', 'passed');
+  assert.equal(reports[0][1].observationAttached, true);
+  assert.equal(reports[0][1].stage, 'launch-first-window');
+});
+
+test('actual PARAM catch and close preserve the originating await when failure reporting or app close stays pending', async () => {
+  const caseCallback = await actualCaseHook('param'), hook = await actualCaseHook('afterEach');
+  for (const boundary of ['report', 'close']) {
+    const observations = new Map(), reports = []; let reached;
+    const entered = new Promise(resolve => { reached = resolve; }), pending = new Promise(() => {});
+    const info = { testId: boundary, status: 'timedOut', expectedStatus: 'passed' };
+    let time = 0;
+    const bindings = { caseObservations: observations,
+      createEditorCaseObservation: () => observationModule.createEditorCaseObservation({ clock: () => ++time,
+        emit: (marker, body) => reports.push([marker, JSON.parse(body)]) }),
+      test: { setTimeout() {}, info: () => info },
+      launchOwnedProduction: async () => ({ app: { close: () => { reached(); return pending; } },
+        page: { getByRole: () => ({ click: async () => { throw new Error('PRIVATE_CLICK_ERROR'); } }) } }),
+      reportOwnedFailure: () => { if (boundary === 'report') { reached(); return pending; } return Promise.resolve(); } };
+    const body = caseCallback(bindings)();
+    await entered;
+    await Promise.race([body, Promise.resolve('whole-test-timeout')]);
+    hook(bindings)({}, info);
+    assert.equal(reports[0][1].stage, boundary === 'report' ? 'catch-report' : 'app-close');
+    assert.equal(reports[0][1].failedStage, 'param-theme');
+    assert.equal(reports[0][1].failedStageAtMs, 2);
+    assert.doesNotMatch(JSON.stringify(reports), /PRIVATE_|error|message|path/);
+  }
+});
+
+test('normal case stays quiet and closed stages/statuses discard untrusted log fields', () => {
+  assert.equal(typeof observationModule.createEditorCaseObservation, 'function');
+  const reports = []; const options = { clock: () => 20, emit: (marker, body) => reports.push([marker, JSON.parse(body)]) };
+  const passed = observationModule.createEditorCaseObservation(options);
+  passed.stage('app-close'); passed.finish('passed', 'passed');
+  assert.equal(reports.length, 0);
+  const failed = observationModule.createEditorCaseObservation(options);
+  failed.stage('PRIVATE_PATH'); failed.stage({ stage: 'param-save', body: 'PRIVATE_BODY' });
+  failed.observationTail.consume('[SF_EDITOR_SAVE_OBSERVATION] {"event":{"atMs":1,"stage":"ipc","method":"resource.readContainerParamPage","state":"start","body":"PRIVATE_BODY"},"counters":{}}\n');
+  failed.finish('failed', 'passed');
+  assert.equal(reports[0][1].stage, 'case-start');
+  assert.equal(reports[0][1].observation.transportErrors, 1);
+  const invalid = observationModule.createEditorCaseObservation(options);
+  invalid.finish('PRIVATE_STATUS', 'passed');
+  assert.equal(reports.length, 1);
+  const valid = observationModule.createEditorCaseObservation(options);
+  valid.stage('param-save'); valid.finish('timedOut', 'passed');
+  assert.equal(reports[1][1].stage, 'param-save');
+  assert.doesNotMatch(JSON.stringify(reports), /PRIVATE_|body|path|testId/);
+});
+
+test('failure hook diagnostics preserve the original failure when their clock or sink throws', () => {
+  const owner = observationModule.createEditorCaseObservation({ clock: () => { throw new Error('PRIVATE_CLOCK'); },
+    emit: () => { throw new Error('PRIVATE_SINK'); } });
+  assert.doesNotThrow(() => { owner.stage('catch-report'); owner.finish('timedOut', 'passed'); });
+});
+
+test('actual failure hook closes only its own case and late callbacks cannot change a later report', async () => {
+  const hook = await actualCaseHook('afterEach'), observations = new Map(), reports = [];
+  const make = () => observationModule.createEditorCaseObservation({ clock: () => 30,
+    emit: (marker, body) => reports.push([marker, JSON.parse(body)]) });
+  const previous = make(); previous.stage('launch-electron'); observations.set('previous', previous);
+  hook({ caseObservations: observations })({}, { testId: 'previous', status: 'timedOut', expectedStatus: 'passed' });
+  const current = make(); current.stage('param-native-baseline'); observations.set('current', current);
+  current.attached();
+  previous.stage('app-close'); previous.attached(); previous.finish('failed', 'passed');
+  hook({ caseObservations: observations })({}, { testId: 'current', status: 'failed', expectedStatus: 'passed' });
+  assert.deepEqual(reports.map(([, report]) => report.stage), ['launch-electron', 'param-native-baseline']);
+  assert.deepEqual(reports.map(([, report]) => report.observationAttached), [false, true]);
+  assert.equal(observations.size, 0);
+});
 
 test('actual PARAM refetch helper reads the host tail and rejects stale, pending, failed or lost observations', async () => {
   const helper = await actualParamCompletionHelper(), method = 'resource.readContainerParamPage';

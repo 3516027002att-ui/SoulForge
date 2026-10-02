@@ -163,3 +163,57 @@ export function createEditorSaveObservationTail() {
       ...counters, transportDroppedEvents, transportDroppedInput, transportErrors })
   };
 }
+
+const caseStages = new Set(['case-start', 'launch-artifacts', 'launch-inputs', 'launch-input-hashes',
+  'launch-electron', 'launch-register-app', 'launch-first-window', 'launch-preferences', 'launch-preload',
+  'launch-close-agent', 'launch-open-workspace', 'launch-workspace-ready', 'launch-search-index',
+  'script-theme', 'script-open-resource', 'script-initial-source', 'script-draft-comparison', 'script-screenshot',
+  'script-save', 'script-ui-readback', 'script-native-readback', 'script-switch-entry', 'script-long-comparison',
+  'param-theme', 'param-open-resource', 'param-select-entry', 'param-select-row', 'param-fields-ready',
+  'param-native-baseline', 'param-draft-comparison', 'param-screenshot', 'param-save', 'param-save-ui-readback',
+  'param-native-readback', 'param-invalid', 'param-revert', 'param-revert-ui-readback', 'param-next-row',
+  'param-save-save-completion', 'param-save-index-completion', 'param-save-page-completion',
+  'param-revert-save-completion', 'param-revert-index-completion', 'param-revert-page-completion',
+  'catch-report', 'app-close']);
+const caseStatuses = new Set(['passed', 'failed', 'timedOut', 'interrupted', 'skipped']);
+
+/** A case-owned, hook-time snapshot; never requests information from Electron.
+ * @param {{ clock?: () => number, emit?: (marker: string, body: string) => void }} [options]
+ */
+export function createEditorCaseObservation({ clock = () => performance.now(), emit = console.log } = {}) {
+  const observationTail = createEditorSaveObservationTail();
+  const now = () => { try { const value = clock(); return Number.isFinite(value) && value >= 0 ? value : null; } catch { return null; } };
+  let closed = false, observationAttached = false, stage = 'case-start';
+  /** @type {string | null} */
+  let failedStage = null;
+  /** @type {number | null} */
+  let failedStageAtMs = null;
+  const startedAtMs = now(); let stageAtMs = startedAtMs;
+  return {
+    observationTail,
+    attached() { if (!closed) observationAttached = true; },
+    /** @param {unknown} next */
+    stage(next) {
+      if (closed || typeof next !== 'string' || !caseStages.has(next)) return;
+      if (next === 'catch-report' && failedStage === null) {
+        failedStage = stage; failedStageAtMs = stageAtMs;
+      }
+      stage = next; stageAtMs = now();
+    },
+    /** @param {unknown} status @param {unknown} expectedStatus */
+    finish(status, expectedStatus) {
+      if (closed) return;
+      closed = true;
+      if (typeof status !== 'string' || !caseStatuses.has(status)
+        || typeof expectedStatus !== 'string' || !caseStatuses.has(expectedStatus)
+        || status === expectedStatus || status === 'skipped') return;
+      const sampledAtMs = now();
+      try {
+        emit('[SF_EDITOR_CASE_FAILURE]', JSON.stringify({ sample: 'afterEach', status, stage, stageAtMs, sampledAtMs,
+          failedStage, failedStageAtMs, observationAttached,
+          elapsedMs: startedAtMs !== null && sampledAtMs !== null ? Math.max(0, sampledAtMs - startedAtMs) : null,
+          observation: observationTail.snapshot() }));
+      } catch { /* A diagnostic sink must not replace the original failure. */ }
+    }
+  };
+}
