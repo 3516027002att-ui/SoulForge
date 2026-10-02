@@ -127,8 +127,8 @@ describe('Negative source tests（TEXT-20B 五类失败覆盖）', () => {
     join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'FmgWorkbenchPanel.tsx'),
     'utf8'
   );
-  const appSource = readFileSync(
-    join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'App.tsx'),
+  const textControllerSource = readFileSync(
+    join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'useTextDocumentController.ts'),
     'utf8'
   );
 
@@ -242,11 +242,11 @@ describe('Negative source tests（TEXT-20B 五类失败覆盖）', () => {
 
   it('TPF route rejection：文本工作台不引用 tpf/texbnd 读取', () => {
     assert.doesNotMatch(panelSource, /\.tpf|texbnd|tpfDocument|TpfDocument/);
-    // App.tsx 的文本装载路径只走 readFmgDocument，不借 TPF route。
-    const loadFmgStart = appSource.indexOf('function loadFmg');
-    const loadFmgEnd = appSource.indexOf('void loadFmg');
+    // The mounted Text owner holds the original read path; App only binds it.
+    const loadFmgStart = textControllerSource.indexOf('function loadFmg');
+    const loadFmgEnd = textControllerSource.indexOf('void loadFmg');
     assert.ok(loadFmgStart >= 0 && loadFmgEnd > loadFmgStart, 'loadFmg 函数未找到，负向断言失锚');
-    assert.doesNotMatch(appSource.slice(loadFmgStart, loadFmgEnd), /Tpf|tpf|texbnd/);
+    assert.doesNotMatch(textControllerSource.slice(loadFmgStart, loadFmgEnd), /Tpf|tpf|texbnd/);
   });
 
   it('工作台桥接调用只有目录与表分页两个 typed 读取出口，写入只经 onMutation（fmg_entry_*）', () => {
@@ -290,17 +290,23 @@ describe('Negative source tests（TEXT-20B 五类失败覆盖）', () => {
   });
 });
 
-describe('S29 能打开就能写：FMG 直写不进审查队列（App 装配层）', () => {
+describe('S29 能打开就能写：FMG 直写不进审查队列（Text owner / App 装配）', () => {
   const appSource = readFileSync(
     join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'App.tsx'),
     'utf8'
   );
-  const fmgHandlerStart = appSource.indexOf('onMutation={async (mutation) => {');
-  const loadFmgStart = appSource.indexOf('function loadFmg');
+  const textControllerSource = readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'useTextDocumentController.ts'),
+    'utf8'
+  );
+  const fmgHandlerStart = textControllerSource.indexOf('async function submitFmgEntry');
+  const loadFmgStart = textControllerSource.indexOf('function loadFmg');
 
   it('FMG 条目编辑直接调 applyFmgMutation，不再 propose 进审查队列', () => {
     assert.ok(fmgHandlerStart >= 0, 'FmgWorkbenchPanel 直写 handler 未找到，断言失锚');
-    const handler = appSource.slice(fmgHandlerStart, fmgHandlerStart + 2200);
+    assert.match(appSource, /import \{ useTextDocumentController \} from '\.\/app\/useTextDocumentController\.js'/);
+    assert.match(appSource, /onMutation=\{submitFmgEntry\}/);
+    const handler = textControllerSource.slice(fmgHandlerStart, fmgHandlerStart + 2200);
     assert.match(handler, /bridge\.applyFmgMutation/);
     assert.doesNotMatch(handler, /changeStore\.propose/);
     assert.doesNotMatch(handler, /进入审查队列/);
@@ -309,7 +315,7 @@ describe('S29 能打开就能写：FMG 直写不进审查队列（App 装配层�
 
   it('哈希缺了交给 main 现算：renderer 以 fmgSourceHash ?? \'\' 透传，不再拒写', () => {
     assert.ok(fmgHandlerStart >= 0, 'FmgWorkbenchPanel 直写 handler 未找到，断言失锚');
-    const handler = appSource.slice(fmgHandlerStart, fmgHandlerStart + 2200);
+    const handler = textControllerSource.slice(fmgHandlerStart, fmgHandlerStart + 2200);
     assert.match(handler, /fmgSourceHash \?\? ''/);
     assert.doesNotMatch(handler, /FMG_NO_LIVE_HASH|缺少容器或条目哈希|请重新选择/);
   });
@@ -317,7 +323,9 @@ describe('S29 能打开就能写：FMG 直写不进审查队列（App 装配层�
   it('成功后 toast「已保存」并重读回源；applyStagedChange 里 fmg/param-row 不再有 NO_LIVE_HASH', () => {
     assert.doesNotMatch(appSource, /FMG_NO_LIVE_HASH/);
     assert.doesNotMatch(appSource, /PARAM_NO_LIVE_HASH/);
-    assert.match(appSource, /pushToast\(mutation\.kind === 'fmg_entry_delete' \? '条目已删除' : '已保存'\)/);
+    assert.doesNotMatch(textControllerSource, /FMG_NO_LIVE_HASH|PARAM_NO_LIVE_HASH/);
+    assert.match(textControllerSource, /pushToast\(mutation\.kind === 'fmg_entry_delete' \? '条目已删除' : '已保存'\)/);
+    assert.match(textControllerSource, /await reloadFmgDocument\(sourceUri\)/);
     assert.ok(loadFmgStart >= 0, 'loadFmg 函数未找到，断言失锚');
   });
 });

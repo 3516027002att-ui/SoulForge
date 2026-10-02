@@ -449,3 +449,58 @@ receipt preserves the earlier timing evidence's original producer identity.
 Renderer/main-process timing, actual m10 static-model geometry and GPU first
 frame remain outside this capture; the restored m10 MAPBND is still KRAK and
 unavailable to the current Linux decoder.
+
+## Private MSB verification snapshot
+
+An owned helper bound to that current `07795d12...` producer and `5879f573...`
+source separated verification work on the same 6,772,360-byte MSB leaf. Twenty
+samples measured actual compiled verification at mean 13.688 ms and about
+9,744,720 current-thread allocated bytes. The explanatory subscopes measured
+the source copy at 1.244 ms / 6,772,384 bytes, reparse at 3.272 ms / about
+2,970,720 bytes, semantic comparisons at 0.668 ms / 840 bytes, and the two leaf
+hashes at 4.060 and 3.995 ms / 360 bytes each. These separately instrumented
+scopes exclude the initial parse and are not a request DAG; their sums must not
+be added to prior request totals. Raw rows and the exact source-extracted
+comparison lineage are retained under `.local-validation/msb-verify/receipt.json`.
+
+Only `read-msb-document` now uses an internal owned verification entry point.
+Its raw snapshot is a fresh private allocation, or its DCX resolution returns
+a fresh decoded payload. The local synchronous parse/verify interval has no
+cache, asynchronous yield or external callback publishing those bytes. Timing
+retains scalar receipts only, and the eventual envelope publishes projected
+values rather than the source array. The public `VerifyRoundTrip` still copies
+the caller-retained mutable array. Writer and semantic-export callers are
+unchanged. Both paths use the same complete second parse, semantic comparisons
+and both source hashes; `ByteIdentical` remains false because no writer rebuild
+is being tested.
+
+The current compiled candidate has native input fingerprint
+`ef466a636f9c4a030928c13992e850eeb0797efa9e28332eb456ad822410db37`
+(307 inputs) and DLL
+`12449b4b0b872fa1f1d7c6db0e9703527918e0c5be44d4e893385b5ec1b2e594`.
+A second helper called the actual public-copy and internal-owned methods from
+that same DLL, with fresh hash memos, three warmups and twenty paired samples
+in each B/C and C/B order on .NET 10.0.0. Mean allocations fell from about
+9.74 MB to 2.97 MB in both orders, a 69.50% reduction within verification. Wall
+means were 13.622 to 11.452 ms (-15.93%) and 13.084 to 9.835 ms (-24.83%).
+These natural-GC measurements support this local copy removal; they do not
+measure full request latency, retained heap, RSS or first-frame/GPU performance.
+
+Six new tests went from missing-entry RED on the prior producer to GREEN on
+the candidate; the complete native suite passed 81/81 with zero skips. Tiny,
+LOH-boundary and 2 MiB sources with tiny geometry confirm the public path still
+allocates its separate source copy. Post-read name mutations, with and without
+an earlier hash memo, still fail semantic verification and preserve the original
+versus current hash distinction. Invalid mutated bytes still throw rather than
+reuse an earlier verification. These are controlled mutable-array checks, not
+a promise that the owned path supports concurrent external mutation.
+
+The complete 2,532,035-byte native result remains SHA256 `fb5fb97c...` in both
+actual-method projections. A bounded candidate daemon capture at the normal
+16 MiB / one-active-request settings reconfirmed default timing silence, all six
+opt-in phases with physical and leaf source identity, queued cancellation without
+a late result, same-source reopen, zero active/queued health and close, and exit
+zero. Input bytes remained unchanged. Exact pins, every measured row and the
+separate daemon capture are in
+`.local-validation/msb-verify/actual-receipt.json` (SHA256 `624dffff...`).
+The two full leaf hashes remain the largest measured verification CPU component.

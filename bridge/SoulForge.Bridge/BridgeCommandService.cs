@@ -1140,7 +1140,10 @@ internal sealed class BridgeCommandService
                 MsbNativeDocument document;
                 using (mapTiming?.Measure("msbReadMs")) document = MsbNativeDocument.Read(leaf);
                 MsbRoundTripReport roundTrip;
-                using (mapTiming?.Measure("verifyRoundTripMs")) roundTrip = document.VerifyRoundTrip();
+                // Snapshot reader and DCX resolution allocate this private
+                // leaf; nothing publishes/retains it before this synchronous
+                // verification. Keep public/shared-document verification copied.
+                using (mapTiming?.Measure("verifyRoundTripMs")) roundTrip = document.VerifyOwnedSnapshot();
                 if (mapTiming?.IsMsbDocument == true)
                     mapTiming.ObserveMsbSource(physicalHash, source.LongLength, document.SourceHash, leaf.LongLength);
                 var diagnostics = new[]

@@ -59,6 +59,20 @@ function makeActions(record: DocumentFamily[]): DocumentResetActions {
   ) as DocumentResetActions;
 }
 
+function functionBody(source: string, name: string): string {
+  return new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`).exec(source)?.[0] ?? '';
+}
+
+function workspaceDelegateHasReset(source: string, name: string): boolean {
+  const target = functionBody(source, name);
+  if (/resetAllDocuments\(documentResetActions\)/.test(target)) return true;
+  // The Workspace owner invokes its explicit installation callback; inspect
+  // the actual App binding and reset body, rather than trusting a callback name.
+  if (!/onWorkspaceInstalled\(result\)/.test(target)) return false;
+  const binding = /onWorkspaceInstalled:\s*(\w+)/.exec(source)?.[1];
+  return binding !== undefined && /resetAllDocuments\(documentResetActions\)/.test(functionBody(source, binding));
+}
+
 describe('resetAllDocuments', () => {
   it('清空全部登记的资源族，一个不漏', () => {
     const called: DocumentFamily[] = [];
@@ -169,22 +183,30 @@ describe('两处复位站点必须走统一调度', () => {
     // 委派形态：await someFn(...)。取被调用者名字，再断言它复位。
     const delegated = [...body.matchAll(/await\s+(\w+)\s*\(/g)]
       .map((hit) => hit[1])
-      .filter((name) => name !== 'bridge');
+      .filter((name): name is string => typeof name === 'string' && name !== 'bridge');
     assert.ok(
       delegated.length > 0,
       'openWorkspace 既不自己调用 resetAllDocuments，也没有委派给任何函数：'
       + '实测它此前 8 个族一个都没复位'
     );
-    const delegateHasReset = delegated.some((name) => {
-      const target = new RegExp(`async function ${name}\\([\\s\\S]*?\\n  \\}`).exec(source);
-      return target !== null && /resetAllDocuments\(documentResetActions\)/.test(target[0]);
-    });
+    const delegateHasReset = delegated.some(name => workspaceDelegateHasReset(source, name));
     assert.ok(
       delegateHasReset,
       `openWorkspace 委派给了 ${delegated.join(' / ')}，但其中没有一个调用 `
       + 'resetAllDocuments —— 打开工作区不复位会让新工作区显示上一个工作区的'
       + 'FMG 条目 / PARAM 行 / EMEVD 事件 / MSB 场景'
     );
+  });
+
+  it('工作区复位委派丢掉真实安装callback绑定或其reset时必须报错', () => {
+    assert.equal(workspaceDelegateHasReset(source, 'mountWorkspace'), true);
+    const detached = source.replace(/onWorkspaceInstalled:\s*installWorkspaceViews/, 'onWorkspaceInstalled: disconnectedWorkspaceViews');
+    assert.notEqual(detached, source, '真实安装callback绑定已移动，请更新负例');
+    assert.equal(workspaceDelegateHasReset(detached, 'mountWorkspace'), false);
+    const body = functionBody(source, 'installWorkspaceViews');
+    assert.ok(body.includes('resetAllDocuments(documentResetActions)'));
+    const omitted = source.replace(body, body.replace('resetAllDocuments(documentResetActions);', ''));
+    assert.equal(workspaceDelegateHasReset(omitted, 'mountWorkspace'), false);
   });
 
   it('selectFile 调用 resetAllDocuments', () => {
@@ -217,6 +239,7 @@ describe('两处复位站点必须走统一调度', () => {
      */
     for (const [label, pattern] of [
       ['mountWorkspace', /async function mountWorkspace\([\s\S]*?\n  \}/],
+      ['installWorkspaceViews', /function installWorkspaceViews\([\s\S]*?\n  \}/],
       ['selectFile', /async function selectFile\([\s\S]*?\n  \}/]
     ] as const) {
       const body = pattern.exec(source)?.[0] ?? '';

@@ -222,19 +222,17 @@ describe('S34 脚本全量读写（main 侧按打开编码写回，不硬编码 
     'utf8'
   );
   const resourceSource = readFileSync(
-    join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc', 'resource.ts'),
+    join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'services', 'scriptSourceService.ts'),
     'utf8'
   );
-  // IPC 物理拆分后，读取侧（encoding 回传）在 ipc/raw.ts，脚本保存链在 ipc/resource.ts。
+  // 读取侧（encoding 回传）在 ipc/raw.ts，脚本保存链由 application service 持有。
   const rawSource = readFileSync(
     join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc', 'raw.ts'),
     'utf8'
   );
-  // 从 saveScriptSource 注册处切片到下一个 resource handler：
-  // 容器条目分支与独立文件分支都在这个 handler 里，后面的 handler 不算。
+  // 容器条目分支与独立文件分支都在同一个 application operation 内。
   const saveChain = resourceSource.slice(
-    resourceSource.indexOf("'resource.saveScriptSource'"),
-    resourceSource.indexOf("'resource.preview'")
+    resourceSource.indexOf('const saveScriptSource = async')
   );
 
   it('读取回传 encoding：明文=检测编码，反编译=decompiled', () => {

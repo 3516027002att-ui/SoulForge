@@ -365,11 +365,21 @@ internal sealed class MsbNativeDocument
         return ReadUtf16(source, entryOffset + (int)nameRel);
     }
 
-    public MsbRoundTripReport VerifyRoundTrip()
+    // Callers can retain and mutate the array passed to Read. Preserve the
+    // public verification's separate reparse snapshot for those callers.
+    public MsbRoundTripReport VerifyRoundTrip() => VerifyRoundTripCore(SourceBytes.ToArray());
+
+    // Only the closed read-msb-document path owns this leaf exclusively from
+    // allocation through verification: no cache, external callback or await
+    // publishes its array. Do not use this for shared/caller-retained bytes.
+    internal MsbRoundTripReport VerifyOwnedSnapshot() => VerifyRoundTripCore(SourceBytes);
+
+    private MsbRoundTripReport VerifyRoundTripCore(byte[] rebuilt)
     {
         // 注意这条往返验证的真实判别力边界，不要按名字理解它。
         //
-        // rebuilt 是**源字节的拷贝**，不是经 writer 重建的产物。因此：
+        // rebuilt 是源字节快照（公共入口拷贝，独占读取入口直接复用），
+        // 不是经 writer 重建的产物。因此：
         //  · ByteIdentical 恒真——它比较的是源与源，永远相等；
         //  · 真正被验证的只有 SemanticIdentical，即「重新解析同一批字节能否得到
         //    同样的模型/部件/区域/事件/路线集合」，也就是 **parser 的自洽性**，
@@ -381,7 +391,6 @@ internal sealed class MsbNativeDocument
         //
         // 若将来接入 MSB writer，这里必须改成 Rebuild() 的真实产物再比较；
         // 那时 ByteIdentical 才有意义。
-        var rebuilt = SourceBytes.ToArray();
         var reparsed = Read(rebuilt);
         var modelsEqual = reparsed.Models.Count == Models.Count
             && reparsed.Models.Zip(Models).All(pair => pair.First.Offset == pair.Second.Offset

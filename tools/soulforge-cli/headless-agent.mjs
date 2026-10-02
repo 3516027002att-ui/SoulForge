@@ -4,26 +4,30 @@ import { readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
 import { resolve, join, relative } from 'node:path';
 import { captureAgentRunProvenance, decodeTaskInput, bindProviderConfiguration } from '../../scripts/testing/agent-run-provenance.mjs';
 import { loadTestAgentProvider } from '../../scripts/testing/test-agent-provider.mjs';
+import {createAgentStdioControl} from './agent-control.mjs';
+import {BoundedEventSender} from '../../packages/agent/src/eventSender.mjs';
 const failure = (code, message) => Object.assign(new Error(message), { code });
 export function parseAgentExecArguments(argv) {
     if (argv[0] !== 'exec')
         throw failure('AGENT_COMMAND_INVALID', 'Expected agent exec.');
     const options = { kernel: 'finite', maxSteps: 200, timeoutMs: 1800000, maxOutputTokens: 100000 };
-    const fields = { '--prompt': 'prompt', '--task-file': 'taskFile', '--provider-config': 'providerConfig', '--provider': 'provider', '--test-config': 'testConfig', '--input-price-per-million': 'inputPricePerMillion', '--output-price-per-million': 'outputPricePerMillion', '--responses-file': 'responsesFile', '--sessions-dir': 'sessionsDir', '--kernel': 'kernel', '--max-steps': 'maxSteps', '--timeout-ms': 'timeoutMs', '--max-output-tokens': 'maxOutputTokens', '--max-cost': 'maxCost' };
+    const fields = { '--prompt': 'prompt', '--task-file': 'taskFile', '--provider-config': 'providerConfig', '--provider': 'provider', '--test-config': 'testConfig', '--input-price-per-million': 'inputPricePerMillion', '--output-price-per-million': 'outputPricePerMillion', '--responses-file': 'responsesFile', '--sessions-dir': 'sessionsDir', '--kernel': 'kernel', '--max-steps': 'maxSteps', '--timeout-ms': 'timeoutMs', '--max-output-tokens': 'maxOutputTokens', '--max-cost': 'maxCost', '--resume-session':'resumeSession','--approval-timeout-ms':'approvalTimeoutMs' };
     for (let i = 1; i < argv.length; i++) {
+        if(argv[i]==='--protocol-stdin'){options.protocolStdin=true;continue;}
         const key = fields[argv[i]];
         if (!key)
             throw failure('AGENT_ARGUMENT_INVALID', `Unknown agent exec option: ${argv[i]}`);
         const value = argv[++i];
         if (value === undefined || value.startsWith('--'))
             throw failure('AGENT_ARGUMENT_INVALID', 'Option requires a value.');
-        options[key] = ['maxSteps', 'timeoutMs', 'maxOutputTokens', 'maxCost', 'inputPricePerMillion', 'outputPricePerMillion'].includes(key) ? Number(value) : value;
+        options[key] = ['maxSteps', 'timeoutMs', 'maxOutputTokens', 'maxCost', 'inputPricePerMillion', 'outputPricePerMillion','approvalTimeoutMs'].includes(key) ? Number(value) : value;
     }
     if (options.kernel !== 'finite')
         throw failure('AGENT_LEGACY_KERNEL_RETIRED', 'The production Agent uses the finite kernel; explicit experiments use the pinned Git baseline.');
     for (const key of ['maxSteps', 'timeoutMs', 'maxOutputTokens'])
         if (!Number.isSafeInteger(options[key]) || options[key] <= 0)
             throw failure('AGENT_ARGUMENT_INVALID', `Invalid ${key}.`);
+    if(options.approvalTimeoutMs!==undefined&&(!Number.isSafeInteger(options.approvalTimeoutMs)||options.approvalTimeoutMs<=0||options.approvalTimeoutMs>600000))throw failure('AGENT_ARGUMENT_INVALID','Approval timeout must be a positive integer no greater than 600000ms.');
     if (options.maxCost !== undefined && (!Number.isFinite(options.maxCost) || options.maxCost < 0))
         throw failure('AGENT_ARGUMENT_INVALID', 'Invalid cost budget.');
     if (Boolean(options.prompt) === Boolean(options.taskFile))
@@ -72,7 +76,8 @@ async function buildIdentity(repoRoot) {
 }
 export async function runHeadlessAgentCommand(options, core, repoRoot, io = {}) {
     const args = parseAgentExecArguments(options.agentArgs ?? []);
-    const output = io.emit ?? (frame => process.stdout.write(`${JSON.stringify(frame)}\n`));
+    const controller=new AbortController();
+    const output = io.emit ?? (frame => new Promise((resolve,reject)=>process.stdout.write(`${JSON.stringify(frame)}\n`,error=>error?reject(error):resolve())));
     let apiKey = '';
     let privateProviderValues = [];
     const redact = value => {
@@ -85,7 +90,8 @@ export async function runHeadlessAgentCommand(options, core, repoRoot, io = {}) 
             return item;
         }));
     };
-    const emit = frame => output(redact(frame));
+    const outputSender=new BoundedEventSender(async frame=>{try{await output(frame);}catch(error){controller.abort(error);throw error;}});
+    const emit = frame => {try{outputSender.enqueue(redact(frame));}catch(error){controller.abort(error);throw error;}};
     const emitDiagnostic = event => io.emitDiagnostic?.(redact(event));
     const task = args.taskFile ? decodeTaskInput(await readFile(resolve(args.taskFile))) : args.prompt;
     if (!task.trim())
@@ -156,20 +162,35 @@ export async function runHeadlessAgentCommand(options, core, repoRoot, io = {}) 
         }
     } };
     const assembly = core.createAgentRunAssembly(bridge, {coreSession:cliSession.coreSession});
+    const runId=sessionId,requestId=sessionId;
+    const controlInput=io.input??(args.protocolStdin?process.stdin:undefined);
+    const onOutputError=error=>controller.abort(error);
+    if(!io.emit)process.stdout.on('error',onOutputError);
+    const control=controlInput?createAgentStdioControl({input:controlInput,emit,sessionId,runId,requestId,controller,...(args.approvalTimeoutMs?{approvalTimeoutMs:args.approvalTimeoutMs}:{})}):undefined;
     try {
-        const result = await assembly.run({ sessionsDir, sessionId, adapter, config, apiKey, prompt: task, permissionMode: mode, kernel: args.kernel, maxSteps: args.maxSteps, timeoutMs: args.timeoutMs, maxTotalOutputTokens: args.maxOutputTokens, kernelLimits: { timeoutMs: args.timeoutMs, ...(args.maxCost !== undefined ? {maxCost:args.maxCost}:{}) },
+        let resumeFrom,resumeIdentity;
+        if(args.resumeSession){const loaded=await core.loadRolloutSession(resolve(args.resumeSession));if(!loaded.ok)throw failure(loaded.code,loaded.message);resumeFrom={...loaded,messages:structuredClone(loaded.messages)};
+            resumeIdentity={sessionId:loaded.meta?.sessionId??null,historySha256:createHash('sha256').update(JSON.stringify({meta:loaded.meta,messages:loaded.messages,terminal:loaded.terminal})).digest('hex'),scope:'selected-rollout-history',parseErrors:loaded.parseErrors,interrupted:loaded.interrupted};
+            const pending=new Map();for(const message of resumeFrom.messages){for(const call of message.toolCalls??[])pending.set(call.id,call);if(message.role==='tool'&&message.toolCallId)pending.delete(message.toolCallId);}
+            for(const call of pending.values()){const status=loaded.meta?.sessionId?await assembly.resolvePriorCallOutcome?.(loaded.meta.sessionId,call.id):undefined;resumeFrom.messages.push({role:'tool',name:call.name,toolCallId:call.id,content:JSON.stringify({ok:false,code:'AGENT_PRIOR_CALL_RECONCILED',retryable:false,state:status?.transaction?.state??'unknown',...(status?{journal:status}:{})})});}
+        }
+        const result = await assembly.run({ sessionsDir, sessionId,runId,requestId,signal:controller.signal, adapter, config, apiKey, prompt: task, permissionMode: mode, kernel: args.kernel, maxSteps: args.maxSteps, timeoutMs: args.timeoutMs, maxTotalOutputTokens: args.maxOutputTokens, kernelLimits: { timeoutMs: args.timeoutMs, ...(args.maxCost !== undefined ? {maxCost:args.maxCost}:{}) },
+            ...(control?{requestApproval:control.requestApproval}:{}),...(resumeFrom?{resumeFrom}:{}),
             ...(providerPricing ? {pricing:providerPricing}:{}),
             ...(mode === 'full' ? {approvalRequiredLevels:[]} : {}),
             onEvent: event => { },
             onProtocolEvent: envelope => emit({ type: 'agent-event', ...envelope })
         });
-        const report = redact({ type: 'agent-report', sessionId, source: provenance.source, input: provenance.input, build, provider, kernel: args.kernel, finishReason: result.run.finishReason, state: result.kernel?.state ?? (result.run.finishReason === 'stop' ? 'completed' : result.run.finishReason), evaluation: 'unverified', evaluationReason: 'No independent task goal evaluator was supplied.', steps: result.run.steps, rolloutPath: result.rolloutPath, diagnostics: result.run.diagnostics ?? [], ...(result.kernel?.pendingApproval ? { pendingApproval: result.kernel.pendingApproval } : {}), transactions: result.kernel?.transactions ?? [], unresolvedCalls: result.kernel?.unresolvedCalls ?? [], ...(result.providerBudget ? { budget: result.providerBudget } : {}) });
+        await assembly.waitForHostOperations?.();
+        const hostRequests=assembly.getHostRequestStatuses?.()??[];
+        const report = redact({ type: 'agent-report', sessionId,runId,requestId, source: provenance.source, input: provenance.input, build, provider,...(resumeIdentity?{resume:resumeIdentity}:{}),...(control?.disconnectReason?{hostControl:{code:control.disconnectReason}}:{}), kernel: args.kernel, finishReason: result.run.finishReason, state: result.kernel?.state ?? (result.run.finishReason === 'stop' ? 'completed' : result.run.finishReason), evaluation: 'unverified', evaluationReason: 'No independent task goal evaluator was supplied.', steps: result.run.steps, rolloutPath: result.rolloutPath, diagnostics: result.run.diagnostics ?? [], ...(result.kernel?.pendingApproval ? { pendingApproval: result.kernel.pendingApproval } : {}), transactions: result.kernel?.transactions ?? [], unresolvedCalls: result.kernel?.unresolvedCalls ?? [],hostRequests, ...(result.providerBudget ? { budget: result.providerBudget } : {}) });
         await writeFile(join(sessionsDir, `${sessionId}.report.json`), `${JSON.stringify(report, null, 2)}\n`, 'utf8');
         emit(report);
         return report;
     }
     finally {
         await assembly.waitForHostOperations?.();
-        await cliSession.dispose();
+        try { await control?.close(); await outputSender.flush(); }
+        finally { if(!io.emit)process.stdout.off('error',onOutputError);await cliSession.dispose(); }
     }
 }

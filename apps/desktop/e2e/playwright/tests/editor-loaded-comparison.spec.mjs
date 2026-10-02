@@ -16,8 +16,10 @@ import { createEditorSaveObservationTail } from '../editor-save-observation.mjs'
 const here = path.dirname(fileURLToPath(import.meta.url));
 const productionMain = path.resolve(here, '../editor-comparison-main.mjs');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-// Match the existing native Script/PARAM read-write budget; UI waits stay 10s.
+// Match existing native budgets; ordinary and invalid-draft UI waits stay 10s.
 const NATIVE_SAVE_COMPLETION_TIMEOUT_MS = 120_000;
+const PARAM_ROW_INDEX_COMPLETION_TIMEOUT_MS = 60_000;
+const PARAM_PAGE_COMPLETION_TIMEOUT_MS = 120_000;
 
 async function launchOwnedProduction() {
   for (const artifact of ['main/index.js', 'preload/index.cjs', 'renderer/index.html']) {
@@ -123,10 +125,52 @@ async function readParamRow(page, sourceUri) {
   }, sourceUri);
 }
 
+async function paramObservationCheckpoint(app) {
+  return app.evaluate(() => {
+    const snapshot = Reflect.get(globalThis, '__editorSaveObservation');
+    if (typeof snapshot !== 'function') throw new Error('EDITOR_SAVE_OBSERVER_UNAVAILABLE');
+    return snapshot().observedEvents;
+  });
+}
+
+async function paramIpcCompletion(app, after, method) {
+  return app.evaluate(({ after, method }) => {
+    const snapshot = Reflect.get(globalThis, '__editorSaveObservation');
+    if (typeof snapshot !== 'function') throw new Error('EDITOR_SAVE_OBSERVER_UNAVAILABLE');
+    const observation = snapshot();
+    let started = false;
+    for (const [index, event] of observation.events.entries()) {
+      const sequence = observation.observedEvents - observation.events.length + index + 1;
+      if (sequence <= after || event.stage !== 'ipc' || event.method !== method) continue;
+      if (event.state === 'start') started = true;
+      else if (started && event.state === 'finish' && event.ok === true) return sequence;
+      else if (started && (event.state === 'finish' || event.state === 'throw')) return null;
+    }
+    return null;
+  }, { after, method });
+}
+
+async function waitForParamReload(app, beforeSave) {
+  // The current save must finish before its UI-owned index -> payload reads.
+  // No native API is called here; a stale toast or draft value cannot pass.
+  const waitRead = async (after, method, timeout) => {
+    let finished = null;
+    await expect.poll(async () => {
+      finished = await paramIpcCompletion(app, after, method);
+      return finished !== null;
+    }, { timeout }).toBe(true);
+    return finished;
+  };
+  const saved = await waitRead(beforeSave, 'resource.applyContainerParamFieldMutation', NATIVE_SAVE_COMPLETION_TIMEOUT_MS);
+  expect(saved, 'The current PARAM blur must complete its original save IPC').toBeGreaterThan(beforeSave);
+  const indexed = await waitRead(saved, 'resource.readContainerParamRowIndex', PARAM_ROW_INDEX_COMPLETION_TIMEOUT_MS);
+  await waitRead(indexed, 'resource.readContainerParamPage', PARAM_PAGE_COMPLETION_TIMEOUT_MS);
+}
+
 for (const mode of ['opal', 'obsidian']) {
-  test(`loaded Script/PARAM comparison uses real production save/reload in ${mode}`, async () => {
+  test(`loaded Script comparison uses real production save/reload in ${mode}`, async () => {
     test.setTimeout(180_000);
-    const { app, page, inputs, inputHashes, scriptUri, paramUri, pageErrors, observationTail } = await launchOwnedProduction();
+    const { app, page, inputs, inputHashes, scriptUri, pageErrors, observationTail } = await launchOwnedProduction();
     let phase = 'script-edit';
     try {
       await page.getByRole('button', { name: '设置', exact: true }).click();
@@ -199,9 +243,22 @@ for (const mode of ['opal', 'obsidian']) {
       await expect.poll(() => scroll.evaluate(element => element.scrollTop > 0)).toBe(true);
       await replaceScript(page, source, LONG_SCRIPT_TEXT);
       await expect(comparison).toContainText('没有草稿差异。');
+      expect(pageErrors).toEqual([]);
+    } catch (error) {
+      await reportOwnedFailure(app, page, inputs, inputHashes, phase, observationTail).catch(() => undefined);
+      throw error;
+    } finally { await app.close(); }
+  });
 
+  test(`loaded PARAM comparison uses real production save/reload in ${mode}`, async () => {
+    test.setTimeout(180_000);
+    const { app, page, inputs, inputHashes, paramUri, pageErrors, observationTail } = await launchOwnedProduction();
+    let phase = 'param-edit';
+    try {
+      await page.getByRole('button', { name: '设置', exact: true }).click();
+      await page.getByTestId('theme-settings').getByLabel('界面主题', { exact: true }).selectOption(mode);
+      await expect.poll(() => page.evaluate(() => document.documentElement.dataset.spectralMode)).toBe(mode);
       await openResource(page, inputs.paramPath);
-      phase = 'param-edit';
       // Save toasts are siblings of the labelled layout inside this wrapper.
       const workbench = page.locator('.param-workbench');
       await expect(workbench).toHaveCount(1);
@@ -232,10 +289,13 @@ for (const mode of ['opal', 'obsidian']) {
       await priority.fill('7');
       await page.screenshot({ path: test.info().outputPath(`param-comparison-${mode}.png`) });
       phase = 'param-save';
+      const saveCheckpoint = await paramObservationCheckpoint(app);
       await priority.press('Tab'); // Real blur -> native field write -> reload.
       await expect(workbench.locator('.wb-toast')).toHaveText('已保存', { timeout: NATIVE_SAVE_COMPLETION_TIMEOUT_MS });
       await expect(workbench.locator('.wb-toast')).toHaveClass(/\bwb-toast--ok\b/);
+      await waitForParamReload(app, saveCheckpoint);
       await expect(fieldComparison).toHaveJSProperty('open', false);
+      await expect(priority).toBeEditable();
       await expect(priority).toHaveValue('7');
       const after = await readParamRow(page, paramUri);
       expect(after.ok).toBe(true);
@@ -264,9 +324,13 @@ for (const mode of ['opal', 'obsidian']) {
       phase = 'param-revert';
       await expect(fieldComparison).toContainText('没有草稿差异。');
       // Switch while unchanged: existing blur-save semantics remain in force.
+      const revertCheckpoint = await paramObservationCheckpoint(app);
       await priority.press('Tab');
       await expect(workbench.locator('.wb-toast')).toHaveText('已保存', { timeout: NATIVE_SAVE_COMPLETION_TIMEOUT_MS });
       await expect(workbench.locator('.wb-toast')).toHaveClass(/\bwb-toast--ok\b/);
+      await waitForParamReload(app, revertCheckpoint);
+      await expect(priority).toBeEditable();
+      await expect(priority).toHaveValue('7');
       await workbench.getByRole('region', { name: '行', exact: true }).getByRole('row', { name: /^101\b/ }).click();
       await expect(priority).toHaveValue('2');
       await expect(fieldComparison).toHaveJSProperty('open', false);

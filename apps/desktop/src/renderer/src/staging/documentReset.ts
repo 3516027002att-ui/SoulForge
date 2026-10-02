@@ -61,8 +61,9 @@ export const DOCUMENT_STATE_SETTERS: Readonly<Record<DocumentFamily, readonly st
     // 请求，随 fmg 族清空避免残留到别的文本文件面板上误触发定位（App 在
     // switchToOpenTab 之后才下发，先清后设不冲突）。
     fmg: Object.freeze([
-      'setFmgEntries',
-      'setFmgSourceHash',
+      'setFmgEntriesState',
+      'setFmgResetEpoch',
+      'setFmgSourceHashState',
       'setFmgLive',
       'setTextCatalog',
       'setFmgRevealRequest'
@@ -111,7 +112,8 @@ export const DOCUMENT_STATE_SETTERS: Readonly<Record<DocumentFamily, readonly st
       'setMsbRoutes',
       'setMsbSourceCounts',
       'setMsbLive',
-      'setMsbSourceHash',
+      'setMsbSourceHashState',
+      'setMsbResetEpoch',
       // S15/S19 失败面：跨资源族的「最近一次资源打开失败」记录。挂在 msb 族下
       // 只是登记槽位，复位动作会把它一并清空——切换工作区/文件后，旧资源的
       // 失败不得再进工作台显示或 Agent 元数据。

@@ -12,14 +12,32 @@ export function createAgentRunAssembly(bridge: AgentToolBridge, options: {
   composition?: AgentHostComposition;
 } = {}) {
   const pendingOperations = new Set<Promise<unknown>>();
+  let lastHost: LocalSessionHost | undefined;
+  const projectStatus = (status: Awaited<ReturnType<LocalSessionHost['resolveRequestStatus']>>) => status ? ({
+    id: status.id, state: status.state, ...(status.opIds ? {opIds:status.opIds} : {}),
+    ...(status.outcome?.requestState ? {requestState:status.outcome.requestState} : {}),
+    ...(status.outcome?.transaction ? {transaction:{state:status.outcome.transaction.state,
+      ...(status.outcome.transaction.opId ? {opId:status.outcome.transaction.opId} : {}),
+      operations:status.outcome.transaction.operations.map(operation=>({opId:operation.opId,state:operation.state}))}} : {})
+  }) : undefined;
   return {
     async waitForHostOperations() {
       while (pendingOperations.size) await Promise.allSettled([...pendingOperations]);
+    },
+    getHostRequestStatuses() { return lastHost?.listRequestStatuses().map(projectStatus) ?? []; },
+    async resolvePriorCallOutcome(sessionId: string, callId: string) {
+      if (!options.coreSession) return undefined;
+      const previous = new LocalSessionHost(`agent:${sessionId}`, options.coreSession.workspaceId,
+        options.coreSession.principal, options.coreSession);
+      try { return projectStatus(await previous.resolveRequestStatus(`${sessionId}:${callId}`)); }
+      catch { return projectStatus({id:`${sessionId}:${callId}`,state:'unknown',queuedAt:0,
+        outcome:{id:`${sessionId}:${callId}`,ok:false,requestState:'unknown',transaction:{state:'unknown',operations:[]}}}); }
     },
     run(params: Omit<AgentSessionRunParams, 'tools' | 'executeTool'>) {
       const sessionId = params.sessionId ?? randomUUID();
       const host = options.coreSession ? new LocalSessionHost(`agent:${sessionId}`,
         options.coreSession.workspaceId, options.coreSession.principal, options.coreSession) : undefined;
+      lastHost = host;
       const dispatchTool: AgentToolBridge['executeTool'] = host ? async (call, override = {}) => {
         let args: Record<string, unknown>;
         try { args = JSON.parse(call.argumentsJson || '{}') as Record<string, unknown>; }

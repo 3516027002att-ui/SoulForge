@@ -48,7 +48,19 @@ node tools/soulforge-cli/sfcli.mjs --workspace <owned-overlay> --mode plan --no-
 
 The existing desktop `agent:simulate` / `agent:simulate:four` consumer still uses the same loader in its isolated desktop host. Required task effects lacking an independent verifier no longer prevent model discovery or tool execution: every call retains production permission/native-read/staging/backup/journal checks, and final task outcomes remain passed, failed or unverified. A declared read-only contract runs in plan mode. The desktop test consumer's isolated vault setup and real requests need their own authorized credential route; the process-local CLI path avoids that persistent setup. Missing effect verification never turns a model stop into a passed task.
 
-Noninteractive finite runs park concrete approval proposals with their payload hash and return `waiting`; they never auto-approve. Writes still require the domain proof, staging, backup and commit boundaries. A waiting run needs a supported approval/resume host; this initial CLI does not infer approval from a previous run or automatically replay it.
+Noninteractive finite runs park concrete approval proposals with their payload hash and return `waiting`. `--protocol-stdin` adds a process-local JSON Lines approval/cancel host around the same shared assembly used by desktop. Each `agent-approval-request` supplies a unique `requestId`, `sessionId`, `runId`, `callId` and `proposalHash`. Reply with those exact fields, `protocolVersion: 1`, `type: "agent-approval-response"` and `decision: "approve"`, `"deny"` or `"cancel"`. Other IDs, hashes and decisions cannot settle the proposal; caller-supplied `timed_out` is refused. Approvals expire after 600 seconds, with a smaller positive `--approval-timeout-ms` available for bounded callers. The receipt authorizes only that proposal; existing mode, native proof, staging, backup, journal and commit checks still apply.
+
+`agent-host-ready` identifies the live run's task `requestId`. A `type: "agent-cancel"` frame with that exact request/session/run scope cancels it. Input EOF/error, oversized input or an output consumer failure also cancel; they never approve. Pending output and partial input are byte bounded. The host joins already-started operations before disposing their resources and projects their authoritative request/journal outcomes into `hostRequests`. Kernel cancellation, a late committed transaction and an independent task verdict remain separate facts.
+
+`--resume-session <rollout.jsonl>` loads the existing rollout into a fresh run with current host policy, fresh permissions and native proof ownership. It closes unanswered historical tool calls with read-only journal reconciliation, recording a hash of the selected history. Missing journal evidence stays `unknown` and cannot authorize replay. Old approval IDs, grants and tool calls are not resurrected. The model may make a fresh proposal through the normal current-run boundaries; resuming alone never dispatches a historical call.
+
+```sh
+node tools/soulforge-cli/sfcli.mjs --workspace <owned-overlay> --mode normal --json agent exec \
+  --task-file task.txt --responses-file responses.json --protocol-stdin
+
+node tools/soulforge-cli/sfcli.mjs --workspace <owned-overlay> --mode plan --json agent exec \
+  --task-file next-task.txt --responses-file next-responses.json --resume-session <prior-rollout.jsonl>
+```
 
 Agent calls use session name `agent:<sessionId>` and request ID `<sessionId>:<callId>`. The integrated LocalSessionHost correlates operations with the existing transaction journal. Request status and transaction status are separate; an unknown/cancelled request cannot imply an uncommitted write or a safe retry. Only bounded transaction IDs/states enter model results, never raw journal filesystem paths.
 

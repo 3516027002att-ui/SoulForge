@@ -14,6 +14,9 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const source = relative => fs.readFileSync(path.join(repo, relative), 'utf8');
 const sourcePaths = {
   resource: 'apps/desktop/src/main/ipc/resource.ts',
+  script: 'apps/desktop/src/main/services/scriptSourceService.ts',
+  resourceWrite: 'apps/desktop/src/main/services/resourceMutationService.ts',
+  writeContext: 'apps/desktop/src/main/services/resourceWriteContext.ts',
   ipc: 'apps/desktop/src/main/ipc.ts',
   ownership: 'apps/desktop/src/main/knowledgeRefreshOwnership.ts',
   mutation: 'packages/core/src/editing/editorMutationService.ts',
@@ -31,6 +34,10 @@ function execute(text, filename, scope = {}, imports = {}) {
   vm.runInNewContext(result.outputText, {
     Buffer, Error, Uint8Array, ArrayBuffer, exports, module: { exports }, ...scope,
     require(name) {
+      if (!Object.hasOwn(imports, name) && name.startsWith('.')) {
+        const dependency = path.posix.normalize(path.posix.join(path.posix.dirname(filename), name.replace(/\.js$/, '.ts')));
+        return execute(source(dependency), dependency, scope, imports);
+      }
       assert.ok(Object.hasOwn(imports, name), `Unexpected runtime import: ${name}`);
       return imports[name];
     }
@@ -150,6 +157,12 @@ const postCommit = events => events.filter(event => ['commit', 'cache-clear', 'r
 // The actual handler executes in a VM realm; compare plain argument values,
 // while keeping separate identity assertions for the source file/session.
 const plain = value => JSON.parse(JSON.stringify(value));
+
+test('Script resource orchestration is callable below IPC with no sender or registrar capability', () => {
+  const service = 'apps/desktop/src/main/services/scriptSourceService.ts';
+  assert.equal(fs.existsSync(path.join(repo, service)), true, 'Script source application service must exist');
+  assert.doesNotMatch(source(service), /IpcMainInvokeEvent|TrustedIpcHandle|deps\.handle/);
+});
 
 test('source identity is reported for the actual handler, commit port, mutation control flow and ownership helper', t => {
   for (const [name, relative] of Object.entries(sourcePaths)) {

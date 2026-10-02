@@ -22,12 +22,6 @@ import type {
   AgentResourceReference,
   CiteHit,
   Diagnostic,
-  MsbMapEventLike,
-  MsbModelLike,
-  MsbPartTransformLike,
-  MsbRegionLike,
-  MsbRouteLike,
-  MsbSceneSourceCounts,
   ParamDefDocument,
   ParamPhysicalRowIdentity,
   ResourceKind,
@@ -61,7 +55,6 @@ import { selectEditor } from './workbench/selectEditor.js';
 import {
   planResourceOpen,
   shouldLoadFmg,
-  shouldLoadMsb,
   shouldLoadParam
 } from './workbench/documentLoadGates.js';
 
@@ -115,6 +108,9 @@ import { AmbientField } from './theme/AmbientField.js';
 import { ThemeSettings } from './theme/ThemeSettings.js';
 import { useSpectralTheme } from './theme/useSpectralTheme.js';
 import { shouldShowEditorWelcome } from './theme/editorWelcome.js';
+import { useWorkspaceController } from './app/useWorkspaceController.js';
+import { useTextDocumentController } from './app/useTextDocumentController.js';
+import { useMapDocumentController } from './app/useMapDocumentController.js';
 import { useEventDocumentController } from './app/useEventDocumentController.js';
 import { useParamDocumentController } from './app/useParamDocumentController.js';
 import { useRuntimeSettingsController } from './app/useRuntimeSettingsController.js';
@@ -188,21 +184,6 @@ function eventDocumentTitle(relativePath: string): string {
   return base.replace(/\.emevd(?:\.dcx)?$/i, '') || base;
 }
 
-/** 状态值仍来自 native envelope，但主状态栏不把协议字段名当作文案。 */
-function readLevelLabel(authority: string | null | undefined): string {
-  switch (authority) {
-    case 'partial': return '读取不完整';
-    case 'candidate': return '候选读取';
-    case 'fixture-confirmed': return '样本已确认';
-    case 'native-verified': return '原生读取已验证';
-    case 'unverified': return '尚未验证';
-    default: return authority ?? '未报告';
-  }
-}
-
-/** 无实时 MSB 数据时的空 parts（真实数据经 Bridge 读取后填充）。 */
-const EMPTY_MSB_PARTS: MsbPartTransformLike[] = [];
-
 /**
  * R5 裁定：侧栏每个面板头部右上角的关闭按钮——关掉后最左活动栏的对应图标
  * 仍可点回来（activateSidebarView 同视图再点是收起/展开切换）。
@@ -222,8 +203,6 @@ function SidebarCloseButton({ onClose }: { onClose: () => void }): ReactElement 
     </button>
   );
 }
-
-const EMPTY_FMG_ENTRIES: Array<{ id: number; text: string }> = [];
 
 function updateStateLabel(state: UpdatePublicState): string {
   switch (state.status) {
@@ -307,16 +286,11 @@ export function App(): ReactElement {
   const runtime = getRendererRuntime();
   const bridge = runtime.bridge;
   const isBrowserPreview = runtime.kind === 'browser-preview';
-  const [workspace, setWorkspace] = useState<RendererWorkspaceScanResult | null>(null);
-  const [sessionMeta, setSessionMeta] = useState<RendererWorkspaceSession | null>(null);
-  const [baseRootChoice, setBaseRootChoice] = useState<DirectorySelection | null>(null);
   const [operationHistory, setOperationHistory] = useState<RendererPatchHistoryEntry[]>([]);
   const [rollbackInFlight, setRollbackInFlight] = useState<string | null>(null);
   const rollbackInFlightRef = useRef<string | null>(null);
   const operationHistoryRefreshRef = useRef(Promise.resolve());
   const operationHistoryRequestRef = useRef(0);
-  const [analysis, setAnalysis] = useState<AnalyzeWorkspaceSummary | null>(null);
-  const [tools, setTools] = useState<ToolDescriptor[]>([]);
   const [selectedFile, setSelectedFile] = useState<RendererIndexedFile | null>(null);
   const [preview, setPreview] = useState<RendererResourcePreview | null>(null);
   const [editText, setEditText] = useState('');
@@ -326,8 +300,6 @@ export function App(): ReactElement {
   const [query, setQuery] = useState('');
   const [eventUri, setEventUri] = useState('');
   const [toolOutput, setToolOutput] = useState<ToolResult | null>(null);
-  const [files, setFiles] = useState<RendererIndexedFile[]>([]);
-  const [allFiles, setAllFiles] = useState<RendererIndexedFile[]>([]);
   const [activeDomain, setActiveDomain] = useState<EditorDomainId>('project');
   // §16 #4：资源族过滤条已从 production shell 断开，物理浏览只留 Files。
   // resourceMode 冻结为常量 'all' —— 唯一写它的 onSelect（资源条）已移除。
@@ -373,6 +345,15 @@ export function App(): ReactElement {
   // S12 卸掉状态栏后 status 无显示出口。setStatus 调用点仍保留（流程记录），
   // S15 失败句机制（编辑区 code + 人话 + 下一步）接手时会系统性清理。
   const [, setStatus] = useState('就绪');
+  const { workspace, sessionMeta, baseRootChoice, analysis, tools, files, allFiles, openWorkspace, chooseBaseDirectory, clearBaseDirectory, search: searchWorkspaceResources } =
+    useWorkspaceController({
+      bridge, setStatus, pushToast, announceDesktopOnly, refreshOperationHistory,
+      onWorkspaceInstalled: installWorkspaceViews,
+      onWorkspaceRemounted: resetWorkspaceResourceViews,
+      onAnalysisLoaded: next => setEventUri(next?.events?.[0]?.uri ?? ''),
+      onSearchActivated: () => { setActiveDomain('files'); setCenterView('resource'); }
+    });
+
   /**
    * S15/S19 失败面：最近一次资源打开失败的结构化记录（只含逻辑名，绝无绝对
    * 路径——message 来自已过 sanitizer 的 IPC 诊断）。随下一次 runAiAgent 提交给
@@ -399,23 +380,14 @@ export function App(): ReactElement {
   const [taeData, setTaeData] = useState<Record<string, unknown> | null>(null);
   const [esdData, setEsdData] = useState<Record<string, unknown> | null>(null);
   const [flverData, setFlverData] = useState<Record<string, unknown> | null>(null);
-  const [fmgEntries, setFmgEntries] = useState(EMPTY_FMG_ENTRIES);
-  const [fmgSourceHash, setFmgSourceHash] = useState<string | null>(null);
-  const [fmgLive, setFmgLive] = useState(false);
-  const [msbParts, setMsbParts] = useState<MsbPartTransformLike[]>(EMPTY_MSB_PARTS);
-  const [msbModels, setMsbModels] = useState<MsbModelLike[]>([]);
-  const [msbRegions, setMsbRegions] = useState<MsbRegionLike[]>([]);
-  const [msbEvents, setMsbEvents] = useState<MsbMapEventLike[]>([]);
-  const [msbRoutes, setMsbRoutes] = useState<MsbRouteLike[]>([]);
-  const [msbSourceCounts, setMsbSourceCounts] = useState<MsbSceneSourceCounts>({
-    models: 0,
-    parts: EMPTY_MSB_PARTS.length,
-    regions: 0,
-    events: 0,
-    routes: 0
-  });
-  const [, setMsbLive] = useState(false);
-  const [msbSourceHash, setMsbSourceHash] = useState<string | null>(null);
+  const { fmgEntries, fmgSourceHash, fmgLive, resetTextDocument, applyFmgMutationAndReload, submitFmgEntry } =
+    useTextDocumentController({ bridge, selectedFile, setStatus, pushToast });
+  const { msbParts, msbModels, msbRegions, msbEvents, msbRoutes, msbSourceCounts, msbSourceHash, setMsbSourceHash, resetMapDocument } =
+    useMapDocumentController({
+      bridge, selectedFile, setStatus,
+      onMapOpenFailure: failure => setLastOpenFailure(current =>
+        failure ?? (current?.kind === 'msb-open-failed' ? null : current))
+    });
 
   const {
     paramTypeName, paramRows, paramRowCount, paramSourceHash,
@@ -509,28 +481,15 @@ export function App(): ReactElement {
    */
   const documentResetActions = useMemo<DocumentResetActions>(() => ({
     fmg: () => {
-      setFmgEntries(EMPTY_FMG_ENTRIES);
-      setFmgSourceHash(null);
-      setFmgLive(false);
-      // S31：文本目录缓存与一次性 reveal 请求随 fmg 族清空——前者避免跨工作区
-      // 用旧目录把文本跳转误判成 insufficient_evidence，后者避免请求残留到别的
-      // 文本文件面板上误触发定位（App 在 switchToOpenTab 之后才下发，先清后设）。
+      resetTextDocument();
       setTextCatalog(null);
       setFmgRevealRequest(null);
     },
     param: resetParamDocument,
     emevd: resetEventDocument,
     msb: () => {
-      setMsbParts(EMPTY_MSB_PARTS);
-      setMsbModels([]);
-      setMsbRegions([]);
-      setMsbEvents([]);
-      setMsbRoutes([]);
-      setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0, routes: 0 });
-      setMsbLive(false);
-      setMsbSourceHash(null);
-      // S15/S19 失败面：跨资源族的「最近一次打开失败」随复位清空，避免把旧
-      // 资源的失败带进新选区（工作台显示与 Agent 元数据共用这一个状态）。
+      resetMapDocument();
+      // Cross-domain opening failure shares the existing unified reset boundary.
       setLastOpenFailure(null);
     },
     tae: () => setTaeData(null),
@@ -1041,245 +1000,6 @@ export function App(): ReactElement {
    */
   const draftChanges = changeState.items.filter((item) => item.status === 'draft');
 
-  useEffect(() => {
-    let cancelled = false;
-    async function loadFmg(): Promise<void> {
-      // SHELL-09：只有用户显式选中的 msg 资源才加载；语义领域无兜底列表。
-      const target = selectedFile;
-      if (!target || !shouldLoadFmg(target)) {
-        setFmgEntries(EMPTY_FMG_ENTRIES);
-        setFmgSourceHash(null);
-        setFmgLive(false);
-        return;
-      }
-      if (!bridge || typeof bridge.readFmgDocument !== 'function') {
-        setFmgEntries(EMPTY_FMG_ENTRIES);
-        setFmgSourceHash(null);
-        setFmgLive(false);
-        return;
-      }
-      setStatus(`正在读取 FMG：${target.relativePath}`);
-      try {
-        const result = await bridge.readFmgDocument(target.sourceUri) as {
-          ok?: boolean;
-          data?: {
-            sourceHash?: string;
-            entries?: Array<{ id: number; text: string }>;
-            entryCount?: number;
-            authority?: string;
-          } | null;
-        };
-        if (cancelled) return;
-        // TEXT-20C：live 门禁以 sourceHash 为准而不是条目非空。真空表（合法容器、
-        // 0 条）仍然 live，用户要能在里面新增条目；读取失败（ok:false / 无 hash）
-        // 才判不可编辑。这同时让 msgbnd/DCX 容器在真实游戏里能进入 live（旧判据
-        // 依赖裸 FMG 解析，容器走 readFmgDocument 会因 DCX magic 硬失败）。
-        if (!result?.ok || !result.data?.sourceHash) {
-          setFmgEntries(EMPTY_FMG_ENTRIES);
-          setFmgSourceHash(null);
-          setFmgLive(false);
-          setStatus('这个文本资源读不出来。');
-          return;
-        }
-        const loadedEntries = (result.data.entries ?? []).map((e) => ({ id: e.id, text: e.text }));
-        setFmgEntries(loadedEntries);
-        setFmgSourceHash(result.data.sourceHash ?? null);
-        setFmgLive(true);
-        setStatus(
-          `已加载 FMG：${result.data.entryCount ?? loadedEntries.length} 条`
-           + (result.data.authority ? ` · 读取级别：${readLevelLabel(result.data.authority)}` : '')
-        );
-      } catch (error) {
-        if (cancelled) return;
-        setFmgLive(false);
-        setStatus(error instanceof Error ? error.message : 'FMG 读取异常');
-      }
-    }
-    void loadFmg();
-    return () => {
-      cancelled = true;
-    };
-  }, [bridge, selectedFile]);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function loadMsb(): Promise<void> {
-      // SHELL-09：只有用户显式选中的 map 资源才加载；语义领域无兜底列表。
-      const target = selectedFile;
-      if (!target || !shouldLoadMsb(target)) {
-        setMsbParts(EMPTY_MSB_PARTS);
-        setMsbModels([]);
-        setMsbRegions([]);
-        setMsbEvents([]);
-        setMsbRoutes([]);
-        setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0, routes: 0 });
-        setMsbLive(false);
-        // 地图没在打开：上一份 MSB 失败不再对当前选区成立（Agent 元数据同理）。
-        setLastOpenFailure((current) => current?.kind === 'msb-open-failed' ? null : current);
-        return;
-      }
-      if (!bridge || typeof bridge.readMsbDocument !== 'function') {
-        setMsbParts(EMPTY_MSB_PARTS);
-        setMsbModels([]);
-        setMsbRegions([]);
-        setMsbEvents([]);
-        setMsbRoutes([]);
-        setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0, routes: 0 });
-        setMsbLive(false);
-        return;
-      }
-      setStatus(`正在读取 MSB：${target.relativePath}`);
-      try {
-        const result = await bridge.readMsbDocument(target.sourceUri) as {
-          ok?: boolean;
-          diagnostics?: Array<{ severity?: string; code?: string; message?: string }>;
-          data?: {
-            sourceHash?: string;
-            models?: Array<{ name: string; nativeOffset?: number; offset?: number; typeId: number; sibPath?: string }>;
-            parts: Array<{
-              name: string;
-              nativeOffset?: number;
-              offset?: number;
-              modelIndex?: number;
-              posX: number;
-              posY: number;
-              posZ: number;
-              rotX?: number;
-              rotY?: number;
-              rotZ?: number;
-              scaleX?: number;
-              scaleY?: number;
-              scaleZ?: number;
-            }>;
-            regions?: Array<{
-              name: string;
-              nativeOffset?: number;
-              typeId: number;
-              posX: number;
-              posY: number;
-              posZ: number;
-              rotX?: number;
-              rotY?: number;
-              rotZ?: number;
-              scaleX?: number;
-              scaleY?: number;
-              scaleZ?: number;
-            }>;
-            events?: Array<{ name: string; nativeOffset?: number; typeId: number }>;
-            routes?: Array<{ name: string; nativeOffset?: number; typeId: number; id?: number }>;
-            modelCount?: number;
-            partCount?: number;
-            regionCount?: number;
-            eventCount?: number;
-            routeCount?: number;
-            authority?: string;
-          } | null;
-        };
-        if (cancelled) return;
-        if (!result?.ok || !result.data) {
-          setMsbParts(EMPTY_MSB_PARTS);
-          setMsbModels([]);
-          setMsbRegions([]);
-          setMsbEvents([]);
-          setMsbRoutes([]);
-          setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0, routes: 0 });
-          setMsbLive(false);
-          // S19 失败面：结构化失败进工作台 + Agent（code + 人话 + 下一步）。
-          // message 来自已过 sanitizer 的 IPC 诊断；KRAK 缺 Oodle 时 Bridge 直接
-          // 给可行动句（到「开始」页挂原版），其它失败至少给码 + 下一步提示。
-          const diag = result.diagnostics?.[0];
-          const code = diag?.code ?? 'MSB_READ_FAILED';
-          setLastOpenFailure({
-            kind: 'msb-open-failed',
-            document: target.relativePath,
-            code,
-            message: diag?.message
-              ?? (code === 'MSB_DOCUMENT_KRAK_OODLE_UNAVAILABLE'
-                ? '这份地图是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再打开。'
-                : '这张地图读不出来，请检查文件状态后重试。')
-          });
-          setStatus('这张地图读不出来。');
-          return;
-        }
-        setLastOpenFailure(null);
-        setMsbParts(result.data.parts.map((p) => ({
-          name: p.name,
-          ...((p.nativeOffset ?? p.offset) === undefined ? {} : { nativeOffset: p.nativeOffset ?? p.offset }),
-          ...(typeof p.modelIndex === 'number' ? { modelIndex: p.modelIndex } : {}),
-          posX: p.posX,
-          posY: p.posY,
-          posZ: p.posZ,
-          rotX: p.rotX ?? 0,
-          rotY: p.rotY ?? 0,
-          rotZ: p.rotZ ?? 0,
-          scaleX: p.scaleX ?? 1,
-          scaleY: p.scaleY ?? 1,
-          scaleZ: p.scaleZ ?? 1
-        })));
-        setMsbModels((result.data.models ?? []).map((model) => ({
-          name: model.name,
-          ...((model.nativeOffset ?? model.offset) === undefined ? {} : { nativeOffset: model.nativeOffset ?? model.offset }),
-          typeId: model.typeId,
-          ...(model.sibPath ? { sibPath: model.sibPath.replace(/\\/g, '/').split('/').pop() ?? model.sibPath } : {})
-        })));
-        setMsbRegions((result.data.regions ?? []).map((r) => ({
-          name: r.name,
-          ...(r.nativeOffset === undefined ? {} : { nativeOffset: r.nativeOffset }),
-          typeId: r.typeId,
-          posX: r.posX,
-          posY: r.posY,
-          posZ: r.posZ,
-          rotX: r.rotX ?? 0,
-          rotY: r.rotY ?? 0,
-          rotZ: r.rotZ ?? 0,
-          scaleX: r.scaleX ?? 1,
-          scaleY: r.scaleY ?? 1,
-          scaleZ: r.scaleZ ?? 1
-        })));
-        setMsbEvents((result.data.events ?? []).map((event) => ({
-          name: event.name,
-          ...(event.nativeOffset === undefined ? {} : { nativeOffset: event.nativeOffset }),
-          typeId: event.typeId
-        })));
-        setMsbRoutes((result.data.routes ?? []).map((route) => ({
-          name: route.name,
-          ...(route.nativeOffset === undefined ? {} : { nativeOffset: route.nativeOffset }),
-          typeId: route.typeId,
-          ...(route.id === undefined ? {} : { id: route.id })
-        })));
-        setMsbSourceCounts({
-          models: result.data.modelCount ?? result.data.models?.length ?? 0,
-          parts: result.data.partCount ?? result.data.parts.length,
-          regions: result.data.regionCount ?? result.data.regions?.length ?? 0,
-          events: result.data.eventCount ?? result.data.events?.length ?? 0,
-          routes: result.data.routeCount ?? result.data.routes?.length ?? 0
-        });
-        setMsbSourceHash(result.data.sourceHash ?? null);
-        setMsbLive(true);
-        setStatus(
-          `已加载 MSB：${result.data.partCount ?? result.data.parts.length} parts`
-          + (result.data.regionCount !== undefined ? ` / ${result.data.regionCount} regions` : '')
-          + (result.data.routeCount !== undefined ? ` / ${result.data.routeCount} routes` : '')
-           + (result.data.authority ? ` · 读取级别：${readLevelLabel(result.data.authority)}` : '')
-        );
-      } catch (error) {
-        if (cancelled) return;
-        setMsbParts(EMPTY_MSB_PARTS);
-        setMsbModels([]);
-        setMsbRegions([]);
-        setMsbEvents([]);
-        setMsbRoutes([]);
-        setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0, routes: 0 });
-        setMsbLive(false);
-        setStatus(error instanceof Error ? error.message : 'MSB 读取异常');
-      }
-    }
-    void loadMsb();
-    return () => {
-      cancelled = true;
-    };
-  }, [bridge, selectedFile]);
-
   async function refreshOperationHistory(): Promise<void> {
     if (!bridge) return;
     const requestId = ++operationHistoryRequestRef.current;
@@ -1351,65 +1071,6 @@ export function App(): ReactElement {
     const message = describeBridgeAbsence(operation);
     setStatus(message);
     pushToast(message, 'warn');
-  }
-
-  /**
-   * S22：工作区已打开时，重挂原版目录（保留 overlay，只换 base 层）当场生效，
-   * 不用重启。session 重建后旧文档 handle 作废，清掉打开中的编辑态。
-   */
-  async function remountBase(baseSelection: DirectorySelection | null): Promise<void> {
-    if (!bridge || !workspace || typeof bridge.remountBase !== 'function') return;
-    const currentSessionId = workspace.workspaceSessionId;
-    try {
-      const result = await bridge.remountBase(baseSelection?.selectionId ?? null);
-      setWorkspace((previous) =>
-        previous && previous.workspaceSessionId === currentSessionId
-          ? { ...previous, workspaceSessionId: result.workspaceSessionId, session: result.session }
-          : previous
-      );
-      setSessionMeta(result.session);
-      setOpenTabs([]);
-      setSelectedFile(null);
-      setPreview(null);
-      resetAllDocuments(documentResetActions);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setStatus(`重挂原版目录失败：${message}`);
-      pushToast(`重挂原版目录失败：${message}`, 'warn');
-    }
-  }
-
-  async function chooseBaseDirectory(): Promise<void> {
-    if (!bridge) {
-      announceDesktopOnly('选择原版目录');
-      return;
-    }
-    try {
-      const selection = await bridge.openBaseDialog();
-      if (!selection) return;
-      setBaseRootChoice(selection);
-      if (workspace) {
-        await remountBase(selection);
-        setStatus(`已挂载只读原版游戏目录：${selection.label}`);
-      } else {
-        setStatus(`已选择只读原版游戏目录：${selection.label}`);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setStatus(`选择原版目录失败：${message}`);
-      pushToast(`选择原版目录失败：${message}`, 'warn');
-    }
-  }
-
-  async function clearBaseDirectory(): Promise<void> {
-    setBaseRootChoice(null);
-    if (workspace) {
-      // S22：清原版同样当场生效（同一 overlay 重挂一个不带 base 的 session）。
-      void remountBase(null);
-      setStatus('已卸载原版游戏目录（当前工作区保持打开）');
-    } else {
-      setStatus('已清除原版游戏目录选择');
-    }
   }
 
   function openCmdk(): void {
@@ -1599,6 +1260,50 @@ export function App(): ReactElement {
       }
     }
   }
+  function installWorkspaceViews(result: RendererWorkspaceScanResult): void {
+      // 有工作区后「开始」不是页，必须立即进入 resource 视图
+      setCenterView('resource');
+      setSidebarView('explorer');
+      setSelectedFile(null);
+      setPreview(null);
+      setOpenTabs([]);
+      setAgentGoal(null);
+      setEditText('');
+      setLastSavedText('');
+      setMsgRows([]);
+      setSaveDiagnostics([]);
+      setToolOutput(null);
+      setAiDraft(null);
+      setAgentIdleNotice(null);
+      setOperationHistory([]);
+      setBnd4Forced(false);
+      // 换工作区必须清空全部资源族编辑态：否则新工作区的面板会继续显示上一个
+      // 工作区的 FMG 条目 / PARAM 行 / EMEVD 事件 / MSB 场景。
+      resetAllDocuments(documentResetActions);
+
+      // 立即恢复上次退出前的工作域 + 选中资源，或默认打开首选 PARAM 容器，毫秒级展现工作台
+      const restoredDomain = restoreLastShellState(result.workspaceSessionId, result.files);
+      if (!restoredDomain) {
+        // 没有合法上次领域（缺省 / 非法 / 上次是 project）→ 默认进 param
+        const preferred = pickPreferredParamContainer(result.files);
+        setActiveDomain('param');
+        setPreview(null);
+        setCenterView('resource');
+        if (preferred) {
+          void selectFile(preferred);
+        } else {
+          setSelectedFile(null);
+        }
+      }
+  }
+
+  function resetWorkspaceResourceViews(): void {
+    setOpenTabs([]);
+    setSelectedFile(null);
+    setPreview(null);
+    resetAllDocuments(documentResetActions);
+  }
+
 
   /**
    * 6-C：恢复上次退出前的工作域 + 选中资源 + 侧栏折叠。
@@ -1646,189 +1351,8 @@ export function App(): ReactElement {
       return false;
     }
   }
-
-  /**
-   * 用已有的目录选择凭据挂载工作区。
-   *
-   * 手动打开与启动自动挂载共用这一段 —— 两份挂载逻辑必然漂移，而漂移的表现是
-   * 「手动打开清了编辑态、自动挂载没清」这类只在一条路径上出现的残留。
-   *
-   * baseSelectionId 显式传入而不是读 baseRootChoice：自动挂载时那个 state 还是
-   * 初始值 null，而上次的原版目录凭据来自 lastWorkspaceSelection。
-   */
-  const workspaceRef = useRef(workspace);
-  workspaceRef.current = workspace;
-  const mountGenerationRef = useRef(0);
-
-  async function mountWorkspace(
-    overlaySelectionId: string,
-    baseSelectionId: string | undefined,
-    origin: 'manual' | 'restored'
-  ): Promise<void> {
-    if (!bridge) return;
-    if (origin === 'restored' && workspaceRef.current !== null) return;
-    const generation = ++mountGenerationRef.current;
-    try {
-      setStatus(origin === 'restored' ? '正在恢复上次的工作区...' : '正在扫描工作区...');
-      const result = await bridge.scanWorkspace({
-        overlaySelectionId,
-        ...(baseSelectionId ? { baseSelectionId } : {})
-      });
-      if (generation !== mountGenerationRef.current) return;
-      setWorkspace(result);
-      setSessionMeta(result.session ?? null);
-      setAllFiles(result.files);
-      setFiles(result.files);
-      // 有工作区后「开始」不是页，必须立即进入 resource 视图
-      setCenterView('resource');
-      setSidebarView('explorer');
-      setSelectedFile(null);
-      setPreview(null);
-      setOpenTabs([]);
-      setAgentGoal(null);
-      setEditText('');
-      setLastSavedText('');
-      setMsgRows([]);
-      setSaveDiagnostics([]);
-      setAnalysis(null);
-      setToolOutput(null);
-      setAiDraft(null);
-      setAgentIdleNotice(null);
-      setOperationHistory([]);
-      setBnd4Forced(false);
-      // 换工作区必须清空全部资源族编辑态：否则新工作区的面板会继续显示上一个
-      // 工作区的 FMG 条目 / PARAM 行 / EMEVD 事件 / MSB 场景。
-      resetAllDocuments(documentResetActions);
-
-      // 立即恢复上次退出前的工作域 + 选中资源，或默认打开首选 PARAM 容器，毫秒级展现工作台
-      const restoredDomain = restoreLastShellState(result.workspaceSessionId, result.files);
-      if (!restoredDomain) {
-        // 没有合法上次领域（缺省 / 非法 / 上次是 project）→ 默认进 param
-        const preferred = pickPreferredParamContainer(result.files);
-        setActiveDomain('param');
-        setPreview(null);
-        setCenterView('resource');
-        if (preferred) {
-          void selectFile(preferred);
-        } else {
-          setSelectedFile(null);
-        }
-      }
-      const baseLabel = result.session.baseMounted
-        ? ' · 已挂载只读原版游戏目录'
-        : ' · 未挂载原版游戏目录';
-      setBaseRootChoice(null);
-      const restoredPrefix = origin === 'restored' ? '已恢复上次的工作区：' : '';
-      setStatus(`${restoredPrefix}已索引并打开 ${result.files.length} 个文件${baseLabel}`);
-      const baseToastSuffix = result.session.baseMounted ? '（已挂载原版游戏目录）' : '';
-      pushToast(
-        origin === 'restored'
-          ? `已恢复 Mod 工作区「${result.workspaceLabel}」，共加载 ${result.files.length} 个文件${baseToastSuffix}`
-          : `已成功选择并打开 Mod 工作区「${result.workspaceLabel}」，共加载 ${result.files.length} 个文件${baseToastSuffix}`,
-        'ok'
-      );
-
-      // 后台静默构建深度分析与证据索引，不阻断主工作台展现与窗口交互
-      void (async () => {
-        try {
-          const nextAnalysis = await bridge.analyzeWorkspace();
-          if (generation !== mountGenerationRef.current) return;
-          setAnalysis(nextAnalysis);
-          setTools(nextAnalysis?.tools ?? []);
-          setEventUri(nextAnalysis?.events?.[0]?.uri ?? '');
-          await refreshOperationHistory();
-          const parsed = nextAnalysis?.parsedFiles ?? 0;
-          const inspected = nextAnalysis?.inspectedFiles ?? 0;
-          setStatus(`${restoredPrefix}已就绪：已索引 ${result.files.length} 个文件，解析 ${parsed} 个文本/资源${baseLabel}`);
-          pushToast(
-            `工作区符号与数据索引构建完成（已解析 ${parsed} 个，已检查 ${inspected} 个）`,
-            'ok'
-          );
-        } catch {
-          // 后台分析静默降级
-        }
-      })();
-    } catch (error) {
-      if (generation !== mountGenerationRef.current) return;
-      const message = error instanceof Error ? error.message : String(error);
-      /*
-       * 自动恢复失败不弹 toast（S12 后无状态栏，也不写底栏）。
-       *
-       * 那条路径没有用户动作在等结果 —— 启动时弹一个「打开工作区失败」的提示
-       * 会让人以为自己做错了什么，而实际原因通常是上次的目录被移动或删除了。
-       * 手动打开失败仍然弹：那时用户在等反馈。
-       */
-      setStatus(origin === 'restored'
-        ? `上次的工作区已无法打开（${message}），请重新选择。`
-        : `打开工作区失败：${message}`);
-      if (origin === 'manual') pushToast(`打开工作区失败：${message}`, 'warn');
-    }
-  }
-
-  async function openWorkspace(): Promise<void> {
-    if (!bridge) {
-      announceDesktopOnly('打开 Mod 工作区');
-      return;
-    }
-    const workspaceSelection = await bridge.openWorkspaceDialog();
-    // 用户取消目录对话框：安静返回，不显示错误。
-    if (!workspaceSelection) return;
-    await mountWorkspace(
-      workspaceSelection.selectionId,
-      baseRootChoice?.selectionId,
-      'manual'
-    );
-  }
-
-  /**
-   * 启动时自动挂载上次的工作区。
-   *
-   * 用户要求「像别的只狼工具一样记住上一次打开的文件夹」。真实工具（Smithbox 的
-   * recent projects）不止记住对话框位置，重启后直接恢复上次的工程。
-   *
-   * 三条约束：
-   * 1. effect 必须带 cancelled 清理。组件 ref 挡不住 React 18 严格模式的
-   *    卸载/重挂（ref 会重置），两次 lastSelection + 两次 scan 会叠出
-   *    「已恢复」和「已成功打开」两套 toast。
-   * 2. 已有工作区就不动。用户可能在这次启动里已经手动打开了别的目录
-   *    （虽然时序上很少，但覆盖用户的显式选择比不恢复糟糕得多）。
-   * 3. 凭据由主进程签发（workspace.lastSelection），不是渲染器自报路径 ——
-   *    workspace.scan 只接受一次性凭据，绕过它等于作废那道裁定。
-   */
-  useEffect(() => {
-    if (!bridge || typeof bridge.lastWorkspaceSelection !== 'function') return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const last = await bridge.lastWorkspaceSelection();
-        if (cancelled || !last?.overlay) return;
-        if (workspaceRef.current !== null) return;
-        await mountWorkspace(
-          last.overlay.selectionId,
-          last.base?.selectionId,
-          'restored'
-        );
-      } catch {
-        // 恢复失败静默：启动时没有用户动作在等结果，报错只会让人困惑。
-        // 失败原因（若来自 scan）已由 mountWorkspace 记录。
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [bridge]);
-
   async function search(): Promise<void> {
-    if (!bridge) {
-      announceDesktopOnly('资源搜索');
-      return;
-    }
-    const result = await bridge.searchResources(query);
-    setAllFiles(result);
-    setFiles(result);
-    setActiveDomain('files');
-    setCenterView('resource');
-    setStatus(`搜索返回 ${result.length} 个文件`);
+    await searchWorkspaceResources(query);
   }
 
   function selectDomain(domain: EditorDomainId): void {
@@ -2129,7 +1653,7 @@ export function App(): ReactElement {
       case 'fmg': {
         const payload = change.payload as { op: 'upsert' | 'add' | 'delete'; id: number; text?: string; tableId?: string };
         // S29：缺哈希不再由 renderer 拒写，main 写时现算兜底。
-        const result = await bridge.applyFmgMutation(
+        const result = await applyFmgMutationAndReload(
           change.sourceUri,
           fmgSourceHash ?? '',
           {
@@ -2139,16 +1663,6 @@ export function App(): ReactElement {
           },
           payload.tableId
         );
-        if (result.ok) {
-          const reload = await bridge.readFmgDocument(change.sourceUri) as {
-            ok?: boolean;
-            data?: { sourceHash?: string; entries?: Array<{ id: number; text: string }> } | null;
-          };
-          if (reload?.ok && reload.data?.entries) {
-            setFmgEntries(reload.data.entries.map((entry) => ({ id: entry.id, text: entry.text })));
-            setFmgSourceHash(reload.data.sourceHash ?? null);
-          }
-        }
         return { ok: result.ok, diagnostics: mapDiag(result.diagnostics) };
       }
       case 'param-row': {
@@ -3425,49 +2939,7 @@ export function App(): ReactElement {
                 live={fmgPanelLive}
                 revealRequest={fmgRevealRequest}
                 onRevealHandled={() => setFmgRevealRequest(null)}
-                onMutation={async (mutation) => {
-                  if (!fmgLive || !selectedFile) {
-                    setStatus('当前 FMG 未实时加载，不能写入；请先选中可解析资源。');
-                    return;
-                  }
-                  if (!bridge || typeof bridge.applyFmgMutation !== 'function') {
-                    setStatus('FMG 写入通道不可用。');
-                    return;
-                  }
-                  // S29：能打开就能写。哈希是 main 侧并发保护凭据，缺了由
-                  // main 写时现算；不再是 renderer 的写入前置条件。条目编辑
-                  // 直接落 Patch Engine，不先进审查队列。
-                  const op = mutation.kind === 'fmg_entry_delete' ? 'delete'
-                    : mutation.kind === 'fmg_entry_add' ? 'add' : 'upsert';
-                  const result = await bridge.applyFmgMutation(
-                    selectedFile.sourceUri,
-                    fmgSourceHash ?? '',
-                    {
-                      kind: op,
-                      id: mutation.id,
-                      ...(mutation.text !== undefined ? { text: mutation.text } : {})
-                    },
-                    mutation.tableId
-                  );
-                  if (result.ok) {
-                    setStatus(mutation.kind === 'fmg_entry_delete'
-                      ? '条目已删除。'
-                      : '已保存。');
-                    pushToast(mutation.kind === 'fmg_entry_delete' ? '条目已删除' : '已保存');
-                    // 重读条目与 live 哈希：直写后闭包里的 fmgEntries 已过期。
-                    const reload = await bridge.readFmgDocument(selectedFile.sourceUri) as {
-                      ok?: boolean;
-                      data?: { sourceHash?: string; entries?: Array<{ id: number; text: string }> } | null;
-                    };
-                    if (reload?.ok && reload.data) {
-                      if (reload.data.entries) setFmgEntries(reload.data.entries);
-                      setFmgSourceHash(reload.data.sourceHash ?? null);
-                    }
-                  } else {
-                    const message = result.diagnostics?.[0]?.message ?? 'FMG 写入失败。';
-                    setStatus(`FMG 写入失败：${message}`);
-                  }
-                }}
+                onMutation={submitFmgEntry}
               />
             </>
           )}

@@ -17,6 +17,9 @@ const appSource = readFileSync(
   join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'App.tsx'),
   'utf8'
 );
+const workspaceControllerSource = /from '\.\/app\/useWorkspaceController\.js'/.test(appSource)
+  ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'useWorkspaceController.ts'), 'utf8')
+  : appSource;
 // buildDomainSummaries 的 visibility 逻辑在 domainNavigation.ts。
 const domainNavigationSource = readFileSync(
   join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'navigation', 'domainNavigation.ts'),
@@ -94,10 +97,11 @@ describe('问题 1 壳层：开始页只在首次打开；顶栏「开始」召�
   });
 
   it('启动恢复只落地一次：过时挂载丢弃，不得叠两套 toast', () => {
-    assert.match(appSource, /let cancelled = false/);
-    assert.match(appSource, /mountGenerationRef/);
-    assert.match(appSource, /if \(generation !== mountGenerationRef\.current\) return/);
-    assert.doesNotMatch(appSource, /restoreAttemptedRef/);
+    assert.match(workspaceControllerSource, /let cancelled = false/);
+    assert.match(workspaceControllerSource, /mountGenerationRef/);
+    assert.match(workspaceControllerSource, /mountGenerationRef\.current === generation/);
+    assert.match(workspaceControllerSource, /if \(!ownsMount\(generation\)\) return/);
+    assert.doesNotMatch(workspaceControllerSource, /restoreAttemptedRef/);
   });
 
   it('workspace.analyze 不得把目录扫描当成已解析并回报 parsedFiles:0', () => {
