@@ -1732,6 +1732,16 @@ async function installMapApiTimingTelemetry(page) {
     let startOverflow = false;
     let invalidStartCount = 0;
     let unavailablePhaseCount = 0;
+    let modelReadyCount = 0;
+    let repeatedReadyCount = 0;
+    const modelIdentity = (observation) => ({
+      modelName: observation?.modelName,
+      loadId: observation?.loadId,
+      sourceUri: observation?.sourceUri,
+      sourceRevision: observation?.sourceRevision,
+      sceneId: sceneId(observation?.canvas)
+    });
+    const modelIdentityKey = (identity) => JSON.stringify([identity.sceneId, identity.loadId, identity.sourceUri, identity.sourceRevision, identity.modelName]);
     const maxDiagnosticCount = 16;
     const stableCodePattern = /^[A-Z][A-Z0-9_]{0,95}$/;
     const projectResultDiagnostics = (result) => {
@@ -1793,7 +1803,11 @@ async function installMapApiTimingTelemetry(page) {
         timeOrigin: observation.timeOrigin,
         modelName: observation.modelName,
         cursorPresent: observation.cursorPresent,
-        sessionPresent: observation.sessionPresent
+        sessionPresent: observation.sessionPresent,
+        loadId: observation.loadId,
+        sourceUri: observation.sourceUri,
+        sourceRevision: observation.sourceRevision,
+        canvas: observation.canvas
       });
       pendingCount++;
     };
@@ -1810,7 +1824,9 @@ async function installMapApiTimingTelemetry(page) {
       const index = pending.starts.findIndex((start) =>
         start.observationId === observation.observationId && start.startedAt === observation.startedAt && start.timeOrigin === observation.timeOrigin &&
         start.modelName === observation.modelName && start.cursorPresent === observation.cursorPresent &&
-        start.sessionPresent === observation.sessionPresent);
+        start.sessionPresent === observation.sessionPresent && start.loadId === observation.loadId &&
+        start.sourceUri === observation.sourceUri && start.sourceRevision === observation.sourceRevision &&
+        start.canvas === observation.canvas);
       if (index < 0) return unavailable('REQUEST_START_IDENTITY_MISMATCH');
       pending.starts.splice(index, 1);
       pendingCount--;
@@ -1865,7 +1881,7 @@ async function installMapApiTimingTelemetry(page) {
         stats.durations.push(elapsedMs);
         if (stats.durations.length > observationLimit) stats.durations.shift();
         const nativeTimeline = result?.diagnostics?.find((item) => item?.code === 'MAP_REQUEST_TIMELINE')?.details ?? null;
-        if (state.timeline.length < observationLimit) state.timeline.push({ phase, phaseAttribution, modelName, requestId: observation.requestId, rendererStartedAtUnixMs: observation.timeOrigin + observation.startedAt, rendererCompletedAtUnixMs: observation.timeOrigin + observation.completedAt, nativeTimeline });
+        if (state.timeline.length < observationLimit) state.timeline.push({ ...modelIdentity(observation), phase, phaseAttribution, modelName, requestId: observation.requestId, rendererTimeOrigin: observation.timeOrigin, rendererStartedAtUnixMs: observation.timeOrigin + observation.startedAt, rendererCompletedAtUnixMs: observation.timeOrigin + observation.completedAt, nativeTimeline });
         else state.timelineOverflow = true;
         state.recent.push({
           phase,
@@ -1892,7 +1908,14 @@ async function installMapApiTimingTelemetry(page) {
       const observation = event.detail;
       if (observation && Number.isFinite(observation.startedAt) && Number.isFinite(observation.completedAt)) record(observation);
     };
-    const onModelReady = (event) => { state.modelReady[event.detail.modelName] = { readyAtUnixMs: event.detail.readyAtUnixMs, sceneId: sceneId(event.detail.canvas) }; };
+    const onModelReady = (event) => {
+      const identity = modelIdentity(event.detail);
+      const key = modelIdentityKey(identity);
+      if (state.modelReady[key]) { repeatedReadyCount++; return; }
+      if (modelReadyCount >= observationLimit) { state.timelineOverflow = true; return; }
+      state.modelReady[key] = { ...identity, readyAtUnixMs: event.detail.readyAtUnixMs, postReturn: event.detail.postReturn ?? null };
+      modelReadyCount++;
+    };
     const onFrameSubmitted = (event) => {
       if (state.frames.length < observationLimit) state.frames.push({ submittedAtUnixMs: event.detail.submittedAtUnixMs, sceneId: sceneId(event.detail.canvas) });
       else state.timelineOverflow = true;
@@ -1945,6 +1968,7 @@ async function installMapApiTimingTelemetry(page) {
       timeline: state.timeline.slice(),
       timelineOverflow: state.timelineOverflow,
       modelReady: { ...state.modelReady },
+      repeatedReadyCount,
       frames: state.frames.slice()
     });
     state.setPhase = (phase) => { state.phase = typeof phase === 'string' ? phase : 'unlabelled'; };

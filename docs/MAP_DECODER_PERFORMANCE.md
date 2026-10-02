@@ -181,3 +181,29 @@ normal-run request loss. Cross-model scheduler dependencies still do not form a
 verified full MAP causal DAG; the existing 260 s / 400 ms limits and submitted-frame
 semantics remain unchanged. No real MAP, Electron or GPU performance is established
 by these source-only tests.
+
+Model timelines now retain the logical map URI, MSB revision, loader ID, model
+name and canvas identity through read, preparation and replacement. The MSB
+revision does not establish the physical hash of the resolved MAPBND/FLVER;
+that hash remains unobserved in this renderer DTO. Missing binding fields stay
+unavailable. Per-invocation records are captured before awaiting the cache promise
+and copied before enqueue, so a shared cached geometry object cannot replace an
+older invocation's timing. Repeated ready callbacks retain the first boundary.
+
+The optional `postReturn` projection divides the final IPC return through ready
+into before-prepare, preparation queue, renderer preparation turnaround,
+before-upload, upload queue and synchronous replacement intervals. These are
+contained in `returnProcessingMs`. Worker preparation duration is a separately
+reported diagnostic inside renderer turnaround and is never added again. Ready
+uses the exact captured replacement-completion boundary; clock, preparation-job
+and source gaps are explicit. Upload observation failures preserve replacement
+outcomes, while stale/disposed/false/failed callbacks publish no current success.
+
+The maintained controlled-clock fixture drives actual preparation client worker
+callbacks, the maintained `FrameTaskQueue` callback and the renderer observer.
+Its 90 ms post-return interval accounts as 10/10/20/10/30/10 ms, with a separate
+15 ms reported worker duration. Two equal-name loads with different bindings each
+retain their own 60 ms timeline. These are callback/accounting regression values,
+not measured game-load latency or GPU performance. The full MAP causal DAG and
+actual responsiveness quality remain unverified; the 260 s / 400 ms guard limits
+are unchanged.

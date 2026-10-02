@@ -11,7 +11,10 @@ const end = source.indexOf('\nasync function setMapApiTimingPhase(page, phase)',
 assert.ok(begin >= 0 && end > begin);
 const install = eval(`(${source.slice(begin, end)})`);
 
+let defaultBinding;
 async function harness(t) {
+  const previousBinding = defaultBinding;
+  defaultBinding = { loadId: 'fixture-load', sourceUri: 'fixture://map', sourceRevision: 'a'.repeat(64), canvas: {} };
   const previous = Object.fromEntries(['window', 'soulforge', '__sfMapApiTiming'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   const window = new EventTarget();
   const readMapStaticGeometry = () => {};
@@ -19,6 +22,7 @@ async function harness(t) {
   globalThis.soulforge = Object.freeze({ readMapStaticGeometry });
   delete globalThis.__sfMapApiTiming;
   t.after(() => {
+    defaultBinding = previousBinding;
     globalThis.__sfMapApiTiming?.dispose?.();
     for (const [key, descriptor] of Object.entries(previous)) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);
@@ -31,15 +35,15 @@ async function harness(t) {
   return { timing, window, page, assertFrozen: () => assert.equal(globalThis.soulforge.readMapStaticGeometry, readMapStaticGeometry) };
 }
 
-const metadata = requestId => ({ modelName: 'fixture', cursorPresent: false, sessionPresent: false, requestId });
+const metadata = requestId => ({ ...defaultBinding, modelName: 'fixture', cursorPresent: false, sessionPresent: false, requestId });
 const deferred = () => {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 };
 function readyAndFrame(window) {
-  const canvas = {};
-  window.dispatchEvent(new CustomEvent('sf-map-model-ready', { detail: { modelName: 'fixture', canvas, readyAtUnixMs: performance.timeOrigin + performance.now() } }));
+  const canvas = defaultBinding.canvas;
+  window.dispatchEvent(new CustomEvent('sf-map-model-ready', { detail: { ...defaultBinding, modelName: 'fixture', canvas, readyAtUnixMs: performance.timeOrigin + performance.now() } }));
   window.dispatchEvent(new CustomEvent('sf-scene-frame-submitted', { detail: { canvas, submittedAtUnixMs: performance.timeOrigin + performance.now() } }));
 }
 

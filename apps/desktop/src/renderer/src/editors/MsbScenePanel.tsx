@@ -17,6 +17,13 @@ import {
 } from '../scene/sceneManifestBrowser.js';
 import { MapPageProgress } from '../scene/mapPageProgress.js';
 import { observeMapGeometryRead } from '../scene/mapReadObservation.js';
+import {
+  captureMapModelLoadInvocation,
+  createMapModelLoadObservation,
+  observeMapModelUpload,
+  type MapModelLoadInvocation,
+  type MapModelLoadObservation
+} from '../scene/mapModelLoadObservation.js';
 import { mountThreeProxyScene, type ProxySceneHandle } from '../scene/threeSceneController.js';
 import {
   FrameTaskQueue,
@@ -512,7 +519,8 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   const drawItemByIdRef = useRef<Map<string, SceneDrawItem>>(new Map());
   const modelLoadCacheRef = useRef<MapModelLoadCache<PreparedMapGeometry> | null>(null);
   const modelUploadQueueRef = useRef<FrameTaskQueue | null>(null);
-  const modelUploadRef = useRef<((modelName: string, mesh: PreparedMapGeometry) => Promise<boolean>) | null>(null);
+  const modelLoadInvocationRef = useRef<((modelName: string) => MapModelLoadInvocation<PreparedMapGeometry | null>) | null>(null);
+  const modelUploadRef = useRef<((modelName: string, mesh: PreparedMapGeometry, observation: MapModelLoadObservation | null) => Promise<boolean>) | null>(null);
   const meshPartTotalRef = useRef(0);
   const [isSaving, setIsSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
@@ -897,6 +905,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           }
         });
         prepareClient = prepareClientForLoad;
+        const modelObservations = new Map<string, MapModelLoadObservation>();
         const loadCache = new MapModelLoadCache<PreparedMapGeometry>(async (modelName, loadSignal) => {
           const modelKey = normalizeMapModelKey(modelName);
           if (!modelName.trim() || !modelKey) {
@@ -906,6 +915,11 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           }
           loaderStarted += 1;
           const loadId = createMapRequestId();
+          const modelObservation = createMapModelLoadObservation({
+            modelName, loadId, sourceUri: props.mapResourceUri!, sourceRevision: props.revision,
+            canvas: handle.canvas
+          });
+          modelObservations.set(modelKey, modelObservation);
           const activePageRequestIds = new Set<string>();
           const cancelRequestOnLoadAbort = (): void => {
             for (const requestId of activePageRequestIds) {
@@ -950,7 +964,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
               try {
                 chunkResult = await observeMapGeometryRead(
                   () => readMapStaticGeometry(props.mapResourceUri, modelName, cursor, sessionToken, requestId),
-                  { modelName, cursorPresent: Boolean(cursor), sessionPresent: Boolean(sessionToken), requestId }
+                  { ...modelObservation.identity, cursorPresent: Boolean(cursor), sessionPresent: Boolean(sessionToken), requestId }
                 ) as MapStaticGeometryReadResult | null | undefined;
               } finally {
                 activePageRequestIds.delete(requestId);
@@ -1021,7 +1035,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
             const prepared = await prepareClientForLoad.prepare(chunks, loadSignal, {
               ...(texturePreviewToken ? { texturePreviewToken } : {}),
               ...(textureColorSpace ? { textureColorSpace } : {})
-            });
+            }, modelObservation.observePreparation);
             if (cancelled || loadSignal.aborted) return null;
             if (prepared.diagnostics && prepared.diagnostics.length > 0) {
               // Preparation warnings are renderer-local provenance, not a
@@ -1055,9 +1069,14 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
             loadSignal.removeEventListener('abort', cancelRequestOnLoadAbort);
           }
         });
+        const loadModel = (modelName: string): MapModelLoadInvocation<PreparedMapGeometry | null> =>
+          captureMapModelLoadInvocation(
+            () => loadCache.load(modelName),
+            () => modelObservations.get(normalizeMapModelKey(modelName))
+          );
         const uploadQueue = new FrameTaskQueue();
         const uploads = new Map<string, Promise<boolean>>();
-        const uploadModel = (modelName: string, geometry: PreparedMapGeometry): Promise<boolean> => {
+        const uploadModel = (modelName: string, geometry: PreparedMapGeometry, observation: MapModelLoadObservation | null): Promise<boolean> => {
           const key = normalizeMapModelKey(modelName);
           const pending = uploads.get(key);
           if (pending) return pending;
@@ -1065,8 +1084,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           // this caller was awaiting the shared load promise. The CPU envelope
           // is intentionally gone at that point; reuse the visible batch.
           if (loadCache.isUploaded(modelName)) return Promise.resolve(true);
-          const upload = uploadQueue
-            .enqueue(() => {
+          const upload = observeMapModelUpload(uploadQueue, () => {
               try {
                 if (typeof handle.updateModelGeometry !== 'function') {
                   throw new Error('MAP_RENDERER_UPDATE_METHOD_MISSING: proxy scene handle cannot replace model geometry');
@@ -1080,13 +1098,13 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                   throw new Error(`MAP_RENDERER_MODEL_BATCH_NOT_FOUND: ${modelName} (expected batch key model:${normalizeMapModelKey(modelName)})`);
                 }
                 uploadedPartCount += replaced;
-                window.dispatchEvent(new CustomEvent('sf-map-model-ready', { detail: { modelName, canvas: handle.canvas, readyAtUnixMs: performance.timeOrigin + performance.now() } }));
                 return replaced > 0;
               } catch (error) {
                 reportMeshDiagnostic(modelName, 'renderer-upload', error);
                 throw error;
               }
-            })
+            }, observation, geometry.cacheKey,
+            () => !cancelled && handleRef.current === handle && modelObservations.get(key) === observation)
             .then((uploaded) => {
               if (uploaded) loadCache.markUploaded(modelName, geometry);
               else loadCache.release(modelName, geometry);
@@ -1100,6 +1118,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           return upload;
         };
         modelLoadCacheRef.current = loadCache;
+        modelLoadInvocationRef.current = loadModel;
         modelUploadQueueRef.current = uploadQueue;
         modelUploadRef.current = uploadModel;
 
@@ -1167,10 +1186,11 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                 if (!group) return;
                 const { modelName, items } = group;
                 try {
-                  const geometry = await loadCache.load(modelName);
+                  const invocation = loadModel(modelName);
+                  const geometry = await invocation.promise;
                   if (cancelled) return;
                   if (geometry) {
-                    const uploaded = await uploadModel(modelName, geometry);
+                    const uploaded = await uploadModel(modelName, geometry, invocation.observation);
                     if (!cancelled && uploaded) {
                       loaded += items.length;
                       modelsLoaded += 1;
@@ -1266,6 +1286,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       drawItemByIdRef.current.clear();
       modelLoadCacheRef.current?.dispose();
       modelLoadCacheRef.current = null;
+      modelLoadInvocationRef.current = null;
       // This terminates active/queued CPU prepare jobs before a remount can
       // receive a worker result. No late prepare may reach model upload.
       prepareClient?.dispose();
@@ -1293,8 +1314,9 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   useEffect(() => {
     if (selected?.kind !== 'msb-part' || !handleRef.current) return;
     const loadCache = modelLoadCacheRef.current;
+    const loadModel = modelLoadInvocationRef.current;
     const uploadModel = modelUploadRef.current;
-    if (!loadCache || !uploadModel) return;
+    if (!loadCache || !loadModel || !uploadModel) return;
     const item = drawItemByIdRef.current.get(selected.id);
     const modelName = item?.modelName
       ?? (item ? resolvePartModelName(item as { modelName?: string; modelIndex?: number }, props.models) : undefined);
@@ -1304,9 +1326,10 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     void (async () => {
       try {
         if (loadCache.isUploaded(modelName)) return;
-        const meshData = await loadCache.load(modelName);
+        const invocation = loadModel(modelName);
+        const meshData = await invocation.promise;
         if (cancelled || !meshData) return;
-        await uploadModel(modelName, meshData);
+        await uploadModel(modelName, meshData, invocation.observation);
       } catch {
         // 选中补载失败保持线框
       }

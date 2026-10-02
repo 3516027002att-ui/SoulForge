@@ -1,7 +1,10 @@
 /** Own the invocation, never replace Electron's frozen contextBridge exports. */
 export async function observeMapGeometryRead<T>(
   invoke: () => Promise<T>,
-  metadata: { modelName: string; cursorPresent: boolean; sessionPresent: boolean; requestId: string }
+  metadata: {
+    modelName: string; cursorPresent: boolean; sessionPresent: boolean; requestId: string;
+    loadId?: string; sourceUri?: string; sourceRevision?: string; canvas?: object | null;
+  }
 ): Promise<T> {
   const startedAt = performance.now();
   // Event-only identity also survives equal clocks and a reused requestId.
