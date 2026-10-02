@@ -23,6 +23,8 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { FrameTaskQueue } from '../scene/mapModelLoadScheduler.js';
+import { observeMapModelUpload } from '../scene/mapModelLoadObservation.js';
 import {
   MsbScenePanel,
   classifyMapUnavailableGeometry,
@@ -511,13 +513,33 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     assert.match(panelSource, /title=\{row\.entity\.label\}/);
   });
 
-  it('Gizmo 拖动只在结束时提交一次语义变换，模型上传受帧预算调度', () => {
+  it('Gizmo 拖动只在结束时提交一次语义变换，模型上传受帧预算调度', async () => {
     const controllerSource = readFileSync(
       join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'scene', 'threeSceneController.ts'),
       'utf8'
     );
     assert.match(controllerSource, /pendingTransformChange = \{ id: itemId/);
     assert.match(controllerSource, /if \(pendingTransformChange\) input\.onTransformChange\?\.\(pendingTransformChange\)/);
-    assert.match(panelSource, /uploadQueue\s*\.enqueue/);
+    assert.match(panelSource, /observeMapModelUpload\(uploadQueue,/);
+    const frames: FrameRequestCallback[] = [];
+    let tick = 0;
+    let uploads = 0;
+    const queue = new FrameTaskQueue((callback) => { frames.push(callback); return frames.length; }, () => {}, () => tick);
+    const replace = (): boolean => { uploads += 1; tick += 7; return true; };
+    try {
+      const first = observeMapModelUpload(queue, replace, null, undefined, () => true);
+      const second = observeMapModelUpload(queue, replace, null, undefined, () => true);
+      assert.equal(uploads, 0, 'replacement must wait for the scheduled frame');
+      assert.equal(frames.length, 1);
+      frames.shift()!(tick);
+      assert.equal(await first, true);
+      assert.equal(uploads, 1, 'a replacement exceeding the existing frame budget defers the next one');
+      assert.equal(frames.length, 1);
+      frames.shift()!(tick);
+      assert.equal(await second, true);
+      assert.equal(uploads, 2);
+    } finally {
+      queue.dispose();
+    }
   });
 });
