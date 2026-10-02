@@ -42,10 +42,12 @@
     "@playwright/test": "^1.49.0",
     "@types/react": "^19.0.8",
     "@types/react-dom": "^19.0.3",
+    "@types/react-test-renderer": "19.1.0",
     "@types/three": "^0.172.0",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "43.0.0",
     "electron-vite": "^3.0.0",
+    "react-test-renderer": "19.2.8",
     "vite": "^6.0.11"
   }
 }

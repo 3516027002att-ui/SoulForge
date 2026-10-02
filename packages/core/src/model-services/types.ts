@@ -725,7 +725,8 @@ export type ContextBrokerResult =
         | 'EVIDENCE_ALL_STALE'
         | 'BYTE_BUDGET_INTERNAL';
       message: string;
-      diagnostics: [{ severity: 'error'; code: string; message: string }];
+      /** Unavailable evidence may warn; execution/identity/budget failures remain errors. */
+      diagnostics: [{ severity: 'warning' | 'error'; code: string; message: string }];
     };
 
 export interface ContextBroker {

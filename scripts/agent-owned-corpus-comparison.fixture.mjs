@@ -5,9 +5,11 @@
  *
  * Requires explicit SOULFORGE_NATIVE_FIXTURE_ROOT, SOULFORGE_COMPARISON_NEXT_ASSEMBLY
  * and SOULFORGE_COMPARISON_DOTNET (or DOTNET_ROOT). Missing inputs are unavailable.
- * Run with those pinned external research inputs: node --import
- * ./.local-validation/explicit-native-bridge-loader.mjs --test
- * scripts/agent-owned-corpus-comparison.fixture.mjs
+ * Run the direct node:test entry with those pinned external research inputs:
+ * node --import ./.local-validation/explicit-native-bridge-loader.mjs
+ * scripts/agent-owned-corpus-comparison.fixture.mjs --control public-main-c4
+ * The historical-217 default remains distinct and unavailable when its exact
+ * source is missing. Explicit control selection reaches preparation and workers.
  */
 import assert from 'node:assert/strict';
 import {execFile} from 'node:child_process';
@@ -18,8 +20,10 @@ import {join,relative} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import test from 'node:test';
 import {createOwnedNativeComparisonRuntime} from './testing/owned-native-agent-comparison.mjs';
+import {selectLegacyAgentControlFromArguments,legacyAgentControlArguments} from './testing/legacy-agent-baseline.mjs';
 const exec=promisify(execFile);
-const {ROOT,OUT,LEGACY,ORACLE_SHA,ORACLE_SOURCE,ORACLE_ASSEMBLY,BRIDGE,LOADER,TARGET,SCENARIOS,CONFIG,SAMPLING,LIMITS,hash,fileHash,save,dotnetEnv,treeInputs,prepare,worker}=createOwnedNativeComparisonRuntime({requireExternalLoader:true});
+const control=selectLegacyAgentControlFromArguments(process.argv.slice(2));
+const {ROOT,OUT,LEGACY,ORACLE_SHA,ORACLE_SOURCE,ORACLE_ASSEMBLY,BRIDGE,LOADER,TARGET,SCENARIOS,CONFIG,SAMPLING,LIMITS,hash,fileHash,save,dotnetEnv,treeInputs,prepare,worker}=createOwnedNativeComparisonRuntime({requireExternalLoader:true,control:control.id});
 if (process.argv.includes('--owned-worker')) {
   const index = process.argv.indexOf('--owned-worker');
   await worker(process.argv[index + 1], process.argv[index + 2]);
@@ -57,7 +61,7 @@ if (process.argv.includes('--owned-worker')) {
       if (existsSync(dir)) await rename(dir, `${dir}.previous-${Date.now()}`);
       await mkdir(dir, { recursive: true });
       try {
-        const child = await exec(process.execPath, ['--import', LOADER, fileURLToPath(import.meta.url), '--owned-worker', kernel, scenario.id],
+        const child = await exec(process.execPath, ['--import', LOADER, fileURLToPath(import.meta.url), ...legacyAgentControlArguments(control.id), '--owned-worker', kernel, scenario.id],
           { cwd: ROOT, env: { ...dotnetEnv(), SF_E2E_WORKSPACE_STORAGE_ROOT: join(dir, 'storage') },
             timeout: 240_000, maxBuffer: 4_194_304 });
         await writeFile(join(dir, 'worker.log'), child.stdout + child.stderr);
@@ -101,7 +105,7 @@ if (process.argv.includes('--owned-worker')) {
     const passed = stable && sourceStable && pinnedStable && failures.length === 0
       && checks.every(c => Object.entries(c).filter(([k]) => k !== 'scenario').every(([,v]) => v === true));
     const report = { schema: 'owned-native-agent-comparison-v1', status: passed ? 'passed' : 'failed',
-      baselineRevision: LEGACY, sourceCommit: source.commit, builtArtifactStable: stable,
+      baselineRevision: LEGACY, baselineControl: control, sourceCommit: source.commit, builtArtifactStable: stable,
       sourceStable, pinnedInputsStable: pinnedStable, pinnedBefore, pinnedAfter,
       sourceDiffSha256: hash(source.diff), sourceAfterDiffSha256: hash(sourceAfter.diff),
       builtArtifactSha256: artifactBefore.sha256, corpus: prepared.fixture, target: TARGET,

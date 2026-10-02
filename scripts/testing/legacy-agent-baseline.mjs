@@ -19,6 +19,14 @@ export function selectLegacyAgentControl(id='historical-217'){
  if(!control)throw Object.assign(new Error('Select a declared exact Agent experiment control.'),{code:'AGENT_EXPERIMENT_CONTROL_INVALID'});
  return control;
 }
+export function selectLegacyAgentControlFromArguments(argv){
+ const positions=argv.flatMap((argument,index)=>argument==='--control'?[index]:[]);
+ if(positions.length>1||argv.some(argument=>argument.startsWith('--control=')))throw Object.assign(new Error('Use one explicit --control value.'),{code:'AGENT_EXPERIMENT_CONTROL_INVALID'});
+ const value=positions.length?argv[positions[0]+1]:undefined;
+ if(positions.length&&(!value||value.startsWith('--')))throw Object.assign(new Error('The explicit control selector requires a value.'),{code:'AGENT_EXPERIMENT_CONTROL_INVALID'});
+ return selectLegacyAgentControl(value);
+}
+export function legacyAgentControlArguments(id){return ['--control',selectLegacyAgentControl(id).id];}
 export async function inspectLegacyAgentControl(repoRoot,id){
  const control=selectLegacyAgentControl(id);
  const [{stdout:source},{stdout:tree}]=await Promise.all([

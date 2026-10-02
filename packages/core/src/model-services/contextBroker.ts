@@ -607,7 +607,8 @@ function failureResult(code: ContextBrokerFailureCode, message: string): Context
     ok: false,
     code,
     message,
-    diagnostics: [{ severity: 'error', code, message }]
+    // An empty discovery context is unavailable evidence, not an execution error.
+    diagnostics: [{ severity: code === 'insufficient_evidence' ? 'warning' : 'error', code, message }]
   };
 }
 

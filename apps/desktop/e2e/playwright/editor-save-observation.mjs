@@ -1,5 +1,6 @@
 /** Test-only bounded observation; every original call/byte/result is preserved. */
-const channels = new Set(['resource.saveScriptSource', 'resource.applyContainerParamFieldMutation']);
+const channels = new Set(['resource.saveScriptSource', 'resource.applyContainerParamFieldMutation',
+  'resource.readContainerParamRowIndex', 'resource.readContainerParamPage']);
 const methods = new Set(['openAppDatabase', 'openWorkspace', 'record', 'get', 'list', 'updateStatus', 'history',
   'createTransaction', 'transitionTransaction', 'getTransactionForOperation', 'finalizeCommit', 'recordRecoveryPoint',
   'recordResourceEntryChange', 'appendAuditEvent', 'replaceFiles', 'getAllSemanticFileCache', 'setSemanticFileCache',
@@ -14,16 +15,29 @@ const diagnosticCodes = new Set(['POSTCOMMIT_REFRESH_FAILED', 'RESOURCE_NOT_INDE
   'LUABND_CONTAINER_HASH_MISMATCH', 'LUABND_CHILD_HASH_MISMATCH', 'LUABND_SCRIPT_READ_FAILED',
   'LUABND_STAGING_PREPARE_FAILED', 'LUABND_READ_FAILED', 'BND4_STAGING_WRITE_FAILED', 'SCRIPT_SOURCE_READ_FAILED', 'PARAMDEF_ENCODE_FAILED']);
 
-export function createEditorSaveObservation({ ipcMain, stdout, stderr, clock }) {
-  const limit = 160; const inputLimit = 65_536;
+export const EDITOR_SAVE_OBSERVATION_PREFIX = '[SF_EDITOR_SAVE_OBSERVATION] ';
+const limit = 160; const inputLimit = 65_536;
+const counterKeys = ['observedEvents', 'droppedEvents', 'droppedInput', 'droppedCodes', 'observerErrors', 'droppedPublished'];
+
+export function createEditorSaveObservation({ ipcMain, stdout, stderr, clock, publish = undefined }) {
   const events = []; const restores = [];
-  let droppedEvents = 0, droppedInput = 0, droppedCodes = 0, observerErrors = 0;
+  let observedEvents = 0, droppedEvents = 0, droppedInput = 0, droppedCodes = 0, observerErrors = 0, droppedPublished = 0;
+  const counters = () => ({ observedEvents, droppedEvents, droppedInput, droppedCodes, observerErrors, droppedPublished });
   const safely = action => { try { return action(); } catch { observerErrors++; } };
   const record = event => safely(() => {
     const at = clock();
     if (!Number.isFinite(at) || at < 0) throw new Error('OBSERVER_CLOCK_INVALID');
     if (events.length === limit) { events.shift(); droppedEvents++; }
-    events.push({ atMs: Math.round(at * 1000) / 1000, ...event });
+    const observation = { atMs: Math.round(at * 1000) / 1000, ...event };
+    events.push(observation); observedEvents++;
+    if (typeof publish === 'function') {
+      try {
+        const published = publish({ ...observation, ...(observation.codes ? { codes: observation.codes.slice() } : {}) }, counters());
+        if (published && typeof published.then === 'function') {
+          void Promise.resolve(published).catch(() => { droppedPublished++; });
+        }
+      } catch { droppedPublished++; }
+    }
     return at;
   });
   const codes = value => Array.isArray(value) ? value.slice(0, 8).flatMap(item => {
@@ -91,7 +105,61 @@ export function createEditorSaveObservation({ ipcMain, stdout, stderr, clock }) 
     restores.length = 0;
   }
   return { stdout, stderr,
-    snapshot: () => ({ limit, inputByteLimit: inputLimit, events: events.map(event => ({ ...event, ...(event.codes ? { codes: event.codes.slice() } : {}) })), droppedEvents, droppedInput, droppedCodes, observerErrors }),
+    snapshot: () => ({ limit, inputByteLimit: inputLimit, events: events.map(event => ({ ...event, ...(event.codes ? { codes: event.codes.slice() } : {}) })), ...counters() }),
     restore: () => { for (const restore of restores.reverse()) safely(restore); }
+  };
+}
+
+/** Host copy of only the original observer's closed-vocabulary event packets. */
+export function createEditorSaveObservationTail() {
+  const events = []; let buffer = '';
+  let counters = Object.fromEntries(counterKeys.map(key => [key, 0]));
+  let transportDroppedEvents = 0, transportDroppedInput = 0, transportErrors = 0;
+  const eventKeys = new Set(['atMs', 'stage', 'method', 'state', 'side', 'outcome', 'elapsedMs', 'ok', 'codes', 'refresh']);
+  const nonNegative = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  const consumeLine = line => {
+    if (!line.startsWith(EDITOR_SAVE_OBSERVATION_PREFIX)) return;
+    try {
+      const packet = JSON.parse(line.slice(EDITOR_SAVE_OBSERVATION_PREFIX.length));
+      const event = packet?.event; const nextCounters = packet?.counters;
+      if (!event || Array.isArray(event) || Object.keys(event).some(key => !eventKeys.has(key))
+        || !nonNegative(event.atMs) || event.atMs < (events.at(-1)?.atMs ?? 0)
+        || !(event.stage === 'ipc' && channels.has(event.method) && ['start', 'finish', 'throw'].includes(event.state)
+          || event.stage === 'database' && methods.has(event.method) && dbEvents.has(event.state)
+          || event.stage === 'postcommit' && event.state === 'idle-readers-released' && event.method === undefined)
+        || (event.side !== undefined && !['client', 'worker'].includes(event.side))
+        || (event.outcome !== undefined && !outcomes.has(event.outcome))
+        || (event.elapsedMs !== undefined && !nonNegative(event.elapsedMs))
+        || (event.ok !== undefined && typeof event.ok !== 'boolean')
+        || (event.refresh !== undefined && !['converged', 'failed'].includes(event.refresh))
+        || (event.codes !== undefined && (!Array.isArray(event.codes) || event.codes.length > 8
+          || event.codes.some(code => !diagnosticCodes.has(code))))
+        || !nextCounters || Object.keys(nextCounters).length !== counterKeys.length
+        || counterKeys.some(key => !Number.isSafeInteger(nextCounters[key]) || nextCounters[key] < counters[key])
+        || nextCounters.observedEvents <= counters.observedEvents) throw new Error('INVALID_OBSERVATION');
+      transportDroppedEvents += nextCounters.observedEvents - counters.observedEvents - 1;
+      counters = nextCounters;
+      if (events.length === limit) events.shift();
+      events.push(event);
+    } catch { transportErrors++; }
+  };
+  return {
+    consume: chunk => {
+      try {
+        if (!(typeof chunk === 'string' || Buffer.isBuffer(chunk)) || chunk.length > inputLimit
+          || Buffer.byteLength(chunk) > inputLimit) { buffer = ''; transportDroppedInput++; return; }
+        buffer += chunk.toString();
+        let boundary;
+        while ((boundary = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 1);
+          if (Buffer.byteLength(line) > inputLimit) transportDroppedInput++;
+          else consumeLine(line);
+        }
+        if (buffer.length > inputLimit || Buffer.byteLength(buffer) > inputLimit) { buffer = ''; transportDroppedInput++; }
+      } catch { buffer = ''; transportErrors++; }
+    },
+    snapshot: () => ({ state: 'host-tail', limit, inputByteLimit: inputLimit,
+      events: events.map(event => ({ ...event, ...(event.codes ? { codes: event.codes.slice() } : {}) })),
+      ...counters, transportDroppedEvents, transportDroppedInput, transportErrors })
   };
 }

@@ -1,10 +1,7 @@
+import type { NativeWindowThemeResult } from '../../ipc/publicTypes.js';
+export type { NativeWindowThemeMode, NativeWindowThemeResult } from '../../ipc/publicTypes.js';
 import type { BrowserWindow, IpcMainInvokeEvent } from 'electron';
 import type { TrustedIpcHandle } from './registration.js';
-
-export type NativeWindowThemeMode = 'opal' | 'obsidian';
-export type NativeWindowThemeResult =
-  | { ok: true }
-  | { ok: false; code: 'WINDOW_THEME_MODE_INVALID' | 'WINDOW_THEME_WINDOW_UNAVAILABLE' | 'WINDOW_THEME_APPLY_FAILED' | 'WINDOW_THEME_OVERLAY_UNAVAILABLE' };
 
 // Opal retains the existing native frame tokens. Obsidian is the sRGB
 // conversion of existing --canvas (0.098/0.012/236) and --ink-0 (0.92/0.012/218).

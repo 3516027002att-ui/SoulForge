@@ -40,7 +40,6 @@ import type {
   RagLocalModelStatus,
   UpdatePublicState
 } from '@soulforge/shared';
-import type { UpdateCommandResult, UpdateChannel } from '@soulforge/shared';
 import type {
   AiAgentEventEnvelope,
   AnalyzeWorkspaceSummary,
@@ -130,6 +129,7 @@ import { AmbientField } from './theme/AmbientField.js';
 import { ThemeSettings } from './theme/ThemeSettings.js';
 import { useSpectralTheme } from './theme/useSpectralTheme.js';
 import { shouldShowEditorWelcome } from './theme/editorWelcome.js';
+import { useRuntimeSettingsController } from './app/useRuntimeSettingsController.js';
 import { Me3RuntimePanel } from './runtime/Me3RuntimePanel.js';
 import { AgentSidebar } from './agent/AgentSidebar.js';
 import {
@@ -248,12 +248,6 @@ const EMPTY_EMEVD_DOCUMENT: EmevdEditorDocument = {
 const EMPTY_FMG_ENTRIES: Array<{ id: number; text: string }> = [];
 
 const EMPTY_PARAM_ROWS: ParamRowView[] = [];
-
-const INITIAL_UPDATE_STATE: UpdatePublicState = {
-  status: 'idle',
-  currentVersion: '读取中',
-  channel: 'prerelease'
-};
 
 function updateStateLabel(state: UpdatePublicState): string {
   switch (state.status) {
@@ -539,11 +533,8 @@ export function App(): ReactElement {
   const [paramRowDataSize, setParamRowDataSize] = useState<number>(16);
 
   /** GitHub Release 更新状态只来自 main/preload，renderer 不保存路径或句柄。 */
-  const [updateState, setUpdateState] = useState<UpdatePublicState>(INITIAL_UPDATE_STATE);
-  const [updateActionBusy, setUpdateActionBusy] = useState(false);
-  const updateActionInFlightRef = useRef(false);
-  /** RAG 只报告本地模型状态；renderer 不接触路径、网络或下载入口。 */
-  const [ragModelStatus, setRagModelStatus] = useState<RagLocalModelStatus | null>(null);
+  const { updateState, updateActionBusy, ragModelStatus, runUpdateCommand, changeUpdateChannel, currentUpdateAction } =
+    useRuntimeSettingsController({ bridge, setStatus, pushToast, announceDesktopOnly });
 
   const [aiProvider, setAiProvider] = useState<AiProvider>('mock');
   // 2-A：思考档用官方 effort 值（默认 medium；旧档 normal 已迁移，写路径只写官方值）。
@@ -1132,96 +1123,7 @@ export function App(): ReactElement {
       }
     })();
   }, [bridge]);
-  useEffect(() => {
-    if (!bridge || typeof bridge.getUpdateState !== 'function' || typeof bridge.onUpdateState !== 'function') return;
-    let cancelled = false;
-    const unsubscribe = bridge.onUpdateState((state) => {
-      if (!cancelled) setUpdateState(state);
-    });
-    void bridge.getUpdateState().then((state) => {
-      if (!cancelled) setUpdateState(state);
-    }).catch((error: unknown) => {
-      if (cancelled) return;
-      setStatus(error instanceof Error ? error.message : '读取更新状态失败');
-    });
-    return () => {
-      cancelled = true;
-      unsubscribe();
-    };
-  }, [bridge]);
 
-  useEffect(() => {
-    if (!bridge || typeof bridge.getRagLocalModelStatus !== 'function') {
-      setRagModelStatus(null);
-      return;
-    }
-    let cancelled = false;
-    void bridge.getRagLocalModelStatus().then((status) => {
-      if (!cancelled) setRagModelStatus(status);
-    }).catch(() => {
-      if (!cancelled) setRagModelStatus(null);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [bridge]);
-
-  async function runUpdateCommand(
-    action: () => Promise<UpdateCommandResult>,
-    successMessage?: string
-  ): Promise<void> {
-    if (!bridge) {
-      announceDesktopOnly('检查 SoulForge 更新');
-      return;
-    }
-    if (updateActionInFlightRef.current) return;
-    updateActionInFlightRef.current = true;
-    setUpdateActionBusy(true);
-    try {
-      const result = await action();
-      setUpdateState(result.state);
-      if (!result.ok && result.error) {
-        setStatus(`更新未执行：${result.error.message}`);
-        pushToast(result.error.message, 'warn');
-      } else if (successMessage) {
-        setStatus(successMessage);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '更新操作失败';
-      setStatus(message);
-      pushToast(message, 'warn');
-    } finally {
-      updateActionInFlightRef.current = false;
-      setUpdateActionBusy(false);
-    }
-  }
-
-  function updateAction(): { label: string; run: (() => Promise<UpdateCommandResult>) | null } {
-    switch (updateState.status) {
-      case 'available':
-        return { label: '下载更新', run: bridge ? bridge.downloadUpdate : null };
-      case 'downloading':
-        return { label: '取消下载', run: bridge ? bridge.cancelUpdate : null };
-      case 'pending-install':
-      case 'blocked':
-        return { label: '安装并重启', run: bridge ? bridge.installUpdate : null };
-      case 'installing':
-        return { label: '安装器启动中…', run: null };
-      default:
-        return { label: '检查更新', run: bridge ? bridge.checkForUpdate : null };
-    }
-  }
-
-  function changeUpdateChannel(channel: UpdateChannel): void {
-    if (!bridge) {
-      announceDesktopOnly('切换更新频道');
-      return;
-    }
-    void runUpdateCommand(
-      () => bridge.setUpdateChannel({ channel }),
-      channel === 'prerelease' ? '已切换到预发布频道' : '已切换到稳定频道'
-    );
-  }
   /**
    * 领域栏数据源（SHELL-09 §4.1）：DomainSummary 由「固定领域集合 × read
    * contract 注册状态」构造，不根据任何文件数据分类。read contract 的
@@ -2227,7 +2129,6 @@ export function App(): ReactElement {
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
   }, []);
-
 
   function pushToast(text: string, kind: 'ok' | 'warn' = 'ok'): void {
     toastIdRef.current += 1;
@@ -3346,7 +3247,7 @@ export function App(): ReactElement {
   // 8-A：Composer 思考强度按当前选中服务的协议换表；没有服务时当 openai-compatible。
   const activeAgentProtocol = agentServices
     .find((service) => service.id === agentServiceId)?.protocol ?? 'openai-compatible';
-  const currentUpdateAction = updateAction();
+
   const sidebarStyle = { '--sidebar-w': `${sidebarWidth}px` } as CSSProperties;
   const agentStyle = { '--agent-w': `${agentWidth}px` } as CSSProperties;
   // 原版目录展示只从这一份派生状态生成，避免把「已选择路径」误显示成
@@ -4800,7 +4701,6 @@ export function App(): ReactElement {
           />
         </PanelErrorBoundary>
       </div>
-
 
       {/* ══════════ 命令面板 ══════════ */}
       <div

@@ -84,6 +84,9 @@ interface BridgeClientScopeOptions {
 // Scope is known before the handshake settles. Keep an immutable snapshot so
 // an unrelated startup cannot delay a request that it could never serve.
 const startupScopes = new WeakMap<Promise<BridgeDaemonClient>, BridgeClientScopeOptions>();
+// Weak ownership follows the pool promise. Readiness never changes its scope
+// proof, and fulfilled clients still require identity/closed/scope validation.
+const readyClients = new WeakMap<Promise<BridgeDaemonClient>, BridgeDaemonClient>();
 
 function withCancellationTerminalPhase(
   observer: RunBridgeOptions['onCancellationTerminal'],
@@ -586,6 +589,24 @@ async function findCoveringClient(
   maxFrameBytes?: number,
   maxConcurrency?: number
 ): Promise<BridgeClientLease | undefined> {
+  // A compatible handshake can be slower than a later, already-ready daemon.
+  // Prefer available capacity before joining a pending startup. This is route
+  // selection, not a retry: no request has been dispatched or lease acquired.
+  for (const [key, promise] of clientPool.entries()) {
+    const client = readyClients.get(promise);
+    if (!client || clientPool.get(key) !== promise) continue;
+    if (client.isClosed) {
+      clientPool.delete(key);
+      continue;
+    }
+    const startupScope = startupScopes.get(promise);
+    if (startupScope && !canServeBridgeRequest(startupScope, launch, workspaceSessionId,
+      allowedRoots, writableRoots, oodleRuntimeRoot, maxFrameBytes, maxConcurrency)) continue;
+    if (!canServeBridgeRequest(client.options, launch, workspaceSessionId,
+      allowedRoots, writableRoots, oodleRuntimeRoot, maxFrameBytes, maxConcurrency)) continue;
+    retainBridgeClientUse(client);
+    return { client, key, promise };
+  }
   for (const [key, promise] of clientPool.entries()) {
     const startupScope = startupScopes.get(promise);
     if (startupScope && !canServeBridgeRequest(startupScope, launch, workspaceSessionId,
@@ -689,6 +710,7 @@ async function getOrCreateClient(
   const created = BridgeDaemonClient.start(options);
   startupScopes.set(created, startupScope);
   clientPool.set(key, created);
+  void created.then(client => { readyClients.set(created, client); }, () => undefined);
   try {
     const client = await created;
     if (clientPool.get(key) !== created || client.isClosed) {

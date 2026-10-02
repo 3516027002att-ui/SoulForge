@@ -62,6 +62,90 @@ function harness(startup = () => undefined) {
   return { ...exports, starts, requests, disposed, makeClient, BridgeDaemonError, options };
 }
 
+test('a ready covering client serves a read before an earlier compatible startup settles', async () => {
+  const gate = deferred();
+  const h = harness((_options, count) => count === 1 ? gate.promise : undefined);
+  const readerOptions = h.options();
+  const startingReader = h.runBridge(readerOptions);
+  await settleTurns();
+  await h.runBridge(h.options({ writableRoots: [path.join(fixtureRoot, 'stage')] }));
+  const readyClient = h.requests[0].client;
+  let settled = false;
+  const foreground = h.runBridge(readerOptions).then(result => { settled = true; return result; });
+  try {
+    await settleTurns();
+    assert.equal(settled, true, 'ready covering daemon must serve the read without awaiting another handshake');
+    assert.equal(h.requests.at(-1).client, readyClient);
+    assert.equal(h.starts.length, 2, 'ready preference must not spawn or retry');
+  } finally {
+    gate.resolve(h.makeClient(h.starts[0]));
+    await Promise.all([startingReader, foreground]);
+  }
+});
+
+test('a ready incompatible client cannot replace a matching startup or widen requested scope', async () => {
+  const gate = deferred();
+  const h = harness((_options, count) => count === 1 ? gate.promise : undefined);
+  const matchingOptions = h.options({ workspaceSessionId: 'request-owner' });
+  const matching = h.runBridge(matchingOptions);
+  await settleTurns();
+  await h.runBridge(h.options({ workspaceSessionId: 'foreign-owner' }));
+  let settled = false;
+  const request = h.runBridge(matchingOptions).then(result => { settled = true; return result; });
+  await settleTurns();
+  assert.equal(settled, false);
+  assert.equal(h.requests.length, 1);
+  gate.resolve(h.makeClient(h.starts[0]));
+  const [first, second] = await Promise.all([matching, request]);
+  assert.equal(first.parseStatus, 'partial'); assert.equal(second.parseStatus, 'partial');
+  assert.equal(h.starts.length, 2);
+  assert.equal(h.requests[1].client, h.requests[2].client);
+  assert.equal(h.requests[2].client.options.workspaceSessionId, 'request-owner');
+});
+
+test('ready preference preserves the unrelated startup owner failure without replaying either read', async () => {
+  const gate = deferred();
+  const h = harness((_options, count) => count === 1 ? gate.promise : undefined);
+  const starting = h.runBridge(h.options());
+  await settleTurns();
+  await h.runBridge(h.options({ writableRoots: [path.join(fixtureRoot, 'stage')] }));
+  let settled = false;
+  const foreground = h.runBridge(h.options()).then(result => { settled = true; return result; });
+  try {
+    await settleTurns();
+    assert.equal(settled, true);
+    gate.reject(new h.BridgeDaemonError('BRIDGE_SPAWN_FAILED', 'owned startup failure'));
+    const [failure, result] = await Promise.all([starting, foreground]);
+    assert.equal(failure.parseStatus, 'failed');
+    assert.equal(failure.diagnostics[0].code, 'BRIDGE_SPAWN_FAILED');
+    assert.equal(result.parseStatus, 'partial');
+    assert.equal(h.starts.length, 2);
+    assert.equal(h.requests.length, 2);
+  } finally {
+    gate.resolve(h.makeClient(h.starts[0]));
+    await Promise.all([starting, foreground]);
+  }
+});
+
+test('a closed ready client is removed without leasing it or suppressing the matching startup error', async () => {
+  const gate = deferred();
+  const h = harness((_options, count) => count === 1 ? gate.promise : undefined);
+  const starting = h.runBridge(h.options());
+  await settleTurns();
+  await h.runBridge(h.options({ writableRoots: [path.join(fixtureRoot, 'stage')] }));
+  const readyClient = h.requests[0].client;
+  readyClient.isClosed = true;
+  const foreground = h.runBridge(h.options());
+  await settleTurns();
+  assert.equal(h.fixtureLeases(readyClient), 0);
+  assert.equal(h.requests.length, 1);
+  gate.reject(new h.BridgeDaemonError('BRIDGE_SPAWN_FAILED', 'owned matching failure'));
+  const results = await Promise.all([starting, foreground]);
+  assert.equal(results.every(result => result.diagnostics[0].code === 'BRIDGE_SPAWN_FAILED'), true);
+  assert.equal(h.fixturePool.size, 0);
+  assert.equal(h.starts.length, 2);
+});
+
 for (const [name, firstOptions, secondOptions] of [
   ['executable', { bridgeExecutablePath: path.join(fixtureRoot, 'DifferentBridge') }, {}],
   ['launch arguments', { bridgeExecutablePath: undefined, bridgeProjectPath: path.join(fixtureRoot, 'project-a/Bridge.csproj') },

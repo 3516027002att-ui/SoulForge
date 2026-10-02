@@ -168,10 +168,9 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
     join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'workbench', 'ParamWorkbench.tsx'),
     'utf8'
   ));
-  const paramIpcSource = stripComments(readFileSync(
-    join(repoRoot, 'apps', 'desktop', 'src', 'main', 'ipc', 'param.ts'),
-    'utf8'
-  ));
+  const paramIpcSource = stripComments(['paramService.ts', 'paramSessionService.ts'].map(name => readFileSync(
+    join(repoRoot, 'apps', 'desktop', 'src', 'main', 'services', name), 'utf8'
+  )).join('\n'));
   const assetIpcSource = stripComments(readFileSync(
     join(repoRoot, 'apps', 'desktop', 'src', 'main', 'ipc', 'assets.ts'),
     'utf8'
@@ -406,8 +405,14 @@ describe('PARAM payload 请求代际与物理身份', () => {
  * 一次（作为第一个参数），用它定位即可。
  */
 function sliceHandler(source: string, channel: string): string {
+  const operation = channel.slice(channel.lastIndexOf('.') + 1);
+  const serviceStart = source.indexOf(`const ${operation} = async`);
+  if (serviceStart >= 0) {
+    const nextOperation = source.indexOf('\n  const ', serviceStart + 1);
+    return source.slice(serviceStart, nextOperation < 0 ? undefined : nextOperation);
+  }
   const start = source.indexOf(`'${channel}'`);
-    assert.ok(start >= 0, `IPC 模块中找不到 handler: ${channel}`);
+  assert.ok(start >= 0, `IPC/service 中找不到 operation: ${channel}`);
   return source.slice(start);
 }
 
@@ -464,10 +469,9 @@ describe('S29 能打开就能写（grok §1-9/§1-10）', () => {
     join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc.ts'),
     'utf8'
   ));
-  const paramIpcSource = stripComments(readFileSync(
-    join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc', 'param.ts'),
-    'utf8'
-  ));
+  const paramIpcSource = stripComments(['paramService.ts', 'paramSessionService.ts'].map(name => readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'services', name), 'utf8'
+  )).join('\n'));
 
   it('bool 与 1bit 字段渲染为打勾（checkbox），不再用数字框', () => {
     // 判定唯一来源是共享 helper paramCheckboxField.ts（bool 整字段或 1bit 位域）。

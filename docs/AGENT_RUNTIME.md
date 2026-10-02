@@ -8,6 +8,8 @@ Desktop sessions now run their provider/control loop in a fixed `agentUtility` u
 
 The finite kernel lives in `@soulforge/agent` and has no dependency on core, Electron, renderer or the domain index. It holds a bounded transcript and current calls. Time, step, output, context, response, result, queue and configured cost limits terminate explicitly. Model termination remains separate from independent task evaluation.
 
+The remaining desktop composition is a separate structural limit: `ipc/agent.ts` still prepares tool/workspace context, approvals, RAG and compaction defaults around the shared assembly. The independent kernel and utility host are implemented; those facts do not establish that every desktop host is thin. Extracting that remaining composition is local engineering work and does not require a real provider call or change the current retrieval policy.
+
 ## Headless CLI
 
 Standalone CLI validation and public Windows/Linux CI use Node 22.22.0. Use that
@@ -55,6 +57,8 @@ Desktop and CLI now use the same finite production kernel. The former loop has b
 The bounded switch comparison ran four scenarios with both kernels, with identical deterministic transport, task, tools, sampling and neutral budgets. Both native mutations produced identical bytes under independent pinned SoulsFormatsNEXT readback. Read/no-op scenarios wrote nothing; a model falsely claiming success failed the independent goal. Inputs, sibling files and preserved native fields remained unchanged. The separate description-dedup experiment removed 24,248 serialized characters from 56 tool definitions; this is not a token or cost measurement.
 
 Configured automatic RAG keeps its previous cadence: retrieve the fixed external task query once per run, then inject that evidence once per context window, including after successful compaction. Context/evidence and compaction remain host ports. The finite policy uses resource bounds and neutral retries, while retired semantic/discovery/conclusion heuristics stay only in the pinned experiment baseline. Budget stops, model stops, committed transaction outcomes and independent task verdicts remain distinct.
+
+An empty initial Context Broker queue remains `insufficient_evidence` with `ok:false`; it now carries a warning instead of an execution error. This permits ordinary discovery without making unavailable evidence authoritative or claiming task success. Cancellation, timeout, identity conflicts and context-budget refusals retain their error diagnostics.
 
 No paid provider comparison was run. Real-model quality and cost remain unverified. The remaining owner-defined experiment needs a selected provider/model, task/input set, spending limit and accepted independently evaluated outcomes; that experiment does not gate the implemented shared default. The owned comparison covers one pinned EMEVD fixture and does not prove game-runtime behavior or the previously reported main-process PARAM/preflight OOM root cause.
 

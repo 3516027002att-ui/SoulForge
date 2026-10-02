@@ -310,6 +310,12 @@ and cleanup behavior are unchanged. The only production change parses those
 existing UTF8 bytes directly into `JsonNode`, removing the preceding full UTF16
 string decode.
 
+That experiment deliberately used the daemon's default 1 MiB negotiation. The
+desktop MSB read goes through Core's default 16 MiB budget; semantic indexing
+requests 32 MiB. This particular 2.53 MB MSB is inline on those normal routes.
+The oversized experiment is evidence for its measured artifact boundary, not
+evidence that normal desktop MSB loading takes that path.
+
 Two paired runs used the same helper, input and runtime in B/C then C/B order,
 with three warmups and twenty samples per case. Managed allocation through the
 actual owned output-pump flush fell from 19,142,012 to 14,077,908 bytes and from
@@ -334,3 +340,57 @@ implementation; all seven and the complete 49-case C# suite passed on the
 candidate. The sealed local receipt is
 `.local-validation/result-transport-utf8/receipt.json`; raw game results and
 validation binaries are excluded from source and release artifacts.
+
+## Normal-budget inline output allocation
+
+The next isolated Linux candidate borrows the stdout stream already opened by
+`Program`, serializes each output frame directly to UTF8, and queues those owned
+bytes with a cached length. The existing `RunAsync(TextReader, TextWriter, ...)`
+entry and the unique `DaemonState` constructor remain available; injected text
+writers retain string serialization. The separately named `RunStreamAsync`
+preserves the former BOMless writer's startup flush, body flush, LF flush,
+explicit frame flush and final flush, including their failure boundaries. It
+leaves the supplied stream open. Queue capacity still includes one LF byte while
+the exact negotiated frame gate excludes it; progress replacement, ordering,
+backpressure, cancellation and drain behavior retain their existing rules.
+
+Two paired runs used B/C then C/B order, the same restored DFLT Mod MSB, .NET
+10.0.0 from SDK 10.0.100, three warmups and twenty samples for MSB/tiny/Unicode
+cases. The actual production `WriteResultAsync` and output pump used the normal
+16 MiB frame budget and a common owned draining stream. Native decoding happened
+before the measurement. All complete MSB result bytes matched the original
+2,532,035-byte result with SHA256
+`fb5fb97cbdcbeaeef8b31e8329fa7c0bf9b7fb4a37f58f6cde54dfcc21485f1c`.
+
+Managed allocation through the final frame flush was 5,066,192 to 2,533,880 bytes
+in both pairs, a 49.98% reduction. MSB wall means were 27.934 to 30.350 ms
+(+8.65%) and 33.408 to 27.113 ms (-18.84%). Tiny and Unicode wall results were
+also mixed; their allocation fell about 26% and 31%. These short natural-GC,
+default-JIT observations establish allocation improvement, not a stable latency
+speedup. Return and flush scopes overlap and must not be added.
+
+With one frame blocked in flight and two still queued, retained queued payload
+content fell from 10,129,280 UTF16 character bytes to about 5,064,640 UTF8 bytes.
+The queue charged the same approximately 5,064,642 wire bytes including LF and
+returned to zero after drain. The one-byte variation in one capture came from
+timestamp fractional precision. These payload measurements exclude object and
+array headers, serializer/encoder pools, the in-flight frame and the sink's fixed
+buffer; they are not heap/RSS measurements. The owned sink models draining and
+blocking, not an OS pipe or the desktop consumer.
+
+Two-warmup/three-sample controls around 16 MiB retained the exact inline/artifact
+gate and complete result bytes. Fourteen new native checks cover byte identity,
+Unicode/nonfinite/null values, actual handshake/cancel/close frames, progress
+replacement, queue capacity and cancellation, all five flush boundaries,
+serialization/write failures, terminal order, closed admission and borrowed
+stream ownership. The initial missing-sink RED had nine failures and seven
+existing passes; the final complete C# suite passed 63/63 with zero skips.
+
+The compared baseline DLL is `4cae6295...`, candidate DLL `1994b73f...`, and owned
+helper `414f0180...`; exact hashes, input/runtime pins, raw rows and test logs are
+in `.local-validation/inline-stream/receipt.json`. The candidate native input
+fingerprint is
+`bfe17fb6cd138d94d020fafeba235cfa8548b509907ac44173c3dc265da481f7`
+(306 inputs). This is isolated compiled-source evidence, not a packaged-app,
+Windows, full MAP causal-DAG, first-frame or GPU result. Normal desktop wall time,
+consumer decoding and graphics performance remain unmeasured by this probe.

@@ -4,9 +4,11 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import ts from 'typescript';
 
-/** The actual PARAM handlers; only native transport/settled commit/Electron are seams.
- * Footer exposes the real cache reference solely inside this owned test bundle.
+/** The actual PARAM adapter/service; only native transport/settled commit/Electron are seams.
+ * Cache references are exposed solely inside this owned test bundle, at their
+ * actual factory scope. Production services have no test exports.
  */
 export async function createParamCacheFixture({ fileCount = 1, rows = 1, bytesPerRow = 4, container = false } = {}) {
   const runRoot = resolve(process.env.SF_PARAM_CACHE_RUN_ROOT ?? 'output/param-cache-fixtures');
@@ -39,13 +41,33 @@ export async function createParamCacheFixture({ fileCount = 1, rows = 1, bytesPe
   const handlerSource = process.env.SF_PARAM_CACHE_SOURCE_REF
     ? execFileSync('git', ['show', `${process.env.SF_PARAM_CACHE_SOURCE_REF}:${handlerPath}`], { encoding: 'utf8' })
     : await readFile(handlerPath, 'utf8');
+  const servicePath = 'apps/desktop/src/main/services/paramService.ts';
+  const serviceSource = handlerSource.includes('createParamService')
+    ? (process.env.SF_PARAM_CACHE_SOURCE_REF
+      ? execFileSync('git', ['show', `${process.env.SF_PARAM_CACHE_SOURCE_REF}:${servicePath}`], { encoding: 'utf8' })
+      : await readFile(servicePath, 'utf8'))
+    : null;
+  const captureCaches = `globalThis[Symbol.for(${keySource})].caches={paramAllCache,paramPageCache,sessionBindings,containerParamAllCache,containerParamSessionCache,paramEntryTableCache,unpackedParamCache};`;
+  let instrumentedService = serviceSource;
+  if (serviceSource !== null) {
+    const parsed = ts.createSourceFile(servicePath, serviceSource, ts.ScriptTarget.Latest, true);
+    const factory = parsed.statements.find(statement => ts.isFunctionDeclaration(statement)
+      && statement.name?.text === 'createParamService');
+    const returned = factory?.body?.statements.findLast(ts.isReturnStatement);
+    if (!returned) throw new Error('PARAM_CACHE_FIXTURE_SERVICE_RETURN_MISSING');
+    const offset = returned.getStart(parsed);
+    instrumentedService = serviceSource.slice(0, offset) + captureCaches + '\n' + serviceSource.slice(offset);
+  }
   state.sourceBinding = { sourceRef: process.env.SF_PARAM_CACHE_SOURCE_REF ?? null,
-    handlerSha256: createHash('sha256').update(handlerSource).digest('hex') };
+    handlerSha256: createHash('sha256').update(handlerSource).digest('hex'),
+    serviceSha256: serviceSource === null ? null : createHash('sha256').update(serviceSource).digest('hex') };
   await build({ entryPoints: [resolve('apps/desktop/src/main/ipc/param.ts')], outfile: output,
     bundle: true, platform: 'node', format: 'esm', external: ['node:*'],
-    footer: { js: `globalThis[Symbol.for(${keySource})].caches={paramAllCache,paramPageCache,sessionBindings,containerParamAllCache,containerParamSessionCache,paramEntryTableCache,unpackedParamCache};` },
+    footer: { js: serviceSource === null ? captureCaches : '' },
     plugins: [{ name: 'param-cache-seams', setup(builder) {
       builder.onLoad({ filter: /\/ipc\/param\.ts$/ }, () => ({ contents: handlerSource, loader: 'ts', resolveDir: resolve('apps/desktop/src/main/ipc') }));
+      if (instrumentedService !== null) builder.onLoad({ filter: /\/services\/paramService\.ts$/ }, () => ({ contents: instrumentedService,
+        loader: 'ts', resolveDir: resolve('apps/desktop/src/main/services') }));
       builder.onResolve({ filter: /^file:/ }, (args) => args.path === coreUrl ? { path: coreUrl, external: true } : undefined);
       builder.onResolve({ filter: /^@soulforge\/core$/ }, () => ({ path: 'fixture-core', namespace: 'fixture' }));
       builder.onResolve({ filter: /^@soulforge\/shared$/ }, () => ({ path: sharedUrl, external: true }));

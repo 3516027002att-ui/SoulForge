@@ -55,6 +55,14 @@ internal static class BridgeDaemonHost
             () => new BridgeCommandService().ProbeDispatchAsync(command),
             () => ReadArtifactCommandAsync(null, null, "dispatch-probe", CancellationToken.None));
 
+    public static async Task RunStreamAsync(TextReader input, Stream output, CancellationToken cancellationToken)
+    {
+        // Borrow Program's existing stdout. The adapter retains the former
+        // AutoFlush startup/final flushes without closing the supplied stream.
+        await using var writer = new BridgeUtf8StreamWriter(output);
+        await RunAsync(input, writer, cancellationToken).ConfigureAwait(false);
+    }
+
     public static async Task RunAsync(
         TextReader input,
         TextWriter output,
@@ -884,11 +892,11 @@ internal static class BridgeDaemonHost
                 result
             };
             var frame = CreateFrame("result", request.RequestId, request.WorkspaceSessionId, request.ResourceUri, payload);
-            var json = JsonSerializer.Serialize(frame, JsonOptions);
-            var serializedBytes = Encoding.UTF8.GetByteCount(json);
+            var item = SerializeFrame(frame, "result", request.RequestId);
+            var serializedBytes = item.ByteLength - 1;
             if (serializedBytes <= MaxFrameBytes)
             {
-                await WriteSerializedAsync(json, "result", request.RequestId);
+                await WriteSerializedAsync(item);
                 return;
             }
 
@@ -1018,11 +1026,11 @@ internal static class BridgeDaemonHost
             object payload)
         {
             var frame = CreateFrame(kind, requestId, workspaceSessionId, resourceUri, payload);
-            var json = JsonSerializer.Serialize(frame, JsonOptions);
-            var serializedBytes = Encoding.UTF8.GetByteCount(json);
+            var item = SerializeFrame(frame, kind, requestId);
+            var serializedBytes = item.ByteLength - 1;
             if (serializedBytes > MaxFrameBytes)
                 throw new BridgeOutboundFrameTooLargeException(kind, requestId, serializedBytes, MaxFrameBytes);
-            await WriteSerializedAsync(json, kind, requestId);
+            await WriteSerializedAsync(item);
         }
 
         private BridgeOutboundFrame CreateFrame(
@@ -1041,18 +1049,26 @@ internal static class BridgeDaemonHost
             Payload = payload
         };
 
-        private Task WriteSerializedAsync(string json, string kind, string? requestId) =>
-            _outputQueue.EnqueueAsync(
-                new BridgeOutputItem(json, kind == "progress", requestId),
-                _shutdown.Token);
+        private BridgeOutputItem SerializeFrame(BridgeOutboundFrame frame, string kind, string? requestId) =>
+            _output is BridgeUtf8StreamWriter
+                ? new BridgeOutputItem(JsonSerializer.SerializeToUtf8Bytes(frame, JsonOptions), kind == "progress", requestId)
+                : new BridgeOutputItem(JsonSerializer.Serialize(frame, JsonOptions), kind == "progress", requestId);
+
+        private Task WriteSerializedAsync(BridgeOutputItem item) =>
+            _outputQueue.EnqueueAsync(item, _shutdown.Token);
 
         private async Task PumpOutputAsync()
         {
             await foreach (var item in _outputQueue.ReadAllAsync(_shutdown.Token).ConfigureAwait(false))
             {
-                await _output.WriteAsync(item.Json.AsMemory()).ConfigureAwait(false);
-                await _output.WriteAsync("\n".AsMemory()).ConfigureAwait(false);
-                await _output.FlushAsync().ConfigureAwait(false);
+                if (_output is BridgeUtf8StreamWriter stream)
+                    await stream.WriteFrameAsync(item.Utf8!).ConfigureAwait(false);
+                else
+                {
+                    await _output.WriteAsync(item.Json.AsMemory()).ConfigureAwait(false);
+                    await _output.WriteAsync("\n".AsMemory()).ConfigureAwait(false);
+                    await _output.FlushAsync().ConfigureAwait(false);
+                }
             }
         }
 
@@ -1400,9 +1416,30 @@ internal sealed class BridgeRequestScheduler
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 }
 
-internal sealed record BridgeOutputItem(string Json, bool IsProgress, string? RequestId)
+internal sealed record BridgeOutputItem
 {
-    public int ByteLength => Encoding.UTF8.GetByteCount(Json) + 1;
+    public BridgeOutputItem(string json, bool isProgress, string? requestId)
+    {
+        Json = json;
+        IsProgress = isProgress;
+        RequestId = requestId;
+        ByteLength = Encoding.UTF8.GetByteCount(json) + 1;
+    }
+
+    public BridgeOutputItem(byte[] utf8, bool isProgress, string? requestId)
+    {
+        Utf8 = utf8;
+        IsProgress = isProgress;
+        RequestId = requestId;
+        ByteLength = utf8.Length + 1;
+    }
+
+    public string? Json { get; }
+    public byte[]? Utf8 { get; }
+    public bool IsProgress { get; }
+    public string? RequestId { get; }
+    // Frame admission excludes LF; the output queue includes its one byte.
+    public int ByteLength { get; }
 }
 
 internal sealed class BoundedOutputQueue

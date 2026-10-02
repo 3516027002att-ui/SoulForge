@@ -77,7 +77,9 @@ jobs:
           test "$(dotnet --version)" = "10.0.100"
       - name: Check Bridge command projections
         id: commands
-        run: npm run bridge:commands:check
+        run: |
+          npm run bridge:commands:check
+          npm run ipc:public:check
       - name: Typecheck shared/core/desktop
         id: typecheck
         run: npm run typecheck
@@ -106,13 +108,13 @@ jobs:
           npm test -w @soulforge/agent
           node --test scripts/agent-shared-entry.fixture.mjs scripts/agent-headless.fixture.mjs scripts/agent-utility.fixture.mjs scripts/agent-kernel-comparison.fixture.mjs scripts/real-agent-evaluator.fixture.mjs
           node --test scripts/agent-call-chain.fixture.mjs scripts/real-agent-harness.fixture.mjs
-          node --test packages/core/dist/cli/localCliSession.storage.test.js packages/core/dist/storage/localApplicationData.test.js packages/core/dist/ai/tools/search_resources.test.js
+          node --test packages/core/dist/cli/localCliSession.storage.test.js packages/core/dist/storage/localApplicationData.test.js packages/core/dist/ai/tools/search_resources.test.js packages/core/dist/model-services/contextBroker.test.js
           node packages/core/dist/testing/runEmevdAgentToolSmoke.js
           node packages/core/dist/testing/runToolResultBudgetSmoke.js
           node --test scripts/param-fixture-module-resolution.fixture.mjs scripts/param-source-binding.fixture.mjs scripts/container-child-inverse-source.fixture.mjs
           # Only this source-bound comparison needs its declared public control; no full history gate.
           git fetch --no-tags --depth=1 origin c4a8b158f935c35624f132850b068a8e02921f68
-          node --test scripts/agent-provider-experiment.fixture.mjs
+          node --test scripts/agent-provider-experiment.fixture.mjs scripts/agent-owned-comparison-control.fixture.mjs
       - name: Run native runtime and synthetic Bridge fixtures
         id: native
         env:
@@ -133,7 +135,7 @@ jobs:
         run: |
           node --input-type=module -e 'import assert from "node:assert/strict"; import { statSync } from "node:fs"; for (const file of ["apps/desktop/out/main/index.js", "apps/desktop/out/preload/index.cjs", "apps/desktop/out/renderer/index.html"]) { const info = statSync(file); assert.ok(info.isFile() && info.size > 0, "Theme runtime artifact missing: " + file); }'
           npm run test:renderer-unit
-          node --test scripts/editor-loaded-comparison.fixture.mjs scripts/editor-diff-budget.fixture.mjs scripts/editor-save-observation.fixture.mjs scripts/script-native-refresh.fixture.mjs scripts/param-scalar-validation.fixture.mjs scripts/bridge-pool-routing.fixture.mjs scripts/scene/map-read-observation.test.mjs scripts/scene/map-request-timeline.test.mjs scripts/scene/map-post-return-observation.test.mjs
+          node --test scripts/editor-loaded-comparison.fixture.mjs scripts/editor-diff-budget.fixture.mjs scripts/editor-save-observation.fixture.mjs scripts/script-native-refresh.fixture.mjs scripts/param-scalar-validation.fixture.mjs scripts/param-domain-service.fixture.mjs scripts/public-ipc-contract.fixture.mjs scripts/bridge-pool-routing.fixture.mjs scripts/scene/map-read-observation.test.mjs scripts/scene/map-request-timeline.test.mjs scripts/scene/map-post-return-observation.test.mjs
           node --test scripts/spectral-themes.test.mjs scripts/spectral-field-runtime.test.mjs scripts/ci-public-report.test.mjs
           node node_modules/@playwright/test/cli.js test -c apps/desktop/e2e/playwright/playwright.config.mjs native-frame-theme.spec.mjs editor-loaded-comparison.spec.mjs
       - name: Build unsigned desktop package directory

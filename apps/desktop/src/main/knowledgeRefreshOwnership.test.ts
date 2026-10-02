@@ -168,7 +168,7 @@ describe('knowledge refresh ownership', () => {
   });
 
   it('keeps caller ownership explicit and leaves assets on the default port owner', () => {
-    const param = readSource('apps', 'desktop', 'src', 'main', 'ipc', 'param.ts');
+    const param = readSource('apps', 'desktop', 'src', 'main', 'services', 'paramService.ts');
     const event = readSource('apps', 'desktop', 'src', 'main', 'ipc', 'event.ts');
     const text = readSource('apps', 'desktop', 'src', 'main', 'ipc', 'text.ts');
     const assets = readSource('apps', 'desktop', 'src', 'main', 'ipc', 'assets.ts');

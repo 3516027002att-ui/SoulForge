@@ -1,3 +1,5 @@
+import type { TextContainerNode, TextCatalogResponse } from '../../ipc/publicTypes.js';
+export type { TextCatalogResponse } from '../../ipc/publicTypes.js';
 import { basename, dirname } from 'node:path';
 import type { IpcMainInvokeEvent } from 'electron';
 import {
@@ -27,7 +29,6 @@ import {
   runCallerOwnedPostCommit,
   type KnowledgeRefreshOwner
 } from '../knowledgeRefreshOwnership.js';
-
 
 const readLifetime = new WorkspaceReadLifetime();
 const prepareBridgeRoots = readLifetime.guardCall(nativePrepareBridgeRoots);
@@ -156,36 +157,6 @@ function deriveTextContainerHint(relativePath: string): { languageId: string; co
     languageId: segments.length >= 2 ? normalize(segments[segments.length - 2] ?? '') : '',
     containerKind: normalize(containerKind)
   };
-}
-
-interface TextContainerNode {
-  containerId: string;
-  containerKind: string;
-  sourceUri: string;
-  relativePath: string;
-  parseStatus: 'confirmed' | 'failed';
-  tableCount: number;
-  tables: Array<{
-    tableId: string;
-    entryName: string;
-    entryCount: number;
-    /** S30：非空文本条数；Bridge 未上报时缺省（renderer 回落「N 条」）。 */
-    filledCount?: number;
-    sourceUri: string;
-    entryIndex: number;
-  }>;
-  diagnostics: Diagnostic[];
-}
-
-export interface TextCatalogResponse {
-  ok: boolean;
-  libraryId: 'game-text';
-  title: string;
-  languages: Array<{
-    languageId: string;
-    containers: TextContainerNode[];
-  }>;
-  diagnostics: Diagnostic[];
 }
 
 export interface TextIpcDeps {

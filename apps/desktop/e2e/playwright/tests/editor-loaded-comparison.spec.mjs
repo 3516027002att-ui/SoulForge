@@ -11,6 +11,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { prepareEditorComparisonWorkspace, SCRIPT_TEXT, OTHER_SCRIPT_TEXT, LONG_SCRIPT_TEXT } from '../editor-comparison-inputs.mjs';
+import { createEditorSaveObservationTail } from '../editor-save-observation.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const productionMain = path.resolve(here, '../editor-comparison-main.mjs');
@@ -32,6 +33,8 @@ async function launchOwnedProduction() {
       `--user-data-dir=${path.join(testWorkspace().root, 'profile')}`],
     env: { ...process.env, NODE_ENV: 'production', SF_E2E_OVERLAY_ROOT: inputs.overlay, SF_E2E_BASE_ROOT: inputs.base }
   });
+  const observationTail = createEditorSaveObservationTail();
+  app.process().stdout?.on('data', observationTail.consume);
   await testWorkspace().registerApp(app);
   expect(app.process().spawnargs).not.toContain('--no-sandbox');
   const page = await app.firstWindow();
@@ -60,10 +63,10 @@ async function launchOwnedProduction() {
   const param = files.find(file => file.relativePath === inputs.paramPath);
   expect(script, 'Constructed script must be in the real workspace index').toBeTruthy();
   expect(param, 'Constructed PARAM must be in the real workspace index').toBeTruthy();
-  return { app, page, inputs, inputHashes, scriptUri: script.sourceUri, paramUri: param.sourceUri, pageErrors };
+  return { app, page, inputs, inputHashes, scriptUri: script.sourceUri, paramUri: param.sourceUri, pageErrors, observationTail };
 }
 
-async function reportOwnedFailure(app, page, inputs, inputHashes, phase) {
+async function reportOwnedFailure(app, page, inputs, inputHashes, phase, observationTail) {
   // Diagnostic observation has its own small deadline; it never retries a save
   // or changes the original assertion/error, IPC contract or native budgets.
   const bounded = async (operation, fallback) => {
@@ -72,10 +75,11 @@ async function reportOwnedFailure(app, page, inputs, inputHashes, phase) {
     catch { return fallback; }
     finally { clearTimeout(timer); }
   };
-  const observation = await bounded(app.evaluate(() => {
+  const liveObservation = await bounded(app.evaluate(() => {
     const snapshot = Reflect.get(globalThis, '__editorSaveObservation');
     return typeof snapshot === 'function' ? snapshot() : { state: 'unavailable' };
   }), { state: 'unavailable' });
+  const observation = liveObservation.state === 'unavailable' ? observationTail.snapshot() : liveObservation;
   const dom = await bounded(page.evaluate(() => ({
     // Closed status vocabulary only; an error toast/body can contain paths.
     script: document.querySelector('[data-testid="scp-status"]')?.textContent === '正在应用…' ? 'applying'
@@ -122,7 +126,7 @@ async function readParamRow(page, sourceUri) {
 for (const mode of ['opal', 'obsidian']) {
   test(`loaded Script/PARAM comparison uses real production save/reload in ${mode}`, async () => {
     test.setTimeout(180_000);
-    const { app, page, inputs, inputHashes, scriptUri, paramUri, pageErrors } = await launchOwnedProduction();
+    const { app, page, inputs, inputHashes, scriptUri, paramUri, pageErrors, observationTail } = await launchOwnedProduction();
     let phase = 'script-edit';
     try {
       await page.getByRole('button', { name: '设置', exact: true }).click();
@@ -268,7 +272,7 @@ for (const mode of ['opal', 'obsidian']) {
       await expect(fieldComparison).toHaveJSProperty('open', false);
       expect(pageErrors).toEqual([]);
     } catch (error) {
-      await reportOwnedFailure(app, page, inputs, inputHashes, phase).catch(() => undefined);
+      await reportOwnedFailure(app, page, inputs, inputHashes, phase, observationTail).catch(() => undefined);
       throw error;
     } finally { await app.close(); }
   });

@@ -1,5 +1,18 @@
+import type {
+  RendererIndexedFile,
+  RendererBridgeResult,
+  RendererResourcePreview,
+  RendererSaveResult,
+  RendererPatchHistoryEntry
+} from '../ipc/publicTypes.js';
+export type {
+  RendererIndexedFile,
+  RendererBridgeResult,
+  RendererResourcePreview,
+  RendererSaveResult,
+  RendererPatchHistoryEntry
+} from '../ipc/publicTypes.js';
 import {
-  type BridgeResult,
   type Diagnostic,
   type EditorCatalogSummary,
   type EditorDocumentResult,
@@ -9,40 +22,6 @@ import {
   type SaveTextResourceResult
 } from '@soulforge/shared';
 import { maskPathFragments } from '@soulforge/shared';
-
-export type RendererIndexedFile = Omit<
-  IndexedFile,
-  'id' | 'workspaceId' | 'sourcePath' | 'absolutePath'
->;
-
-export type RendererBridgeResult<T = unknown> = Omit<BridgeResult<T>, 'sourcePath'>;
-
-export type RendererResourcePreview = Omit<
-  ResourcePreview,
-  'file' | 'nativeInspection' | 'diagnostics'
-> & {
-  file: RendererIndexedFile;
-  nativeInspection?: RendererBridgeResult<unknown>;
-  diagnostics: Diagnostic[];
-};
-
-export type RendererSaveResult = Omit<
-  SaveTextResourceResult,
-  'backupRoot' | 'changedFiles' | 'diagnostics'
-> & {
-  changedFiles: string[];
-  diagnostics: Diagnostic[];
-  /** 成功 native 写回后的新 revision，供 renderer 失效旧文档状态。 */
-  sourceHash?: string;
-  sourceRevision?: number;
-};
-
-export type RendererPatchHistoryEntry = Omit<
-  PatchHistoryEntry,
-  'workspaceId' | 'changedPaths'
-> & {
-  changedPaths: string[];
-};
 
 const SOURCE_TEXT_KEYS = new Set([
   'dslTemplate',

@@ -356,6 +356,10 @@
     "test:bridge-csharp": "node scripts/run-bridge-csharp-tests.mjs",
     "bridge:commands:generate": "node scripts/generate-bridge-commands.mjs",
     "bridge:commands:check": "node scripts/generate-bridge-commands.mjs --check",
+    "ipc:public:generate": "node scripts/generate-public-ipc.mjs",
+    "ipc:public:check": "node scripts/generate-public-ipc.mjs --check",
+    "test:public-ipc-contract": "node --test scripts/public-ipc-contract.fixture.mjs",
+    "test:param-domain-service": "node --test scripts/param-domain-service.fixture.mjs",
     "test:scene-contracts": "node --test scripts/scene/*.test.mjs && node scripts/run-scene-unit-tests.mjs"
   },
   "devDependencies": {
