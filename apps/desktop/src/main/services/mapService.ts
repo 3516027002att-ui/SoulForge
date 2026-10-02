@@ -357,6 +357,7 @@ async function getVerifiedReadRoots(
 }
 const readMsbDocument = async (sourceUri: string) => {
     const readSession = deps.activeSession;
+    const readWorkspaceSessionId = MAP_NATIVE_TIMING_ENABLED ? deps.activeWorkspaceSessionId : null;
     const readGeneration = deps.activeWorkspaceSessionGeneration;
     const readIndex = deps.activeIndex;
     const oodleRuntimeRoot = readSession?.layers.baseRoot;
@@ -401,6 +402,10 @@ const readMsbDocument = async (sourceUri: string) => {
     const result = await readMsbDocumentViaBridge({
       sourcePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
+      ...(MAP_NATIVE_TIMING_ENABLED ? {
+        diagnosticTimings: true,
+        ...(readWorkspaceSessionId ? { workspaceSessionId: readWorkspaceSessionId } : {})
+      } : {}),
       // 问题 4-A / 6-B：不再传 maxParts/maxRegions/maxModels/maxEvents —— 走
       // msbBridgeRead 默认完整表（调用方不传就是无窗口），索引与完整图都不截断
       // （缺口4：显示上限渗进索引=假装完整）。

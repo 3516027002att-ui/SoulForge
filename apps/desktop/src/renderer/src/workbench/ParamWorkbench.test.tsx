@@ -460,10 +460,12 @@ describe('S29 能打开就能写（grok §1-9/§1-10）', () => {
     join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'workbench', 'ParamWorkbench.tsx'),
     'utf8'
   ));
-  const appSource = stripComments(readFileSync(
-    join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'App.tsx'),
-    'utf8'
-  ));
+  const appShellSource = readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'App.tsx'), 'utf8'
+  );
+  const appSource = stripComments(/from '\.\/app\/useParamMutationController\.js'/.test(appShellSource)
+    ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'useParamMutationController.ts'), 'utf8')
+    : appShellSource);
   const ipcSource = stripComments(readFileSync(
     join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc.ts'),
     'utf8'
@@ -491,6 +493,11 @@ describe('S29 能打开就能写（grok §1-9/§1-10）', () => {
 
   it('renderer 不再拿「缺少容器或条目哈希」拒绝写入', () => {
     assert.ok(!appSource.includes('缺少容器或条目哈希'), '哈希拒写文案已删除');
+    if (/from '\.\/app\/useParamMutationController\.js'/.test(appShellSource)) {
+      assert.match(appShellSource, /onApplyFieldMutation=\{applyContainerParamFieldMutation\}/);
+      assert.match(appShellSource, /onApplyRowNameMutation=\{applyContainerParamRowNameMutation\}/);
+      assert.match(appShellSource, /onApplyRowMutation=\{applyContainerParamRowMutation\}/);
+    }
   });
 
   it('main 侧缺哈希写时现算（sha256FileNow 兜底，不挡写入）', () => {

@@ -1,73 +1,16 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  useSyncExternalStore,
-  type CSSProperties,
-  type KeyboardEvent as ReactKeyboardEvent,
-  type PointerEvent as ReactPointerEvent,
-  type ReactElement
-} from 'react';
-import {
-  classifyWorkspaceOpen,
-  EDITOR_DOMAIN_IDS,
-  PARAM_ROW_PAYLOAD_BATCH_MAX,
-  mergeCiteHits,
-  paramPhysicalRowKey
-} from '@soulforge/shared';
-import type {
-  AgentAttachmentReference,
-  AgentResourceReference,
-  CiteHit,
-  Diagnostic,
-  ParamDefDocument,
-  ParamPhysicalRowIdentity,
-  ResourceKind,
-  RagLocalModelStatus,
-  UpdatePublicState
-} from '@soulforge/shared';
-import type {
-  AiAgentEventEnvelope,
-  AnalyzeWorkspaceSummary,
-  DirectorySelection,
-  RendererWorkspaceScanResult,
-  RendererWorkspaceSession,
-  TextCatalogResponse
-} from '../../main/ipc.js';
-import type {
-  RendererIndexedFile,
-  RendererPatchHistoryEntry
-} from '../../main/rendererDto.js';
-import type {
-  AiPermissionMode,
-  AiProvider,
-  AiSidebarDraft,
-  ModelThinkingLevel,
-  ToolDescriptor,
-  ToolResult
-} from '@soulforge/core';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react';
+import { classifyWorkspaceOpen, PARAM_ROW_PAYLOAD_BATCH_MAX, paramPhysicalRowKey } from '@soulforge/shared';
+import type { ParamDefDocument, ParamPhysicalRowIdentity } from '@soulforge/shared';
+import type { RendererWorkspaceScanResult } from '../../main/ipc.js';
+import type { RendererIndexedFile } from '../../main/rendererDto.js';
 import { ParamWorkbench } from './workbench/ParamWorkbench.js';
 import { GparamWorkbench, type GparamBankView } from './workbench/GparamWorkbench.js';
 import { selectEditor } from './workbench/selectEditor.js';
-import {
-  shouldLoadFmg,
-  shouldLoadParam
-} from './workbench/documentLoadGates.js';
 
 import { MsbScenePanel } from './editors/MsbScenePanel.js';
 import { EventSourceWorkbenchPanel } from './editors/EventSourceWorkbenchPanel.js';
 import { FmgWorkbenchPanel } from './editors/FmgWorkbenchPanel.js';
 import { ParamTablePanel } from './editors/ParamTablePanel.js';
-import {
-  findCatalogContainer,
-  resolveFmgJump,
-  resolveParamJump,
-  type ResourceJumpRequest,
-  type ResourceJumpResult,
-  type TextContainerRef
-} from './emevd/eventSourceNavigate.js';
 import { WorkbenchOpsPanel } from './editors/WorkbenchOpsPanel.js';
 import { ParamDefPanel } from './editors/ParamDefPanel.js';
 import { TaeWorkbenchPanel } from './editors/TaeWorkbenchPanel.js';
@@ -78,91 +21,46 @@ import { MaterialWorkbenchPanel, type MaterialFileView } from './editors/Materia
 import { VfxWorkbenchPanel, type VfxFileView } from './editors/VfxWorkbenchPanel.js';
 import { ScriptContainerPanel } from './editors/ScriptContainerPanel.js';
 import { Bnd4WorkbenchPanel } from './editors/Bnd4WorkbenchPanel.js';
-import {
-  ChangeControlStore,
-  type CandidateChange,
-  type ChangeDiagnostic
-} from './staging/changeControl.js';
 import { ChangeQueuePanel } from './staging/ChangeQueuePanel.js';
 import {
   describeBridgeAbsence,
   getRendererRuntime
 } from './runtime/rendererRuntime.js';
-import type { ResourceMode } from './navigation/resourceFamilies.js';
-import type { DomainSummary, EditorDomainId } from '@soulforge/shared';
-import { buildDomainSummaries, domainLabel } from './navigation/domainNavigation.js';
+import { domainLabel } from './navigation/domainNavigation.js';
 import { DomainNavigationBar } from './navigation/DomainNavigationBar.js';
 import { DomainLibraryList } from './navigation/DomainLibraryList.js';
-import { orderUnseenAgentEvents, BoundedAgentEventQueue, combineAgentReplayWindow } from './agent/agentEventReplay.js';
-import {
-  behaviorLibraryGroups,
-  filesForDomain,
-  libraryDisplayName,
-  paramLibraryGroups,
-  pickPreferredAnimation,
-  pickPreferredParamContainer
-} from './navigation/domainLibraries.js';
+import { libraryDisplayName } from './navigation/domainLibraries.js';
 import { AmbientField } from './theme/AmbientField.js';
-import { ThemeSettings } from './theme/ThemeSettings.js';
 import { useSpectralTheme } from './theme/useSpectralTheme.js';
 import { shouldShowEditorWelcome } from './theme/editorWelcome.js';
+import { useChangeOperationsController, type ChangeOperationsController, type OperationHistoryRefreshOutcome } from './app/useChangeOperationsController.js';
+import { useNavigationController } from './app/useNavigationController.js';
+import { useAgentUiController, AGENT_MIN_WIDTH, AGENT_MAX_WIDTH, AGENT_DEFAULT_WIDTH } from './app/useAgentUiController.js';
 import { useResourceDocumentController } from './app/useResourceDocumentController.js';
 import { useWorkspaceController } from './app/useWorkspaceController.js';
 import { useTextDocumentController } from './app/useTextDocumentController.js';
 import { useMapDocumentController } from './app/useMapDocumentController.js';
 import { useEventDocumentController } from './app/useEventDocumentController.js';
+import { useParamMutationController } from './app/useParamMutationController.js';
 import { useParamDocumentController } from './app/useParamDocumentController.js';
+import { SettingsPanelView } from './app/SettingsPanelView.js';
 import { useRuntimeSettingsController } from './app/useRuntimeSettingsController.js';
-import { Me3RuntimePanel } from './runtime/Me3RuntimePanel.js';
 import { AgentSidebar } from './agent/AgentSidebar.js';
-import {
-  toAgentAttachmentReferences,
-  type AgentAttachmentChip
-} from './agent/agentAttachments.js';
 import { CiteSelectScrim } from './agent/CiteSelectScrim.js';
 import { clampAgentDockWidth } from './agent/AgentDockResizer.js';
 import { resolveKeybinding } from './keybindings/applyKeybinding.js';
-import type {
-  AgentSessionDetail,
-  AgentSessionRow,
-  ModelServiceChoice
-} from './agent/AgentTaskPanel.js';
-import {
-  INITIAL_AGENT_TASK_STATE,
-  canAutoResumeAgentTask,
-  describeRunBlocker,
-  isAgentTaskActive,
-  markAgentTaskCancelling,
-  reduceAgentTaskEvent,
-  startAgentTask,
-  type AgentApprovalUserDecision,
-  type AgentTaskState
-} from './agent/agentTaskState.js';
+import { describeRunBlocker, isAgentTaskActive } from './agent/agentTaskState.js';
 import { MsgTableEditor } from './components/MsgTableEditor.js';
 import { PanelErrorBoundary } from './components/PanelErrorBoundary.js';
 import { StartWorkspacePanel } from './workbench/StartWorkspacePanel.js';
-import {
-  filterFilesForMode,
-  formatFilesCount,
-  operationStatusLabel,
-  shortenPath
-} from './format/uiText.js';
+import { formatFilesCount, operationStatusLabel, shortenPath } from './format/uiText.js';
 import { resetAllDocuments, type DocumentResetActions } from './staging/documentReset.js';
 import {
   FOCUSABLE_SELECTOR,
   isTrappableElement,
   nextTrappedFocusIndex
 } from './a11y/focusTrap.js';
-import {
-  filterCommandPaletteResources,
-  matchesCommandSearch,
-  normalizeCommandSearchText
-} from './navigation/commandPaletteSearch.js';
-
-type SidebarView = 'explorer' | 'search' | 'staging' | 'audit' | 'settings';
-
-/** 中央内容：资源编辑 / 任务与历史；设置位于左侧面板，不再占用中央区。 */
-type CenterView = 'project' | 'resource' | 'operations' | 'settings';
+import { matchesCommandSearch } from './navigation/commandPaletteSearch.js';
 
 /** P0 安全收口：权限模式由主进程锁定，renderer 不得自行切换。 */
 const AI_PERMISSION_LOCK_REASON = '权限由应用安全设置控制。';
@@ -197,67 +95,6 @@ function SidebarCloseButton({ onClose }: { onClose: () => void }): ReactElement 
   );
 }
 
-function updateStateLabel(state: UpdatePublicState): string {
-  switch (state.status) {
-    case 'idle': return '尚未检查';
-    case 'checking': return '检查中…';
-    case 'up-to-date': return '已是最新版本';
-    case 'available': return `发现 ${state.info.version}`;
-    case 'downloading': return `下载中 ${state.progress.percent}%`;
-    case 'pending-install': return '已下载，等待安装';
-    case 'installing': return '正在启动安装器…';
-    case 'installed': return '已启动安装器';
-    case 'cancelled': return '已取消';
-    case 'blocked': return '暂缓安装';
-    case 'error': return '更新失败';
-  }
-}
-
-function ragLocalModelStateLabel(state: RagLocalModelStatus['state']): string {
-  switch (state) {
-    case 'local-ready': return '本地模型已就绪';
-    case 'model-id-mismatch': return '模型 ID 不匹配';
-    case 'revision-mismatch': return '版本不匹配';
-    case 'local-files-missing': return '本地文件缺失或损坏';
-    case 'unavailable': return '未安装本地模型';
-  }
-}
-
-function ragLocalModelSourceLabel(source: RagLocalModelStatus['source']): string {
-  switch (source) {
-    case 'explicit': return '显式本地目录';
-    case 'managed': return 'SoulForge 受管目录';
-    case 'embedding-cache': return '已有 embedding 缓存';
-    case 'huggingface-cache': return 'Hugging Face 本地缓存';
-    default: return '未发现本地来源';
-  }
-}
-
-const AGENT_MIN_WIDTH = 96; // S8:下限收到约一条工具栏宽,不要 340
-const AGENT_MAX_WIDTH = 620;
-const AGENT_DEFAULT_WIDTH = 440;
-
-function agentUiStorageKey(workspaceSessionId: string | undefined, field: 'open' | 'width'): string {
-  // workspaceSessionId 是 main 发出的 opaque UI key；不把绝对路径写入 localStorage。
-  const uiKey = workspaceSessionId ?? 'preview';
-  return `soulforge.ui.agentDock.v1.${uiKey}.${field}`;
-}
-
-/**
- * 6-C：外壳（shell）工作域的持久化 key。
- *
- * 与 Agent dock 共用同一个 opaque workspaceSessionId 前缀；**不把绝对路径写入
- * localStorage**（renderer 硬约束）。sourceUri 是索引里的 opaque URI，可以存；
- * 真实游戏目录 / 窗口坐标一律不碰。
- */
-function shellUiStorageKey(
-  workspaceSessionId: string | undefined,
-  field: 'domain' | 'sourceUri' | 'sidebarCollapsed'
-): string {
-  const uiKey = workspaceSessionId ?? 'preview';
-  return `soulforge.ui.shell.v1.${uiKey}.${field}`;
-}
-
 /**
  * 空 paramdef：origin 为 fixture 且无字段，definitionCanCommit 永不放行写入。
  *
@@ -279,66 +116,18 @@ export function App(): ReactElement {
   const runtime = getRendererRuntime();
   const bridge = runtime.bridge;
   const isBrowserPreview = runtime.kind === 'browser-preview';
-  const [operationHistory, setOperationHistory] = useState<RendererPatchHistoryEntry[]>([]);
-  const [rollbackInFlight, setRollbackInFlight] = useState<string | null>(null);
-  const rollbackInFlightRef = useRef<string | null>(null);
-  const operationHistoryRefreshRef = useRef(Promise.resolve());
-  const operationHistoryRequestRef = useRef(0);
-  const [query, setQuery] = useState('');
-  const [eventUri, setEventUri] = useState('');
-  const [toolOutput, setToolOutput] = useState<ToolResult | null>(null);
-  const [activeDomain, setActiveDomain] = useState<EditorDomainId>('project');
-  // §16 #4：资源族过滤条已从 production shell 断开，物理浏览只留 Files。
-  // resourceMode 冻结为常量 'all' —— 唯一写它的 onSelect（资源条）已移除。
-  const resourceMode: ResourceMode = 'all';
-  const [centerView, setCenterView] = useState<CenterView>('project');
-  const [bnd4Forced, setBnd4Forced] = useState(false);
-  const [sidebarView, setSidebarView] = useState<SidebarView>('explorer');
-  const [agentOpen, setAgentOpen] = useState(true);
-  const [agentWidth, setAgentWidth] = useState(440);
-  const [agentExpanded, setAgentExpanded] = useState(false);
-  const [agentInteractionMode, setAgentInteractionMode] = useState<'ask' | 'plan' | 'edit' | 'bypass'>(() => {
-    try {
-      const saved = window.localStorage.getItem('soulforge:agentInteractionMode');
-      if (saved === 'ask' || saved === 'plan' || saved === 'edit' || saved === 'bypass') return saved;
-    } catch {}
-    return 'ask';
-  });
-  // AGENT-60D 提交期消费点：AgentSidebar 草稿里 §12.11 的 opaque 资源引用冒泡到
-  // App，runAgentTask 时随 runAiAgent 提交（main 按 agentReferenceRegistry 校验）。
-  const [agentResources, setAgentResources] = useState<readonly AgentResourceReference[]>([]);
-  const [agentAttachments, setAgentAttachments] = useState<readonly AgentAttachmentReference[]>([]);
-  const handleAgentAttachmentsChange = useCallback((chips: readonly AgentAttachmentChip[]) => {
-    const next = toAgentAttachmentReferences(chips);
-    setAgentAttachments((current) => {
-      if (current.length !== next.length) return next;
-      return current.every((item, index) => {
-        const candidate = next[index];
-        return candidate !== undefined
-          && item.token === candidate.token
-          && item.mediaType === candidate.mediaType
-          && item.byteLength === candidate.byteLength
-          && item.expiresAt === candidate.expiresAt;
-      }) ? current : next;
-    });
-  }, []);
-  /**
-   * S10 引用框选：citeSelecting = 中央编辑区暗幕开/关（「引用」钮与暗幕共享这一
-   * 状态）；pendingCiteHits = 暗幕结算出的命中，交 AgentSidebar 经
-   * agent.citation.create 换成 main 签发的 opaque 引用（消费后清空）。
-   */
-  const [citeSelecting, setCiteSelecting] = useState(false);
-  const [pendingCiteHits, setPendingCiteHits] = useState<readonly CiteHit[] | null>(null);
   // S12 卸掉状态栏后 status 无显示出口。setStatus 调用点仍保留（流程记录），
   // S15 失败句机制（编辑区 code + 人话 + 下一步）接手时会系统性清理。
   const [, setStatus] = useState('就绪');
+  const changeCommandsRef = useRef<Pick<ChangeOperationsController, 'refreshOperationHistory'> | null>(null);
+
   const { workspace, sessionMeta, baseRootChoice, analysis, tools, files, allFiles, openWorkspace, chooseBaseDirectory, clearBaseDirectory, search: searchWorkspaceResources } =
     useWorkspaceController({
       bridge, setStatus, pushToast, announceDesktopOnly, refreshOperationHistory,
       onWorkspaceInstalled: installWorkspaceViews,
       onWorkspaceRemounted: resetWorkspaceResourceViews,
       onAnalysisLoaded: next => setEventUri(next?.events?.[0]?.uri ?? ''),
-      onSearchActivated: () => { setActiveDomain('files'); setCenterView('resource'); }
+      onSearchActivated: () => activateSearchResults()
     });
 
   /**
@@ -364,6 +153,16 @@ export function App(): ReactElement {
     removeMsgRow, saveCurrentText, applyTextResourceAndReload, applyFlverMaterialSlotSetAndReload } =
     useResourceDocumentController({ bridge, setStatus, pushToast, refreshOperationHistory, describeBridgeAbsence,
       onSelectionActivated: activateResourceSelection });
+  const { agentOpen, setAgentOpen, agentWidth, setAgentWidth, agentExpanded, setAgentExpanded, agentInteractionMode,
+    changeAgentInteractionMode, setAgentResources, handleAgentAttachmentsChange, citeSelecting, setCiteSelecting,
+    pendingCiteHits, setPendingCiteHits, handleCiteSettle, aiProvider, setAiProvider, aiThinking, setAiThinking, aiMode,
+    aiPrompt, setAiPrompt, aiDraft, aiBusy, agentGoal, agentIdleNotice, agentTask, agentServices, agentServiceId,
+    setAgentServiceId, agentSessions, agentSessionsError, agentSessionDetail, respondingApprovalCallId, approvalError,
+    agentTools, toolOutput, eventUri, setEventUri, sendAgentPrompt, startNewAgentTask, runAgentTask, cancelAgentTask,
+    respondAgentApproval, refreshAgentSessions, loadAgentSession, runToolSearch, explainEvent,
+    resetAgentWorkspaceState, resetAgentSelectionState } =
+    useAgentUiController({ bridge, workspace, selectedFile, lastOpenFailure, setStatus, pushToast, announceDesktopOnly, describeBridgeAbsence });
+
 
   const { eventPendingTab, eventOpening, eventSourcePreview, resetEventDocument, submitEventDsl } =
     useEventDocumentController({
@@ -385,65 +184,49 @@ export function App(): ReactElement {
     paramLive, paramRowPayloads, paramIndexLoading, paramIndexDiagnostic,
     paramFieldDefs, paramFieldEnums, paramFieldDefsOrigin, paramFieldDefsDiagnostic,
     paramRowDataSize, paramRevealRowId, setParamRevealRowId, readParamRowsForPanel,
-    reloadParamRowsFromSource, applyParamFieldMutationFromPanel, paramFieldDefinition, resetParamDocument,
+    reloadParamRowsFromSource, applyParamFieldMutationFromPanel, paramFieldDefinition, resetParamDocument, ownsParamDocument,
   } = useParamDocumentController({
     bridge, selectedFile, setStatus, pushToast, refreshOperationHistory, describeBridgeAbsence
   });
 
-  const { updateState, updateActionBusy, ragModelStatus, runUpdateCommand, changeUpdateChannel, currentUpdateAction } =
-    useRuntimeSettingsController({ bridge, setStatus, pushToast, announceDesktopOnly });
-
-  const [aiProvider, setAiProvider] = useState<AiProvider>('mock');
-  // 2-A：思考档用官方 effort 值（默认 medium；旧档 normal 已迁移，写路径只写官方值）。
-  const [aiThinking, setAiThinking] = useState<ModelThinkingLevel>(() => {
-    try {
-      if (typeof window === 'undefined') return 'medium';
-      const saved = window.localStorage.getItem('soulforge.ui.aiThinking');
-      if (saved === 'off' || saved === 'none' || saved === 'minimal' || saved === 'low' || saved === 'medium' || saved === 'high' || saved === 'xhigh' || saved === 'max') return saved as ModelThinkingLevel;
-    } catch {}
-    return 'medium';
-  });
-  const [aiMode] = useState<AiPermissionMode>('plan');
-  const [aiPrompt, setAiPrompt] = useState('');
-  const [aiDraft, setAiDraft] = useState<AiSidebarDraft | null>(null);
-  // T6：无模型服务时的对话区说明（不卡输入框）。发送成功后 / 新任务 / 换工作区时清除。
-  const [agentIdleNotice, setAgentIdleNotice] = useState<string | null>(null);
-  const [aiBusy, setAiBusy] = useState(false);
-  const [agentGoal, setAgentGoal] = useState<string | null>(null);
-  /* ── AI agent 任务（REL-G 的 renderer 入口）───────────────────────────────
-     任务状态全部由 agentTaskState 的纯函数折叠，本组件只持有它的当前值——
-     折叠规则放在组件里就只能靠真实 Electron 才能测，而那一层抓不到规则本身的错。 */
-  const [agentTask, setAgentTask] = useState<AgentTaskState>(INITIAL_AGENT_TASK_STATE);
-  // agent.run 是异步受理：主进程可能在 run 返回 sessionId 前已经推送了
-  // session-accepted / 首轮口播。refs 用来承接这段竞态，主进程回放再按 seq 去重。
-  const agentEventExpectedSessionRef = useRef<string | null>(null);
-  const agentEventReadySessionRef = useRef<string | null>(null);
-  const agentEventReplaySessionRef = useRef<string | null>(null);
-  const agentEventSeenSeqsRef = useRef(new Map<string, {seen:Set<number>;droppedThrough:number}>());
-  const pendingAgentEventsRef = useRef(new BoundedAgentEventQueue<AiAgentEventEnvelope>());
-  const agentCancelRequestedRef = useRef<boolean>(false);
-  const [agentServices, setAgentServices] = useState<ModelServiceChoice[]>([]);
-  const [agentServiceId, setAgentServiceId] = useState<string | null>(null);
-  const [agentSessions, setAgentSessions] = useState<AgentSessionRow[]>([]);
-  const [agentSessionsError, setAgentSessionsError] = useState<string | null>(null);
-  const [agentSessionDetail, setAgentSessionDetail] = useState<AgentSessionDetail | null>(null);
-  const [respondingApprovalCallId, setRespondingApprovalCallId] = useState<string | null>(null);
-  const [approvalError, setApprovalError] = useState<string | null>(null);
-  const [agentTools, setAgentTools] = useState<ToolDescriptor[]>([]);
+  const runtimeSettings = useRuntimeSettingsController({ bridge, setStatus, pushToast, announceDesktopOnly });
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(264);
   const shellRef = useRef<HTMLDivElement>(null);
   const [cmdkOpen, setCmdkOpen] = useState(false);
   const [cmdkQuery, setCmdkQuery] = useState('');
+  const { query, setQuery, activeDomain, centerView, bnd4Forced, sidebarView, fmgRevealRequest, resourceMode,
+    indexedFiles, domainSummaries, domainLibraries, domainGroups, preferredParamContainer, preferredAnimationContainer,
+    physicalBrowseFiles, searchHits, cmdkNormalized, cmdkAllResourceMatches, domainCommands,
+    selectDomain, installWorkspaceNavigation, activateSearchResults, search, activateSidebarView, showSidebarView,
+    openOperationsView, openBnd4ForSelection, jumpToResource, resetNavigationTextState,
+    onResourceSelectionActivated, clearFmgRevealRequest } = useNavigationController({
+      bridge, isBrowserPreview, workspace, files, allFiles, openTabs, selectedFile, editDirty, sidebarCollapsed,
+      setSidebarCollapsed, cmdkOpen, cmdkQuery, selectFile, switchToOpenTab, clearResourceSelection, clearResourcePreview,
+      setParamRevealRowId, setStatus, searchWorkspaceResources
+    });
+  const changeOperations = useChangeOperationsController({
+    bridge, workspace, selectedFile, editDirty, fmgSourceHash, paramSourceHash, applyTextResourceAndReload,
+    applyFmgMutationAndReload, reloadParamRowsFromSource, applyParamFieldMutationFromPanel,
+    setStatus, pushToast, announceDesktopOnly, describeBridgeAbsence, onRollbackCommitted: reloadSelectedResourceAfterRollback
+  });
+  changeCommandsRef.current = changeOperations;
+  const { operationHistory, rollbackInFlight, changeState, pendingChangeCount, hasUncommittedChanges, draftChanges, lastOperation,
+    commitStagedChanges, rollbackOp, rollbackFileOp, resetChangeWorkspaceState,
+    approveChange, rejectChange, undoChangeToDraft, discardChange, clearTerminalChanges } = changeOperations;
+
+  // Workspace background analysis and document owners may retain an earlier render's callback.
+  // Resolve only the current command here; the history owner still guards its captured request.
+  async function refreshOperationHistory(): Promise<OperationHistoryRefreshOutcome> {
+    return await changeCommandsRef.current?.refreshOperationHistory();
+  }
+
+
   // 问题 1：标题栏 workspace-switcher 菜单开合。有工作区后换文件夹的唯一常驻入口
   // （任何领域都在）；点菜单项 / 点遮罩关闭。
   const [workspaceSwitcherOpen, setWorkspaceSwitcherOpen] = useState(false);
   const [cmdkIndex, setCmdkIndex] = useState(0);
   const [toasts, setToasts] = useState<Array<{ id: number; text: string; kind: 'ok' | 'warn' }>>([]);
-  /** S31：文本目录缓存（事件实参 → 已打开文本表的匹配用，只读 metadata）。 */
-  const [textCatalog, setTextCatalog] = useState<TextCatalogResponse | null>(null);
-  /** S31：FMG 面板的外部 reveal 请求（表 + 条目 id）；面板处理后经回调清除。 */
-  const [fmgRevealRequest, setFmgRevealRequest] = useState<{ tableId: string; entryId: number } | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const cmdkInputRef = useRef<HTMLInputElement>(null);
   const cmdkDialogRef = useRef<HTMLDivElement>(null);
@@ -472,8 +255,7 @@ export function App(): ReactElement {
   const documentResetActions = useMemo<DocumentResetActions>(() => ({
     fmg: () => {
       resetTextDocument();
-      setTextCatalog(null);
-      setFmgRevealRequest(null);
+      resetNavigationTextState();
     },
     param: resetParamDocument,
     emevd: resetEventDocument,
@@ -615,38 +397,17 @@ export function App(): ReactElement {
       .filter((file) => classifyWorkspaceOpen(file.relativePath).openKind === 'vfx')
       .map((file) => ({ sourceUri: file.sourceUri, relativePath: file.relativePath }));
   }, [allFiles, files]);
-
-  const indexedFiles = allFiles.length > 0 ? allFiles : files;
-  const domainLibraries = useMemo(
-    () => filesForDomain(activeDomain, indexedFiles),
-    [activeDomain, indexedFiles]
-  );
-  // R1 裁定（用户修正）：参数域侧栏是两级——只有 PARAM 与 GPARAM 两个常驻项，
-  // GPARAM 组默认折叠、点开才出现各 bank 子选项；不能把 gparam 平铺把 gameparam
-  // 挤到下面。13-B：动作域同形态——「动画」（anibnd|tae，默认展开）+「动作脚本」
-  // （action/ 下 hks，默认折叠），HKS 不再按字母排在动画前面。其他域不分组，保持平铺。
-  const domainGroups = useMemo(
-    () => (activeDomain === 'param'
-      ? paramLibraryGroups(indexedFiles)
-      : activeDomain === 'behavior'
-        ? behaviorLibraryGroups(indexedFiles)
-        : undefined),
-    [activeDomain, indexedFiles]
-  );
-  const preferredParamContainer = useMemo(
-    () => pickPreferredParamContainer(indexedFiles),
-    [indexedFiles]
-  );
-  // 13-B：动作域默认打开的首选动画库（chr/c0000.anibnd.dcx，没有则第一个 anibnd）。
-  const preferredAnimationContainer = useMemo(
-    () => pickPreferredAnimation(indexedFiles),
-    [indexedFiles]
-  );
   const paramWorkbenchFile = activeEditor === 'param-container' && selectedFile
     ? selectedFile
     : activeDomain === 'param' && activeEditor === 'empty'
       ? preferredParamContainer
       : null;
+  const { applyContainerParamFieldMutation, applyContainerParamRowNameMutation, applyContainerParamRowMutation,
+    applyParamRowMutationFromPanel } = useParamMutationController({
+      bridge, selectedFile, paramWorkbenchFile, paramLive, paramSourceHash, paramRowPayloads,
+      reloadParamRowsFromSource, ownsParamDocument, setStatus, pushToast, refreshOperationHistory, describeBridgeAbsence
+    });
+
   const showTextWorkbench = activeEditor === 'text'
     || (activeDomain === 'text' && activeEditor === 'empty' && workspace !== null);
   // 11-B：打开文本域（未选具体文件）也进 live 目录链 —— readTextCatalog 扫全部
@@ -663,60 +424,8 @@ export function App(): ReactElement {
     hasWorkspace: workspace !== null,
     openTabCount: openTabs.length
   });
-  const changeStore = useMemo(() => new ChangeControlStore(), []);
-  const changeState = useSyncExternalStore(changeStore.subscribe, changeStore.getState);
-  const pendingChangeCount = changeState.items.filter((item) =>
-    item.status === 'draft' || item.status === 'staged' || item.status === 'failed'
-  ).length;
-  const hasUncommittedChanges = editDirty
-    || changeState.items.some((item) => item.status === 'draft' || item.status === 'staged');
 
   const spectralTheme = useSpectralTheme();
-
-  useEffect(() => {
-    try {
-      const savedOpen = window.localStorage.getItem(agentUiStorageKey(workspace?.workspaceSessionId, 'open'));
-      const savedWidth = window.localStorage.getItem(agentUiStorageKey(workspace?.workspaceSessionId, 'width'));
-      if (savedOpen !== null) setAgentOpen(savedOpen === 'true');
-      if (savedWidth !== null) {
-        const parsed = Number(savedWidth);
-        if (Number.isFinite(parsed)) setAgentWidth(clampAgentDockWidth(parsed, AGENT_MIN_WIDTH, AGENT_MAX_WIDTH));
-      }
-    } catch {
-      // 浏览器预览或受限 WebView 可能禁用 localStorage；不影响工作台使用。
-    }
-  }, [workspace?.workspaceSessionId]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(agentUiStorageKey(workspace?.workspaceSessionId, 'open'), String(agentOpen));
-      window.localStorage.setItem(agentUiStorageKey(workspace?.workspaceSessionId, 'width'), String(agentWidth));
-    } catch {
-      // 持久化是增强能力，不应阻塞渲染或任务状态。
-    }
-  }, [agentOpen, agentWidth, workspace?.workspaceSessionId]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem('soulforge.ui.aiThinking', aiThinking);
-    } catch {}
-  }, [aiThinking]);
-
-  /** 6-C：随 activeDomain / 选中资源 / 侧栏折叠写入上次外壳状态。 */
-  useEffect(() => {
-    if (workspace === null) return;
-    try {
-      const sessionId = workspace.workspaceSessionId;
-      // 有工作区时开始不是页，不要把 domain 写成 project。
-      if (activeDomain !== 'project') {
-        window.localStorage.setItem(shellUiStorageKey(sessionId, 'domain'), activeDomain);
-      }
-      window.localStorage.setItem(shellUiStorageKey(sessionId, 'sourceUri'), selectedFile?.sourceUri ?? '');
-      window.localStorage.setItem(shellUiStorageKey(sessionId, 'sidebarCollapsed'), String(sidebarCollapsed));
-    } catch {
-      // 持久化是增强能力，不应阻塞渲染或任务状态。
-    }
-  }, [workspace, activeDomain, selectedFile?.sourceUri, sidebarCollapsed]);
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent): void => {
@@ -775,7 +484,7 @@ export function App(): ReactElement {
     prevPendingCountRef.current = pendingChangeCount;
     if (previous === 0 && pendingChangeCount > 0) {
       setSidebarCollapsed(false);
-      setSidebarView('staging');
+      showSidebarView('staging');
     }
   }, [pendingChangeCount]);
 
@@ -787,213 +496,6 @@ export function App(): ReactElement {
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, [hasUncommittedChanges]);
-
-  /**
-   * 订阅 AI agent 进度推送（onAiAgentEvent）。
-   *
-   * 这是 invoke 之外的第二种形态：主进程用 webContents.send 主动推
-   * （ipc.ts:2899），preload 用 ipcRenderer.on 订阅并返回退订函数
-   * （preload/index.ts:308-316）。挂载期只订阅一次，退订交给 effect 的清理函数——
-   * 每次状态变化都重订会造成同一事件被折叠多次，而进度数字翻倍不会抛异常。
-   *
-   * 折叠里的会话隔离（reduceAgentTaskEvent 对 sessionId 不符者原样返回）保证
-   * 上一次运行的迟到事件不会把新任务标成已结束。
-   */
-  function queueAgentEvent(envelope: AiAgentEventEnvelope): void {
-    pendingAgentEventsRef.current.append(envelope);
-  }
-
-  function applyAgentEventEnvelopes(envelopes: readonly AiAgentEventEnvelope[]): void {
-    const sessionId = agentEventExpectedSessionRef.current;
-    if (!sessionId || agentEventReadySessionRef.current !== sessionId) {
-      for (const envelope of envelopes) queueAgentEvent(envelope);
-      return;
-    }
-    const orderedResult = orderUnseenAgentEvents(
-      envelopes,
-      sessionId,
-      agentEventSeenSeqsRef.current.get(sessionId)?.seen ?? new Set<number>(),
-      4096,
-      agentEventSeenSeqsRef.current.get(sessionId)?.droppedThrough ?? 0
-    );
-    agentEventSeenSeqsRef.current.clear();
-    agentEventSeenSeqsRef.current.set(sessionId, {seen:orderedResult.seen,droppedThrough:orderedResult.droppedThrough});
-    const ordered = orderedResult.events;
-    if (ordered.length === 0) return;
-    // 先推进已应用集合，再排入 React 状态队列；IPC 回放和实时推送交错时，
-    // 重复/倒序 envelope 都不会让口播或工具条目翻倍，也不会丢掉较早事件。
-    setAgentTask((current) => {
-      if (current.sessionId !== sessionId) return current;
-      return ordered.reduce(
-        (state, envelope) => reduceAgentTaskEvent(state, envelope),
-        current
-      );
-    });
-  }
-
-  useEffect(() => {
-    if (!bridge) return undefined;
-    return bridge.onAiAgentEvent((envelope) => {
-      if (!Number.isSafeInteger(envelope.seq) || envelope.seq < 1) return;
-      if (envelope.event.type === 'session-mode-switched') {
-        const raw = (envelope.event as { mode?: string }).mode;
-        const target = raw === 'fullPermission' || raw === 'full' ? 'bypass'
-          : raw === 'normal' || raw === 'edit' ? 'edit'
-          : 'plan';
-        setAgentInteractionMode(target);
-        try {
-          window.localStorage.setItem('soulforge:agentInteractionMode', target);
-        } catch {}
-      }
-      if (
-        envelope.sessionId !== agentEventExpectedSessionRef.current
-        || envelope.sessionId !== agentEventReadySessionRef.current
-      ) {
-        queueAgentEvent(envelope);
-        return;
-      }
-      applyAgentEventEnvelopes([envelope]);
-    });
-  }, [bridge]);
-
-  // state 已提交后先补回放，回放完成后才开放实时折叠；这样即使终态事件
-  // 先抵达，也不会在更早的 turn-started/口播之前把状态提前结算。
-  useEffect(() => {
-    if (!bridge || !agentTask.sessionId || agentTask.sessionId.startsWith('optimistic-')) return undefined;
-    const sessionId = agentTask.sessionId;
-    if (agentEventReplaySessionRef.current === sessionId) return undefined;
-    agentEventReplaySessionRef.current = sessionId;
-    void bridge.getAiAgentEvents(sessionId, 0).then((result) => {
-      const queuedWindow = pendingAgentEventsRef.current.take(sessionId);
-      if (agentEventExpectedSessionRef.current !== sessionId) return;
-      agentEventReadySessionRef.current = sessionId;
-      const window=combineAgentReplayWindow(result,queuedWindow);
-      if(window.truncated)setAgentIdleNotice('较早的运行信息已收起，可从会话记录查看');
-      applyAgentEventEnvelopes(window.events);
-    }).catch(() => {
-      // 旧版 preload、受限 fixture 或热更新期间可能没有回放 handler。
-      // 回放是补偿通道，不应让实时事件永远停在“已受理”；打开实时门后
-      // 仍按 seq 去重，生产主进程有回放时不进入此分支。
-      const queuedWindow = pendingAgentEventsRef.current.take(sessionId);
-      if (agentEventExpectedSessionRef.current !== sessionId) return;
-      agentEventReadySessionRef.current = sessionId;
-      const window=combineAgentReplayWindow(undefined,queuedWindow);
-      if(window.truncated)setAgentIdleNotice('较早的运行信息已收起，可从会话记录查看');
-      applyAgentEventEnvelopes(window.events);
-    });
-    return undefined;
-  }, [agentTask.sessionId, bridge]);
-
-  /** 模型服务与工具清单：任务面板的两个前置数据源，与工作区无关，挂载期取一次。 */
-  useEffect(() => {
-    if (!bridge) return;
-    void (async () => {
-      try {
-        const [services, toolList] = await Promise.all([
-          bridge.listModelServices(),
-          bridge.listAiTools()
-        ]);
-        setAgentServices(services.map((service) => ({
-          id: service.id,
-          displayName: service.displayName,
-          hasCredential: service.hasCredential,
-          protocol: service.protocol
-        })));
-        setAgentTools(toolList);
-        // 只选择用户已配置的服务；生产启动不扫描仓库 test 文件，也不注入测试服务。
-        setAgentServiceId((current) => current
-          ?? services.find((service) => service.hasCredential)?.id
-          ?? services[0]?.id
-          ?? null);
-      } catch (error) {
-        setAgentSessionsError(error instanceof Error ? error.message : '读取模型服务或工具清单失败');
-      }
-    })();
-  }, [bridge]);
-
-  /**
-   * 领域栏数据源（SHELL-09 §4.1）：DomainSummary 由「固定领域集合 × read
-   * contract 注册状态」构造，不根据任何文件数据分类。read contract 的
-   * renderer 可观测形态是 preload bridge 的方法存在性（方法存在 = 主进程
-   * 已注册该领域的 read 通道）；browser-preview 表面运行条件不满足。
-   */
-  const domainSummaries = useMemo<readonly DomainSummary[]>(() => {
-    const readContract = new Set<EditorDomainId>();
-    if (bridge) {
-      if (typeof bridge.readParamDocument === 'function') readContract.add('param');
-      if (typeof bridge.readGparamDocument === 'function') readContract.add('gparam');
-      if (typeof bridge.readFmgDocument === 'function') readContract.add('text');
-      if (typeof bridge.readEmevdDocument === 'function') readContract.add('event');
-      if (typeof bridge.readMsbDocument === 'function') readContract.add('map');
-      if (typeof bridge.inspectContainerTree === 'function') readContract.add('container');
-      if (typeof bridge.listScriptContainerEntriesPage === 'function') readContract.add('script');
-      if (typeof bridge.readTaeDocument === 'function') readContract.add('animation');
-      if (typeof bridge.readEsdDocument === 'function') readContract.add('behavior');
-      if (typeof bridge.readFlverDocument === 'function') readContract.add('model');
-      if (typeof bridge.readTpfDocument === 'function') readContract.add('texture');
-      if (typeof bridge.readMtdDocument === 'function') readContract.add('material');
-      if (typeof bridge.readFxrDocument === 'function') readContract.add('vfx');
-    }
-    return buildDomainSummaries({
-      readContract,
-      runtimeReady: !isBrowserPreview
-    });
-  }, [bridge, isBrowserPreview]);
-
-  /**
-   * 物理浏览列表：只存在于 Files 领域（§18.13 Steps：Files 独占物理浏览；
-   * 语义领域不渲染全局 resource browser）。过滤只走物理 taxonomy
-   * （filterFilesForMode：resourceKind/路径/格式名），不参与语义领域。
-   */
-  const physicalBrowseFiles = useMemo(
-    () => activeDomain === 'files'
-      ? filterFilesForMode(allFiles.length > 0 ? allFiles : files, resourceMode, query)
-      : [],
-    [activeDomain, query, resourceMode, allFiles, files]
-  );
-
-  /**
-   * 资源浏览器文件列表全量渲染（问题 5：显示不设限）。`physicalBrowseFiles` 是
-   * 过滤后的完整集合，直接 `.map` 进 DOM，由 `.file-list` 的 overflow-y: auto
-   * 滚动；不再按每页 200 切。
-   */
-  /**
-   * 搜索面板的全局命中（不受领域限制）：搜索是定位手段，不是当前领域过滤。
-   * 全量渲染匹配项（显示不设限），列表自身滚动。
-   */
-  const searchHits = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return [];
-    const base = allFiles.length > 0 ? allFiles : files;
-    return base.filter((file) => file.relativePath.toLowerCase().includes(normalized)
-      || file.resourceKind.toLowerCase().includes(normalized)
-      || file.formatLabel.toLowerCase().includes(normalized));
-  }, [allFiles, files, query]);
-  /**
-   * 欢迎页「待审查变更」摘要：全量渲染（显示不设限）。完整队列另在暂存区面板。
-   */
-  const draftChanges = changeState.items.filter((item) => item.status === 'draft');
-
-  async function refreshOperationHistory(): Promise<void> {
-    if (!bridge) return;
-    const requestId = ++operationHistoryRequestRef.current;
-    const load = async (): Promise<void> => {
-      try {
-        const history = await bridge.listOperations();
-        // 历史读取可以跨越回滚完成/资源重载；迟到快照不能覆盖更新的结果。
-        if (requestId === operationHistoryRequestRef.current) setOperationHistory(history);
-      } catch (error) {
-        if (requestId !== operationHistoryRequestRef.current) return;
-        const message = error instanceof Error ? error.message : String(error);
-        setStatus(`历史刷新失败：${message}`);
-        pushToast(`历史刷新失败：${message}`, 'warn');
-      }
-    };
-    // 串行化 listOperations，保证回滚后的刷新不会和回滚前的旧快照并发返回。
-    const next = operationHistoryRefreshRef.current.then(load, load);
-    operationHistoryRefreshRef.current = next.catch(() => undefined);
-    await next;
-  }
 
   /** Electron-only 操作在 browser-preview 表面的统一可见降级：不抛异常、不静默。 */
   function announceDesktopOnly(operation: string): void {
@@ -1053,17 +555,8 @@ export function App(): ReactElement {
 
   function focusSearchPanel(): void {
     setSidebarCollapsed(false);
-    setSidebarView('search');
+    showSidebarView('search');
     window.setTimeout(() => searchInputRef.current?.focus(), 0);
-  }
-
-  function activateSidebarView(view: SidebarView): void {
-    if (view === sidebarView && !sidebarCollapsed) {
-      setSidebarCollapsed(true);
-      return;
-    }
-    setSidebarCollapsed(false);
-    setSidebarView(view);
   }
 
   function startSidebarResize(event: ReactPointerEvent<HTMLDivElement>): void {
@@ -1133,381 +626,23 @@ export function App(): ReactElement {
       setToasts((list) => list.filter((toast) => toast.id !== id));
     }, 4200);
   }
-
-  /**
-   * S10 引用框选结算：暗幕收集命中后这里先本地合并把关——没有任何可引用节点
-   * 直接提示「这块还不能引用」，不发无谓 IPC；能合并的交给 AgentSidebar 经
-   * agent.citation.create 换 main 签发的 opaque 引用。
-   */
-  function handleCiteSettle(hits: CiteHit[]): void {
-    setCiteSelecting(false);
-    const citation = mergeCiteHits(hits);
-    if (citation === null) {
-      pushToast('这块还不能引用：框选里没有可引用的行、条目或脚本文档。', 'warn');
-      return;
-    }
-    setPendingCiteHits(hits);
-  }
-
-  async function sendAgentPrompt(): Promise<void> {
-    // T6-1：Composer「发送」= 真正跑 Agent loop（现有 runAgentTask），不再只生成
-    // 本地草稿。空输入 / 没配模型由 runAgentTask 自己说明，不在这里拦。
-    const text = aiPrompt.trim();
-    if (!text || aiBusy) return;
-    await runAgentTask();
-  }
-
-  function startNewAgentTask(): void {
-    agentCancelRequestedRef.current = false;
-    setAgentGoal(null);
-    setAiDraft(null);
-    setAgentIdleNotice(null);
-    setAiPrompt('');
-    setAiBusy(false);
-    agentEventExpectedSessionRef.current = null;
-    agentEventReadySessionRef.current = null;
-    agentEventReplaySessionRef.current = null;
-    agentEventSeenSeqsRef.current.clear();
-    pendingAgentEventsRef.current.clear();
-    setAgentTask(INITIAL_AGENT_TASK_STATE);
-    setToolOutput(null);
-    setApprovalError(null);
-    setRespondingApprovalCallId(null);
-    setStatus('已开始新的 Agent 任务');
-  }
   function activateResourceSelection(): void {
-    setAiDraft(null);
-    setAgentIdleNotice(null);
+    resetAgentSelectionState();
     resetAllDocuments(documentResetActions);
-    setBnd4Forced(false);
-    setCenterView('resource');
+    onResourceSelectionActivated();
   }
 
   function installWorkspaceViews(result: RendererWorkspaceScanResult): void {
-      // 有工作区后「开始」不是页，必须立即进入 resource 视图
-      setCenterView('resource');
-      setSidebarView('explorer');
-      resetWorkspaceDocuments();
-      setAgentGoal(null);
-      setToolOutput(null);
-      setAiDraft(null);
-      setAgentIdleNotice(null);
-      setOperationHistory([]);
-      setBnd4Forced(false);
-      // 换工作区必须清空全部资源族编辑态：否则新工作区的面板会继续显示上一个
-      // 工作区的 FMG 条目 / PARAM 行 / EMEVD 事件 / MSB 场景。
-      resetAllDocuments(documentResetActions);
-
-      // 立即恢复上次退出前的工作域 + 选中资源，或默认打开首选 PARAM 容器，毫秒级展现工作台
-      const restoredDomain = restoreLastShellState(result.workspaceSessionId, result.files);
-      if (!restoredDomain) {
-        // 没有合法上次领域（缺省 / 非法 / 上次是 project）→ 默认进 param
-        const preferred = pickPreferredParamContainer(result.files);
-        setActiveDomain('param');
-        clearResourcePreview();
-        setCenterView('resource');
-        if (preferred) {
-          void selectFile(preferred);
-        } else {
-          clearResourceSelection();
-        }
-      }
+    resetWorkspaceDocuments();
+    resetAgentWorkspaceState();
+    resetChangeWorkspaceState();
+    resetAllDocuments(documentResetActions);
+    installWorkspaceNavigation(result.workspaceSessionId, result.files);
   }
 
   function resetWorkspaceResourceViews(): void {
     resetWorkspaceDocuments();
     resetAllDocuments(documentResetActions);
-  }
-
-
-  /**
-   * 6-C：恢复上次退出前的工作域 + 选中资源 + 侧栏折叠。
-   *
-   * 只在 mountWorkspace 完成「索引写入 allFiles / files」后调用——那时
-   * workspaceSessionId 与索引都已就位，此时调 selectFile 才找得到文件。
-   * localStorage 读失败吞掉（与 Agent dock 一致），不弹窗、不跳页。
-   *
-   * 问题 1：返回 boolean —— 是否真的恢复了「非 project 的合法领域」。mountWorkspace
-   * 用它决定默认领域：没有合法上次记录（缺省 / 非法 / 上次就是 project）时
-   * 默认进 param（截图里的主工作台），**禁止**有工作区后把 activeDomain 留在 project。
-   */
-  function restoreLastShellState(workspaceSessionId: string, index: readonly RendererIndexedFile[]): boolean {
-    try {
-      const savedCollapsed = window.localStorage.getItem(shellUiStorageKey(workspaceSessionId, 'sidebarCollapsed'));
-      const savedDomain = window.localStorage.getItem(shellUiStorageKey(workspaceSessionId, 'domain'));
-      const savedSourceUri = window.localStorage.getItem(shellUiStorageKey(workspaceSessionId, 'sourceUri'));
-      if (savedCollapsed !== null) setSidebarCollapsed(savedCollapsed === 'true');
-      if (savedDomain === null) return false;
-      // 必须是合法领域值，且不是 project（有工作区时开始不是页）。非法/无记录保持现状。
-      if (!EDITOR_DOMAIN_IDS.includes(savedDomain as EditorDomainId)) return false;
-      const domain = savedDomain as EditorDomainId;
-      if (domain === 'project') return false;
-      setSidebarView('explorer');
-      setCenterView('resource');
-      if (savedSourceUri !== null && savedSourceUri !== '') {
-        const match = index.find((file) => file.sourceUri === savedSourceUri);
-        if (match) {
-          setActiveDomain(domain);
-          void selectFile(match);
-          return true;
-        }
-      }
-      // 文件不在索引或无记录：只恢复领域（走当前真实 index 寻找首选文件）。
-      setActiveDomain(domain);
-      if (domain === 'param') {
-        const preferred = pickPreferredParamContainer(index);
-        if (preferred) void selectFile(preferred);
-      } else if (domain === 'text') {
-        clearResourcePreview();
-      }
-      return true;
-    } catch {
-      // 读失败吞掉，保持现状。
-      return false;
-    }
-  }
-  async function search(): Promise<void> {
-    await searchWorkspaceResources(query);
-  }
-
-  function selectDomain(domain: EditorDomainId): void {
-    // 有工作区：开始 = 召唤资源栏，不是一页。必须赶在 dirty 确认与
-    // setActiveDomain 之前 return——不切工作域，中央 StartWorkspacePanel
-    // 也不能挂上。侧栏关了之后再打开靠这个按钮（或 Ctrl+B）。
-    if (domain === 'project' && workspace !== null) {
-      setSidebarView('explorer');
-      setSidebarCollapsed((collapsed) =>
-        !collapsed && sidebarView === 'explorer' ? true : false
-      );
-      return;
-    }
-    if (domain !== activeDomain && editDirty) {
-      const confirmed = window.confirm('当前文本有未生成变更的修改，切换工作域将保留草稿但可能离开编辑视图。继续？');
-      if (!confirmed) return;
-    }
-    setActiveDomain(domain);
-    setBnd4Forced(false);
-    if (domain === 'project') {
-      // 无工作区：才落到开始页（打开工作区的落点）。
-      clearResourceSelection();
-      setCenterView('project');
-      setSidebarView('explorer');
-      setSidebarCollapsed(false);
-      setStatus('开始页');
-      return;
-    }
-    if (domain === activeDomain) {
-      // 重复点已激活领域：保留当前选中与多文档工作台。EVENT-30B 事件工作台
-      // 在领域切换时会被卸载（下方 setSelectedFile(null) → activeEditor 变
-      // 'empty'）；用户从 Files 再选第二个事件文档依赖「已激活 Files 领域不清
-      // 选中」，否则每次切文件都重建工作台、多 tab 永远凑不齐。
-      if (domain === 'files') setStatus('文件：物理浏览');
-      return;
-    }
-    // 有成熟工作台的领域：直接打开首选文件，而不是留下「等待接线」占位。
-    // 侧栏仍用 library-item 而不是 Files 的 .file-item。
-    const indexed = allFiles.length > 0 ? allFiles : files;
-    if (domain === 'param') {
-      const preferred = pickPreferredParamContainer(indexed);
-      if (preferred) {
-        setCenterView('resource');
-        void selectFile(preferred);
-        setStatus('PARAM：已打开参数工作台');
-        return;
-      }
-    }
-    if (domain === 'text') {
-      // 3-B：打开文本域时保留上次选中的 msgbnd（有就留，Categories 只列那一个
-      // 容器的表）；没有选中文件就让 Categories 走空态，等用户在左侧资源浏览器
-      // 点 item / menu。绝不自动 selectFile(item) 把工作台钉死在某个容器。
-      clearResourcePreview();
-      setCenterView('resource');
-      setStatus('文本：已打开文本工作台');
-      return;
-    }
-    if (domain === 'event') {
-      const first = filesForDomain('event', indexed)[0];
-      if (first) {
-        setCenterView('resource');
-        void selectFile(first);
-        setStatus('事件：源码工作台');
-        return;
-      }
-    }
-    if (domain === 'behavior') {
-      // 13-B：点「动作」自动打开首选 anibnd（chr/c0000.anibnd.dcx，没有则第一个
-      // anibnd），进 TAE 工作台（动画 | 词条 | 预览）。绝不能 selectFile 第一个
-      // HKS —— S39 后 HKS 按字母排前面，默认点它只会落到脚本 IDE，动画/词条
-      // 被挤到列表下面（用户反馈「动作不显示动画、词条」）。
-      // selectFile 走的 selectEditor 对 .anibnd/.tae 早返 'tae'，不会落 BND 容器页。
-      const preferred = preferredAnimationContainer;
-      if (preferred) {
-        setCenterView('resource');
-        void selectFile(preferred);
-        setStatus('动作：已打开动画工作台');
-        return;
-      }
-    }
-    // SHELL-09：语义领域不再过滤物理文件（§4.1）；领域切换清掉上一份选中，
-    // 让领域占位/未来逻辑库成为该领域的默认视图（§18.13 Done：PARAM 入口
-    // 直接打开逻辑库）。Files 领域独占物理浏览。
-    clearResourceSelection();
-    clearResourcePreview();
-    setCenterView('resource');
-    if (domain === 'files') {
-      setStatus('文件：物理浏览');
-      return;
-    }
-    const capability = domainSummaries.find((entry) => entry.domain === domain)?.capability ?? 'deferred';
-    setStatus(capability === 'read-ready'
-      ? `${domainLabel(domain)}：等待成熟工作台接线`
-      : `${domainLabel(domain)}：${capability === 'deferred' ? '暂未提供读取能力' : '当前条件不满足'}`);
-  }
-
-  function openOperationsView(): void {
-    setCenterView('operations');
-    setStatus('任务与历史：写入、回滚与诊断记录');
-  }
-
-  function openBnd4ForSelection(): void {
-    if (!selectedFile) {
-      setStatus('先选择一个容器资源，再以 BND4 容器打开。');
-      return;
-    }
-    setBnd4Forced(true);
-    setCenterView('resource');
-    setStatus(`以 BND4 容器打开：${selectedFile.relativePath}`);
-  }
-
-  /**
-   * S31：事件面板「文本条目 / PARAM 行」跳转。
-   *
-   * 目标只能来自 openTabs：文本实参按语义匹配已打开文本表（表名证据，不猜
-   * 数字），PARAM 实参要求恰好一个已打开 PARAM 文档。命中后切 tab 并下发
-   * reveal 请求给目标面板；对不上返回 insufficient_evidence，不新开文件。
-   */
-  async function jumpToResource(request: ResourceJumpRequest): Promise<ResourceJumpResult> {
-    if (request.kind === 'param') {
-      const openParams = openTabs.filter((tab) => shouldLoadParam(tab));
-      const result = resolveParamJump(
-        request.id,
-        openParams.map((tab) => ({ sourceUri: tab.sourceUri, title: libraryDisplayName(tab.relativePath) }))
-      );
-      if (result.kind === 'hit') {
-        const target = openParams.find((tab) => tab.sourceUri === result.resourceUri);
-        if (target) {
-          switchToOpenTab(target);
-          setFmgRevealRequest(null);
-          setParamRevealRowId(request.id);
-        }
-      }
-      return result;
-    }
-    let catalog = textCatalog;
-    if (!catalog && bridge && typeof bridge.readTextCatalog === 'function') {
-      try {
-        const fetched = await bridge.readTextCatalog();
-        if (fetched.ok) {
-          catalog = fetched;
-          setTextCatalog(fetched);
-        }
-      } catch {
-        // 目录不可用 → resolveFmgJump 会按空目录给 insufficient_evidence。
-      }
-    }
-    const openText = openTabs.filter((tab) => shouldLoadFmg(tab));
-    const containers: TextContainerRef[] = openText.map((tab) => {
-      const node = catalog ? findCatalogContainer(catalog, tab.sourceUri) : null;
-      return {
-        sourceUri: tab.sourceUri,
-        title: libraryDisplayName(tab.relativePath),
-        tables: node?.tables ?? []
-      };
-    });
-    const result = resolveFmgJump(request.semantic, request.id, containers);
-    if (result.kind === 'hit' && result.tableId !== undefined) {
-      const target = openText.find((tab) => tab.sourceUri === result.resourceUri);
-      if (target) {
-        switchToOpenTab(target);
-        setParamRevealRowId(null);
-        setFmgRevealRequest({ tableId: result.tableId, entryId: request.id });
-      }
-    }
-    return result;
-  }
-
-  /** 变更队列写入执行器：按 kind 调用对应 IPC，保留 hash 前置条件与重读。 */
-  async function applyStagedChange(
-    change: CandidateChange
-  ): Promise<{ ok: boolean; diagnostics?: ChangeDiagnostic[] }> {
-    const mapDiag = (list?: Diagnostic[]): ChangeDiagnostic[] =>
-      (list ?? []).map((diagnostic) => ({ code: diagnostic.code, message: diagnostic.message }));
-    if (!bridge) {
-      return {
-        ok: false,
-        diagnostics: [{ code: 'BRIDGE_UNAVAILABLE', message: describeBridgeAbsence('写入暂存变更') }]
-      };
-    }
-    switch (change.kind) {
-      case 'text': {
-        const result = await applyTextResourceAndReload(change.sourceUri, change.newValue);
-        return { ok: result.ok, diagnostics: mapDiag(result.diagnostics) };
-      }
-      case 'fmg': {
-        const payload = change.payload as { op: 'upsert' | 'add' | 'delete'; id: number; text?: string; tableId?: string };
-        // S29：缺哈希不再由 renderer 拒写，main 写时现算兜底。
-        const result = await applyFmgMutationAndReload(
-          change.sourceUri,
-          fmgSourceHash ?? '',
-          {
-            kind: payload.op,
-            id: payload.id,
-            ...(payload.text !== undefined ? { text: payload.text } : {})
-          },
-          payload.tableId
-        );
-        return { ok: result.ok, diagnostics: mapDiag(result.diagnostics) };
-      }
-      case 'param-row': {
-        const payload = change.payload as { op: 'upsert' | 'delete'; id: number; dataBase64?: string };
-        const result = await bridge.applyParamMutation(
-          change.sourceUri,
-          paramSourceHash ?? '',
-          payload.op === 'delete'
-            ? { kind: 'delete', id: payload.id }
-            : { kind: 'upsert', id: payload.id, dataBase64: payload.dataBase64 ?? '' }
-        );
-        if (result.ok) await reloadParamRowsFromSource();
-        return { ok: result.ok, diagnostics: mapDiag(result.diagnostics) };
-      }
-      case 'param-field': {
-        const input = change.payload as {
-          rowId: number;
-          fieldId: string;
-          value: number | string | boolean;
-          rowDataBase64: string;
-          definition: unknown;
-        };
-        return applyParamFieldMutationFromPanel(input);
-      }
-    }
-  }
-
-  async function commitStagedChanges(): Promise<void> {
-    setStatus('正在校验并写入已暂存变更…');
-    const result = await changeStore.commitAll(applyStagedChange);
-    await refreshOperationHistory();
-    setStatus(
-      result.failed === 0
-        ? `写入完成：${result.written} 项已写入，原文件已备份，可回滚。`
-        : `写入结束：${result.written} 项已写入，${result.failed} 项失败（原因见诊断）。`
-    );
-    pushToast(
-      result.failed === 0
-        ? `写入完成：${result.written} 项已写入，原文件已备份，可回滚`
-        : `写入结束：${result.failed} 项失败（原因见诊断）`,
-      result.failed === 0 ? 'ok' : 'warn'
-    );
   }
 
   /**
@@ -1519,409 +654,23 @@ export function App(): ReactElement {
     if (!selectedFile) return;
     await selectFile({ ...selectedFile });
   }
-
-  async function rollbackOp(opId: string): Promise<void> {
-    const lockKey = `operation:${opId}`;
-    if (rollbackInFlightRef.current !== null) {
-      pushToast('已有回滚正在处理中，请等待当前操作完成。', 'warn');
-      return;
-    }
-    rollbackInFlightRef.current = lockKey;
-    setRollbackInFlight(lockKey);
-    let restored = false;
-    try {
-      if (!bridge) {
-        announceDesktopOnly('回滚操作');
-        return;
-      }
-      setStatus(`正在回滚操作 ${opId.slice(0, 8)}...`);
-      const result = await bridge.rollbackOperation(opId);
-      if (!result.ok) {
-        setStatus(`回滚失败：${result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || opId}`);
-        pushToast(`回滚失败：${result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || opId}`, 'warn');
-        await refreshOperationHistory();
-        return;
-      }
-      restored = true;
-      await refreshOperationHistory();
-      await reloadSelectedResourceAfterRollback();
-      setStatus(`已回滚 ${result.restoredFiles.length} 个文件`);
-      pushToast(`已回滚 ${result.restoredFiles.length} 个文件`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const prefix = restored ? '回滚已完成，但资源界面重载失败' : '回滚异常';
-      setStatus(`${prefix}：${message}`);
-      pushToast(`${prefix}：${message}`, 'warn');
-    } finally {
-      rollbackInFlightRef.current = null;
-      setRollbackInFlight(null);
-    }
-  }
-
-  /** 文件级回滚：把某次操作里的单个文件恢复到操作前状态。 */
-  async function rollbackFileOp(opId: string, targetUri: string): Promise<void> {
-    const lockKey = `file:${opId}:${targetUri}`;
-    if (rollbackInFlightRef.current !== null) {
-      pushToast('已有回滚正在处理中，请等待当前操作完成。', 'warn');
-      return;
-    }
-    rollbackInFlightRef.current = lockKey;
-    setRollbackInFlight(lockKey);
-    let restored = false;
-    try {
-      if (!bridge) {
-        announceDesktopOnly('文件回滚');
-        return;
-      }
-      if (typeof bridge.rollbackFile !== 'function') {
-        pushToast('当前预加载未暴露文件级回滚。', 'warn');
-        return;
-      }
-      const result = await bridge.rollbackFile(opId, targetUri);
-      if (!result.ok) {
-        const message = result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || targetUri;
-        pushToast(`文件回滚失败：${message}`, 'warn');
-        await refreshOperationHistory();
-        return;
-      }
-      restored = true;
-      await refreshOperationHistory();
-      await reloadSelectedResourceAfterRollback();
-      pushToast(`已回滚文件（${result.restoredFiles.length} 个）`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const prefix = restored ? '文件已回滚，但资源界面重载失败' : '文件回滚异常';
-      setStatus(`${prefix}：${message}`);
-      pushToast(`${prefix}：${message}`, 'warn');
-    } finally {
-      rollbackInFlightRef.current = null;
-      setRollbackInFlight(null);
-    }
-  }
-
-  /* ── AI agent 任务：运行 / 取消 / 会话历史 ───────────────────────────────
-     权限模式只是 UI 意图。真正的 mode 必须先由 main 签发一次性 grant，
-     runAiAgent 只提交这个 opaque grantId；approvalRequiredLevels 永远不从
-     renderer 传入。 */
-
-  async function refreshAgentSessions(): Promise<void> {
-    if (!bridge) {
-      setAgentSessionsError(describeBridgeAbsence('读取 AI 会话历史'));
-      return;
-    }
-    const result = await bridge.listAiAgentSessions();
-    if (!result.ok) {
-      setAgentSessionsError(`${result.error.code}：${result.error.message}`);
-      return;
-    }
-    setAgentSessionsError(null);
-    setAgentSessions(result.sessions);
-  }
-
-  /**
-   * 发起任务。resumeSessionPath 有值时承接既有会话。
-   *
-   * 失败分支必须落到可见状态：主进程对未分析工作区、缺配置、缺凭据分别返回
-   * WORKSPACE_NOT_ANALYZED / MODEL_SERVICE_CONFIG_NOT_FOUND /
-   * MODEL_SERVICE_UNCONFIGURED（ipc.ts:2923-2951），吞掉它们会让用户看到
-   * 「点了没反应」。
-   */
-  async function runAgentTask(resumeSessionPath?: string): Promise<void> {
-    if (!bridge) {
-      announceDesktopOnly('运行 AI 任务');
-      return;
-    }
-    // 承接时输入框常为空：空 prompt 直接拦截会让「承接」点了没反应。
-    // 承接的语义是继续上一轮，故空输入发一条默认继续指令。
-    const prompt = resumeSessionPath !== undefined && aiPrompt.trim() === ''
-      ? '请继续上一轮会话的任务。'
-      : aiPrompt.trim();
-    if (prompt === '') {
-      setStatus('任务描述为空，未发起 AI 任务');
-      return;
-    }
-    setAiPrompt('');
-    // T6：没配模型在对话里写说明（不卡输入框以外的整栏，也不整次拒绝成
-    // WORKSPACE_NOT_ANALYZED）；输入框仍可编辑，配好后可直接再发。
-    if (agentServiceId === null) {
-      setAgentIdleNotice('尚未配置模型服务，未发起 AI 任务。请在 Agent 历史 → 模型设置 中选择或配置模型服务。');
-      setAgentGoal(prompt);
-      setStatus('尚未配置模型服务');
-      return;
-    }
-    // 只对正常 stop 终态隐式承接。partial/max_steps/length/cancelled/error
-    // 必须由用户显式选择历史会话继续，否则普通发送从新任务开始。
-    const effectiveResumePath = resumeSessionPath ?? (
-      canAutoResumeAgentTask(agentTask) ? agentTask.rolloutFileName! : undefined
-    );
-
-    // 0ms 乐观响应：点击“发送”按钮瞬间立即切换至对话时间线，渲染用户提问气泡与等待动画，杜绝界面停留欢迎页干等
-    const previousTask = agentTask;
-    const previousGoal = agentGoal;
-    const optimisticSessionId = `optimistic-${Date.now()}`;
-    agentCancelRequestedRef.current = false;
-    setAgentGoal(prompt);
-    setAgentIdleNotice(null);
-    setAgentTask(startAgentTask(optimisticSessionId, Date.now(), previousTask, previousGoal));
-    setStatus('正在发起 AI 任务...');
-
-    const requestedAgentMode = agentInteractionMode === 'bypass'
-      ? 'fullPermission'
-      : agentInteractionMode === 'edit'
-        ? 'normal'
-        : 'plan';
-    let permissionGrantId: string | undefined;
-    if (requestedAgentMode !== 'plan') {
-      try {
-        const permission = await bridge.requestAiAgentPermission(requestedAgentMode);
-        if (!permission.ok) {
-          const error = { code: permission.error.code, message: permission.error.message };
-          setAgentTask((current) => ({ ...current, phase: 'error', error }));
-          setStatus(`Agent 权限未授予：${permission.error.code}`);
-          pushToast(`Agent 权限未授予：${permission.error.message}`, 'warn');
-          return;
-        }
-        permissionGrantId = permission.grantId;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        setAgentTask((current) => ({
-          ...current,
-          phase: 'error',
-          error: { code: 'AGENT_PERMISSION_REQUEST_FAILED', message }
-        }));
-        setStatus('Agent 权限请求失败');
-        return;
-      }
-    }
-
-    let result: Awaited<ReturnType<NonNullable<typeof bridge>['runAiAgent']>>;
-    try {
-      result = await bridge.runAiAgent({
-        configId: agentServiceId,
-        prompt,
-        ...(effectiveResumePath !== undefined ? { resumeSessionPath: effectiveResumePath } : {}),
-        // T6-3：选区逻辑名/资源 kind 作为可选元数据随任务提交给模型；不自动插入
-        // `#路径` chip（那会污染 prompt 文本，且选区只是参考不是默认任务对象）。
-        ...(selectedFile
-          ? { selection: { label: selectedFile.relativePath, resourceKind: selectedFile.resourceKind } }
-          : {}),
-        // S15/S19 失败面：最近一次打开失败（KRAK 缺 Oodle / 读取失败）随任务提交，
-        // main 校验后进系统提示；Agent 能直接解释原因和下一步，不等用户复制日志。
-        ...(lastOpenFailure ? { openFailure: lastOpenFailure } : {}),
-        // AGENT-60D：已添加的 §12.11 opaque 资源引用随任务提交（main 校验
-        // agentReferenceRegistry 的跨 sender；空数组 = 无引用）。
-        ...(agentResources.length > 0 ? { resources: agentResources } : {}),
-        ...(agentAttachments.length > 0 ? { attachments: agentAttachments } : {}),
-        streaming: true,
-        timeoutMs: 180_000,
-        // 工作区 Agent 默认启用一次性 RAG 预检；main 会优先使用内存
-        // active corpus，并等待正在进行的那一次语义分析完成，不会按查询重扫。
-        useRagSearch: true,
-        // S32：输入条的思考强度随任务提交（优先于服务级默认）。
-        thinkingLevel: aiThinking,
-        mode: requestedAgentMode,
-        ...(permissionGrantId !== undefined ? { permissionGrantId } : {})
-      });
-    } catch (error) {
-      setAgentTask((current) => ({
-        ...current,
-        phase: 'error',
-        error: {
-          code: 'RUN_AGENT_FAILED',
-          message: error instanceof Error ? error.message : String(error)
-        }
-      }));
-      setStatus('AI 任务发起异常');
-      return;
-    }
-
-    if (!result.ok) {
-      setAgentTask((current) => ({
-        ...current,
-        phase: 'error',
-        error: { code: result.error.code, message: result.error.message }
-      }));
-      setStatus(`AI 任务未发起：${result.error.code}`);
-      pushToast(`AI 任务未发起：${result.error.message}`, 'warn');
-      return;
-    }
-
-    // 成功受理：更新为真实主进程 sessionId，开放事件回放与接收
-    agentEventExpectedSessionRef.current = result.sessionId;
-    agentEventReadySessionRef.current = null;
-    agentEventReplaySessionRef.current = null;
-    agentEventSeenSeqsRef.current.clear();
-    pendingAgentEventsRef.current.keepSession(result.sessionId);
-
-    // 若在发起等待期间用户已点击取消，立即向主进程补发 cancel
-    if (agentCancelRequestedRef.current) {
-      void bridge.cancelAiAgent(result.sessionId);
-      setAgentTask((current) => markAgentTaskCancelling({
-        ...current,
-        sessionId: result.sessionId
-      }));
-      setStatus('已发出取消请求，等待当前步骤让出');
-      return;
-    }
-
-    setAgentTask((current) => {
-      if (current.sessionId === optimisticSessionId) {
-        return {
-          ...current,
-          sessionId: result.sessionId
-        };
-      }
-      return current;
-    });
-    setStatus('AI 任务已发起，进度会在 Agent 面板更新');
-  }
-
-  /**
-   * 取消当前任务。
-   *
-   * 必须真的发出 IPC：主进程持有 AbortController（ipc.ts:2988 的 activeAgentRuns），
-   * cancel 通道 abort 它（ipc.ts:3027-3031）。只改本地状态不发 IPC 的「取消」会让
-   * 任务继续跑到底，而界面显示已取消——那比没有取消按钮更糟。
-   *
-   * 本地只落到 cancelling，终态仍等主进程的 session-done/session-error。
-   */
-  async function cancelAgentTask(): Promise<void> {
-    const sessionId = agentTask.sessionId;
-    if (!bridge || sessionId === null) {
-      announceDesktopOnly('取消 AI 任务');
-      return;
-    }
-    agentCancelRequestedRef.current = true;
-    setAgentTask((current) => markAgentTaskCancelling(current));
-    setStatus('已发出取消请求，等待当前步骤让出');
-    if (!sessionId.startsWith('optimistic-')) {
-      await bridge.cancelAiAgent(sessionId);
-    }
-  }
-
-  /**
-   * 回答一条审批请求。
-   *
-   * 不在本地把卡片出队：出队只由主进程回的 approval-resolved 事件驱动。
-   * 本地先出队会让「点了但没送达」表现为卡片消失而任务仍在等待——用户以为
-   * 自己已经批准，实际 loop 还停在那里，十分钟后按拒绝结算。
-   */
-  async function respondAgentApproval(
-    callId: string,
-    decision: AgentApprovalUserDecision
-  ): Promise<void> {
-    const sessionId = agentTask.sessionId;
-    if (!bridge || sessionId === null) {
-      announceDesktopOnly('回答 AI 审批');
-      return;
-    }
-    setRespondingApprovalCallId(callId);
-    setApprovalError(null);
-    try {
-      const result = await bridge.respondAiAgentApproval({ sessionId, callId, decision });
-      if (!result.ok) {
-        setApprovalError(`${result.error.code}——${result.error.message}`);
-        return;
-      }
-      if (!result.matched) {
-        // 主进程已结算过这条请求（会话结束或超时）。这是正常竞态，不是错误，
-        // 但必须说出来：否则用户点了按钮却什么都没发生。
-        setApprovalError('这条审批已失效（会话已结束或等待超时），你的回答未被采纳。');
-      }
-    } catch (error) {
-      setApprovalError(`审批回答发送失败——${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setRespondingApprovalCallId(null);
-    }
-  }
-
-  async function loadAgentSession(sessionPath: string): Promise<void> {
-    if (!bridge) {
-      announceDesktopOnly('查看 AI 会话');
-      return;
-    }
-    const result = await bridge.loadAiAgentSession(sessionPath);
-    if (!result.ok) {
-      setAgentSessionsError(`${result.error.code}：${result.error.message}`);
-      setAgentSessionDetail(null);
-      return;
-    }
-    setAgentSessionsError(null);
-    setAgentSessionDetail({
-      sessionPath,
-      messageCount: result.messageCount,
-      parseErrors: result.parseErrors,
-      interrupted: result.interrupted,
-      compactedWindows: result.compactedWindows,
-      loadedMessages: result.messagesPage.length,
-      permissionMode: result.meta?.permissionMode ?? null,
-      protocol: result.meta?.protocol ?? null
-    });
-    setStatus(`已载入会话 ${sessionPath}，共 ${result.messageCount} 条消息`);
-  }
-
-  async function runToolSearch(toolQuery: string): Promise<void> {
-    if (!bridge) {
-      announceDesktopOnly('运行安全工具');
-      return;
-    }
-    const result = await bridge.runAiTool('search_resources', { query: toolQuery, limit: 8 });
-    setToolOutput(result);
-  }
-
-  async function explainEvent(uri: string): Promise<void> {
-    if (!bridge) {
-      announceDesktopOnly('解释事件');
-      return;
-    }
-    const result = await bridge.runAiTool('explain_event', { uri });
-    setToolOutput(result);
-  }
   // 命令面板与顶部工作域栏共用 domainSummaries（同一份 DomainSummary 数据源），
   // 不维护第二套 IA 标签。R1 裁定：GPARAM 已从顶栏隐藏（并入左侧「参数」），
   // 命令面板同样不提供一级入口。
   const cmdkCommands: Array<{ id: string; icon: string; label: string; hint?: string; run: () => void }> = [
-    ...domainSummaries
-      .filter((entry) => entry.visibility !== 'hidden')
-      .map((entry) => ({
-        id: `domain-${entry.domain}`,
-        icon: '◧',
-        label: `切换到 ${entry.label} 工作域`,
-        run: (): void => {
-          setSidebarCollapsed(false);
-          setSidebarView('explorer');
-          selectDomain(entry.domain);
-        }
-      })),
+    ...domainCommands,
     { id: 'open-bnd4', icon: '▤', label: '以 BND4 容器打开当前选择', run: openBnd4ForSelection },
     { id: 'open-workspace', icon: '⌘', label: '打开 Mod 工作区…', run: (): void => { void openWorkspace(); } },
     { id: 'view-operations', icon: '◷', label: '切换到任务与历史', run: openOperationsView },
-    { id: 'open-settings', icon: '⚙', label: '切换到设置', run: (): void => { setSidebarCollapsed(false); setSidebarView('settings'); } },
+    { id: 'open-settings', icon: '⚙', label: '切换到设置', run: (): void => { setSidebarCollapsed(false); showSidebarView('settings'); } },
     { id: 'focus-search', icon: '⌕', label: '聚焦资源搜索', hint: '搜索', run: focusSearchPanel },
     { id: 'toggle-agent', icon: '✦', label: '切换 AI Agent 面板', hint: 'Ctrl J', run: (): void => { setAgentOpen((open) => !open); } },
     { id: 'toggle-sidebar', icon: '◨', label: '切换侧栏', hint: 'Ctrl B', run: (): void => { setSidebarCollapsed((collapsed) => !collapsed); } }
   ];
-  const cmdkNormalized = useMemo(
-    () => normalizeCommandSearchText(cmdkQuery),
-    [cmdkQuery]
-  );
   const filteredCmdkCommands = useMemo(
     () => cmdkCommands.filter((command) => matchesCommandSearch(command.label, cmdkNormalized)),
     [cmdkCommands, cmdkNormalized]
   );
-  /**
-   * 命令面板的资源命中：全量渲染（显示不设限）。此前按 8 条上限截断并补说明，
-   * 命令面板列由 .cmdk__list 自身滚动，匹配项一次给全。
-   */
-  const cmdkAllResourceMatches = useMemo(() => {
-    // `cmdkQuery` is intentionally retained while the modal closes so opening
-    // it can restore/reset focus predictably.  Do not scan every indexed file
-    // during unrelated App renders while that query is not visible; when the
-    // palette is open, indexedFiles remains a dependency so newly indexed or
-    // refreshed resources are still included in sorted results.
-    if (!cmdkOpen || !workspace || !cmdkNormalized) return [];
-    return filterCommandPaletteResources(indexedFiles, cmdkNormalized);
-  }, [cmdkOpen, workspace, indexedFiles, cmdkNormalized]);
   const cmdkItemCount = filteredCmdkCommands.length + cmdkAllResourceMatches.length;
   const selectedCmdkIndex = Math.min(cmdkIndex, Math.max(0, cmdkItemCount - 1));
 
@@ -1944,40 +693,12 @@ export function App(): ReactElement {
   const welcomeStats = workspace
     ? `已索引 ${allFiles.length} 个资源 · ${workspace.workspaceLabel}${analysis ? ` · 已解析 ${analysis.parsedFiles}` : ''}`
     : '未打开 Mod 工作区 · 从左侧资源浏览器打开';
-  const lastOperation = operationHistory.length > 0 ? operationHistory[0] : null;
   // 8-A：Composer 思考强度按当前选中服务的协议换表；没有服务时当 openai-compatible。
   const activeAgentProtocol = agentServices
     .find((service) => service.id === agentServiceId)?.protocol ?? 'openai-compatible';
 
   const sidebarStyle = { '--sidebar-w': `${sidebarWidth}px` } as CSSProperties;
   const agentStyle = { '--agent-w': `${agentWidth}px` } as CSSProperties;
-  // 原版目录展示只从这一份派生状态生成，避免把「已选择路径」误显示成
-  // 「已挂载到当前 workspace」。baseMounted 是主进程 session 的权威值。
-  const baseMountPresentation = sessionMeta
-    ? sessionMeta.baseMounted
-      ? {
-          label: sessionMeta.baseLabel ?? '原版游戏目录已挂载到当前工作区',
-          status: '已挂载到当前工作区',
-          className: 'pill pill--ok'
-        }
-      : {
-          label: sessionMeta.baseLabel
-            ? `${sessionMeta.baseLabel}（未挂载到当前工作区）`
-            : '当前工作区未挂载原版游戏目录',
-          status: '未挂载到当前工作区',
-          className: 'pill'
-        }
-    : baseRootChoice
-      ? {
-          label: `${baseRootChoice.label}（已选择，待工作区挂载）`,
-          status: '已选择，待挂载',
-          className: 'pill pill--accent'
-        }
-      : {
-          label: '尚未选择原版游戏目录',
-          status: '未选择',
-          className: 'pill'
-        };
 
   return (
     <>
@@ -2260,11 +981,11 @@ export function App(): ReactElement {
               <ChangeQueuePanel
                 state={changeState}
                 actions={{
-                  approve: (id) => { changeStore.approve(id); },
-                  reject: (id) => { changeStore.reject(id); },
-                  undoToDraft: (id) => { changeStore.undoToDraft(id); },
-                  discard: (id) => { changeStore.discard(id); },
-                  clearTerminal: () => { changeStore.clearTerminal(); },
+                  approve: (id) => { approveChange(id); },
+                  reject: (id) => { rejectChange(id); },
+                  undoToDraft: (id) => { undoChangeToDraft(id); },
+                  discard: (id) => { discardChange(id); },
+                  clearTerminal: () => { clearTerminalChanges(); },
                   commit: () => { void commitStagedChanges(); }
                 }}
               />
@@ -2345,149 +1066,9 @@ export function App(): ReactElement {
           </section>
 
           {/* ── 设置 ── */}
-          <section className={sidebarView === 'settings' ? 'panel is-active' : 'panel'} data-panel-id="settings" aria-label="设置">
-            <div className="panel__header">
-              <h2 className="panel__title">设置</h2>
-              <SidebarCloseButton onClose={() => setSidebarCollapsed(true)} />
-            </div>
-            <div className="panel__body panel__body--pad">
-              {/* 模型、思考强度与权限模式已迁入右侧 Agent 面板；此处只保留工作区与安全基础设施设置。 */}
-              <div className="setting-row">
-                <div>
-                  <div className="setting-name">原版游戏目录</div>
-                  <div className="setting-desc">
-                    {baseMountPresentation.label}
-                  </div>
-                </div>
-                <span className={baseMountPresentation.className}>{baseMountPresentation.status}</span>
-              </div>
-              <div className="row gap setting-actions">
-                <button
-                  type="button"
-                  className="btn btn--ghost btn--sm"
-                  onClick={() => void chooseBaseDirectory()}
-                  {...(isBrowserPreview ? { 'aria-disabled': true } : {})}
-                >
-                  {sessionMeta?.baseMounted || baseRootChoice ? '更换原版游戏目录' : '选择原版游戏目录'}
-                </button>
-                {(sessionMeta?.baseMounted || baseRootChoice) && (
-                  <button type="button" className="btn btn--ghost btn--sm" onClick={() => void clearBaseDirectory()}>清除</button>
-                )}
-              </div>
-              <div className="setting-row">
-                <div className="setting-name">写入路径</div>
-                <span className="pill pill--ok">强制</span>
-              </div>
-              <div className="setting-row">
-                <div className="setting-name">回滚</div>
-                <span className="pill pill--ok">可用</span>
-              </div>
-              <ThemeSettings manifest={spectralTheme.manifest} onModeChange={spectralTheme.setMode}
-                onIntensityChange={spectralTheme.setIntensity} onReset={spectralTheme.reset} />
-
-              <div className="setting-row setting-row--update" data-testid="update-settings">
-                <div className="setting-row__content">
-                  <div className="setting-name">软件更新</div>
-                  <div className="setting-desc">
-                    当前版本 {updateState.currentVersion} · {updateStateLabel(updateState)}
-                  </div>
-                  {('info' in updateState) && (
-                    <div className="setting-desc setting-desc--update">
-                      {updateState.info.releaseName} · {updateState.info.installerName}
-                    </div>
-                  )}
-                  {('diagnostic' in updateState) && (
-                    <div className="setting-desc setting-desc--error" role="status">
-                      {updateState.diagnostic.message}
-                    </div>
-                  )}
-                  {updateState.status === 'available' && updateState.info.releaseNotes.trim() !== '' && (
-                    <details className="update-notes">
-                      <summary>查看更新说明</summary>
-                      <p>{updateState.info.releaseNotes}</p>
-                    </details>
-                  )}
-                </div>
-                <div className="setting-row__controls">
-                  <label className="update-channel-label">
-                    <span>频道</span>
-                    <select
-                      value={updateState.channel}
-                      disabled={isBrowserPreview || updateActionBusy}
-                      onChange={(event) => {
-                        const channel = event.currentTarget.value;
-                        if (channel === 'stable' || channel === 'prerelease') changeUpdateChannel(channel);
-                      }}
-                      aria-label="更新频道"
-                    >
-                      <option value="prerelease">预发布</option>
-                      <option value="stable">稳定版</option>
-                    </select>
-                  </label>
-                  <button
-                    type="button"
-                    className="btn btn--ghost btn--sm"
-                    disabled={isBrowserPreview || updateActionBusy || currentUpdateAction.run === null}
-                    onClick={() => {
-                      if (currentUpdateAction.run) void runUpdateCommand(currentUpdateAction.run);
-                    }}
-                  >
-                    {updateActionBusy ? '处理中…' : currentUpdateAction.label}
-                  </button>
-                  {bridge && typeof bridge.openUpdateRelease === 'function' && (
-                    <button
-                      type="button"
-                      className="btn btn--ghost btn--sm"
-                      disabled={updateActionBusy}
-                      onClick={() => void runUpdateCommand(
-                        bridge.openUpdateRelease,
-                        '已打开 GitHub Release 下载页面'
-                      )}
-                    >
-                      手动下载
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div className="setting-row setting-row--rag" data-testid="rag-local-model-settings">
-                <div className="setting-row__content">
-                  <div className="setting-name">RAG 语义模型</div>
-                  <div className="setting-desc">
-                    只使用本机已有的完全匹配模型；缺失时保留词法与结构化检索，不会下载模型。
-                  </div>
-                  {ragModelStatus && (
-                    <div className="setting-desc setting-desc--update">
-                      {ragModelStatus.modelId} · revision {ragModelStatus.revision.slice(0, 8)} · {ragLocalModelSourceLabel(ragModelStatus.source)}
-                    </div>
-                  )}
-                  {ragModelStatus?.diagnostic && (
-                    <div className="setting-desc setting-desc--error" role="status">
-                      {ragModelStatus.diagnostic}
-                    </div>
-                  )}
-                </div>
-                <span className={ragModelStatus?.state === 'local-ready' ? 'pill pill--ok' : 'pill pill--warn'}>
-                  {isBrowserPreview
-                    ? '桌面版运行时可用'
-                    : ragModelStatus
-                      ? ragLocalModelStateLabel(ragModelStatus.state)
-                      : '读取中…'}
-                </span>
-              </div>
-
-              {/*
-                me3 运行时挂在设置面板：它是工作区级的运行基础设施，不属任何单个资源。
-                放这里不违反本面板的 e2e 约束（renderer.spec.mjs:354-356 只禁
-                「思考强度」「模型服务」「运行 / 权限模式」三个词，那些属 Agent 面板）。
-
-                启动按钮默认禁用，门槛走 me3LaunchGuard 的纯判定——scope.json 的
-                SCOPE-RUNTIME 明禁 launch-with-missing-or-ambiguous-capability，
-                而 launchMe3 会真实启动零售游戏。
-              */}
-              <Me3RuntimePanel />
-            </div>
-          </section>
+          <SettingsPanelView active={sidebarView === 'settings'} closeButton={<SidebarCloseButton onClose={() => setSidebarCollapsed(true)} />}
+            isBrowserPreview={isBrowserPreview} workspace={{ sessionMeta, baseRootChoice, chooseBaseDirectory, clearBaseDirectory }}
+            spectralTheme={spectralTheme} runtimeSettings={runtimeSettings} bridge={bridge} />
 
           <div className="sidebar-resizer" onPointerDown={startSidebarResize} aria-hidden="true"></div>
         </aside>
@@ -2723,7 +1304,7 @@ export function App(): ReactElement {
                 entries={fmgEntries}
                 live={fmgPanelLive}
                 revealRequest={fmgRevealRequest}
-                onRevealHandled={() => setFmgRevealRequest(null)}
+                onRevealHandled={clearFmgRevealRequest}
                 onMutation={submitFmgEntry}
               />
             </>
@@ -2755,117 +1336,9 @@ export function App(): ReactElement {
                   fields: paramFieldDefs
                 };
               }}
-              onApplyFieldMutation={async (input) => {
-                /*
-                 * 容器内 param 的字段写入：改字段 → 重打包容器 → Patch Engine 提交。
-                 *
-                 * 走 resource.applyContainerParamFieldMutation（main 侧三段链：
-                 * applyParamFieldMutation 编码 → write-param 出裸 param →
-                 * write-bnd4 replace 塞回容器）。两个哈希原样透传，是并发保护凭据。
-                 *
-                 * 直接调 IPC 而不经 changeStore：这条写入本身已经过 main 的确认端口
-                 * （electronConfirmationPort）与 Patch Engine 的备份/回滚，再套一层
-                 * 候选队列会变成双重确认。行级 mutation 走队列是因为它在渲染器侧
-                 * 攒批，字段写入是即时单条。
-                 */
-                if (!bridge || typeof bridge.applyContainerParamFieldMutation !== 'function') {
-                  return { ok: false, message: '容器 PARAM 字段写入通道不可用。' };
-                }
-                // S29：哈希是 main 侧并发保护凭据，缺了由 main 写时现算 ——
-                // renderer 不再以「缺哈希」拒绝已经画出来的字段。
-                const saved = await bridge.applyContainerParamFieldMutation(
-                  paramWorkbenchFile.sourceUri,
-                  input.expectedContainerHash || '',
-                  {
-                    entryIndex: input.entryIndex,
-                    expectedChildHash: input.expectedChildHash,
-                    rowIndex: input.rowIndex,
-                    rowId: input.rowId,
-                    expectedDataHash: input.expectedDataHash,
-                    ...(input.expectedRowDataSize !== undefined ? { expectedRowDataSize: input.expectedRowDataSize } : {}),
-                    fieldId: input.fieldId,
-                    value: input.value,
-                    rowDataBase64: input.rowDataBase64,
-                    definition: input.definition
-                  }
-                );
-                if (saved.ok) {
-                  setStatus(
-                    `PARAM 字段已写入：${input.paramName} 行 ${input.rowId} 的 ${input.fieldId}。`
-                  );
-                  void refreshOperationHistory();
-                  return { ok: true };
-                }
-                const message = saved.diagnostics?.[0]?.message ?? 'PARAM 字段写入失败。';
-                setStatus(`PARAM 字段写入失败：${message}`);
-                return { ok: false, message };
-              }}
-              onApplyRowNameMutation={async (input) => {
-                /*
-                 * 容器内 param 的**行名**写入（T5-3）：与字段写入同一条 Patch 链
-                 * （write-param upsert 带 name → write-bnd4 → Patch Engine），
-                 * 不经 fs.writeFile。两个哈希原样透传，是并发保护凭据。
-                 */
-                if (!bridge || typeof bridge.applyContainerParamRowNameMutation !== 'function') {
-                  return { ok: false, message: '容器 PARAM 行名写入通道不可用。' };
-                }
-                // S29：哈希由 main 写时现算兜底，缺哈希不再挡行名写入。
-                const saved = await bridge.applyContainerParamRowNameMutation(
-                  paramWorkbenchFile.sourceUri,
-                  input.expectedContainerHash || '',
-                  {
-                    entryIndex: input.entryIndex,
-                    expectedChildHash: input.expectedChildHash,
-                    rowIndex: input.rowIndex,
-                    rowId: input.rowId,
-                    expectedDataHash: input.expectedDataHash,
-                    ...(input.expectedRowDataSize !== undefined ? { expectedRowDataSize: input.expectedRowDataSize } : {}),
-                    name: input.name,
-                    rowDataBase64: input.rowDataBase64
-                  }
-                );
-                if (saved.ok) {
-                  setStatus(
-                    `PARAM 行名已写入：${input.paramName} 行 ${input.rowId} →「${input.name}」。`
-                  );
-                  void refreshOperationHistory();
-                  return { ok: true };
-                }
-                const message = saved.diagnostics?.[0]?.message ?? 'PARAM 行名写入失败。';
-                setStatus(`PARAM 行名写入失败：${message}`);
-                return { ok: false, message };
-              }}
-              onApplyRowMutation={async (input) => {
-                /*
-                 * 容器内 param 的**行级**写入（问题 4）：新建/复制/删除当前行。
-                 * 与字段/行名写入同一条 Patch 链（write-param add/delete →
-                 * write-bnd4 → Patch Engine），不经 fs.writeFile、不经 changeStore。
-                 */
-                if (!bridge || typeof bridge.applyContainerParamRowMutations !== 'function') {
-                  return { ok: false, message: '容器 PARAM 行级写入通道不可用。' };
-                }
-                // S29：哈希由 main 写时现算兜底，缺哈希不挡行级写入。
-                const saved = await bridge.applyContainerParamRowMutations(
-                  paramWorkbenchFile.sourceUri,
-                  input.expectedContainerHash || '',
-                  {
-                    kind: input.kind,
-                    entryIndex: input.entryIndex,
-                    expectedChildHash: input.expectedChildHash,
-                    rowId: input.rowId,
-                    rowDataBase64: input.rowDataBase64
-                  }
-                );
-                const label = input.kind === 'add' ? '新建' : input.kind === 'copy' ? '复制' : '删除';
-                if (saved.ok) {
-                  setStatus(`PARAM ${label}行已保存：${input.paramName} 行 ${input.rowId}。`);
-                  void refreshOperationHistory();
-                  return { ok: true };
-                }
-                const message = saved.diagnostics?.[0]?.message ?? 'PARAM 行级写入失败。';
-                setStatus(`PARAM ${label}行失败：${message}`);
-                return { ok: false, message };
-              }}
+              onApplyFieldMutation={applyContainerParamFieldMutation}
+              onApplyRowNameMutation={applyContainerParamRowNameMutation}
+              onApplyRowMutation={applyContainerParamRowMutation}
             />
           )}
           {activeEditor === 'param-rows' && (
@@ -2884,80 +1357,7 @@ export function App(): ReactElement {
                 onReadRows={readParamRowsForPanel}
                 revealRowId={paramRevealRowId}
                 onRevealHandled={() => setParamRevealRowId(null)}
-                onMutation={(mutation) => {
-                  if (!paramLive || !selectedFile) {
-                    setStatus('当前 PARAM 未实时加载，不能写入；请先选中可解析资源。');
-                    return;
-                  }
-                  if (!bridge) {
-                    setStatus(describeBridgeAbsence('写入 PARAM 行'));
-                    return;
-                  }
-                  // S29：裸 .param 行增删/复制与容器 PARAM、FMG 同一把尺子 ——
-                  // 直接 applyParamMutation → Patch Engine，不进审查队列。
-                  const target = selectedFile;
-                  const run = async (): Promise<void> => {
-                    if (mutation.kind === 'param_row_delete') {
-                      if (!mutation.identity) {
-                        setStatus('缺少物理行身份，拒绝按 id 猜测删除目标。');
-                        return;
-                      }
-                      const result = await bridge.applyParamMutation(
-                        target.sourceUri,
-                        paramSourceHash ?? '',
-                        {
-                          kind: 'delete',
-                          id: mutation.id,
-                          rowIndex: mutation.identity.rowIndex,
-                          expectedDataHash: mutation.identity.dataHash
-                        }
-                      );
-                      if (!result.ok) {
-                        const message = result.diagnostics?.[0]?.message ?? 'PARAM 行删除失败。';
-                        setStatus(`PARAM 行删除失败：${message}`);
-                        pushToast(`PARAM 行删除失败：${message}`, 'warn');
-                        return;
-                      }
-                      await reloadParamRowsFromSource();
-                      await refreshOperationHistory();
-                      setStatus(`PARAM 行 ${mutation.id} 已删除并保存。`);
-                      pushToast('已保存');
-                      return;
-                    }
-                    // Duplicate/upsert payload: the paged table carries the full row
-                    // bytes (dataBase64); fall back to the App-side payload map
-                    // for rows outside the current page.
-                    const payload =
-                      mutation.dataBase64
-                      ?? (mutation.sourceIdentity
-                        ? paramRowPayloads.get(paramPhysicalRowKey(mutation.sourceIdentity))
-                        : undefined);
-                    if (!payload) {
-                      setStatus('缺少 row dataBase64，无法写入（截断行）。');
-                      return;
-                    }
-                    const result = await bridge.applyParamMutation(
-                      target.sourceUri,
-                      paramSourceHash ?? '',
-                      { kind: 'upsert', id: mutation.id, dataBase64: payload }
-                    );
-                    if (!result.ok) {
-                      const message = result.diagnostics?.[0]?.message ?? 'PARAM 行写入失败。';
-                      setStatus(`PARAM 行写入失败：${message}`);
-                      pushToast(`PARAM 行写入失败：${message}`, 'warn');
-                      return;
-                    }
-                    await reloadParamRowsFromSource();
-                    await refreshOperationHistory();
-                    setStatus(
-                      mutation.sourceId !== undefined
-                        ? `PARAM 行 ${mutation.sourceId} 已复制到 ${mutation.id} 并保存。`
-                        : `PARAM 行 ${mutation.id} 已保存。`
-                    );
-                    pushToast('已保存');
-                  };
-                  void run();
-                }}
+                onMutation={applyParamRowMutationFromPanel}
               />
               {paramLive && paramFieldDefinition !== null && paramFieldDefsOrigin === 'fixture' && (
                 <p className="muted" data-testid="param-fielddefs-readonly">
@@ -3153,7 +1553,7 @@ export function App(): ReactElement {
                             className="btn btn--ghost btn--sm"
                             onClick={() => {
                               setSidebarCollapsed(false);
-                              setSidebarView('staging');
+                              showSidebarView('staging');
                             }}
                           >
                             审查
@@ -3275,12 +1675,7 @@ export function App(): ReactElement {
               setAgentWidth((width) => width >= AGENT_MAX_WIDTH ? AGENT_DEFAULT_WIDTH : AGENT_MAX_WIDTH);
             }}
             interactionMode={agentInteractionMode}
-            onInteractionModeChange={(mode) => {
-              setAgentInteractionMode(mode);
-              try {
-                window.localStorage.setItem('soulforge:agentInteractionMode', mode);
-              } catch {}
-            }}
+            onInteractionModeChange={changeAgentInteractionMode}
             onClose={() => setAgentOpen(false)}
             onRunToolSearch={(toolQuery) => void runToolSearch(toolQuery)}
             onExplainEvent={(uri) => void explainEvent(uri)}

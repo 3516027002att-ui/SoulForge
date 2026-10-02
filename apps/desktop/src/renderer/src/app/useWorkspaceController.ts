@@ -1,3 +1,4 @@
+import type { OperationHistoryRefreshOutcome } from './useChangeOperationsController.js';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ToolDescriptor } from '@soulforge/core';
 import type { AnalyzeWorkspaceSummary, DirectorySelection, RendererWorkspaceScanResult, RendererWorkspaceSession } from '../../../main/ipc.js';
@@ -13,7 +14,7 @@ export interface WorkspaceOptions {
   onWorkspaceRemounted(result: Awaited<ReturnType<WorkspaceBridge['remountBase']>>): void;
   onSearchActivated(): void;
   onAnalysisLoaded(analysis: AnalyzeWorkspaceSummary): void;
-  refreshOperationHistory(): Promise<void>;
+  refreshOperationHistory(): Promise<OperationHistoryRefreshOutcome>;
 }
 export function useWorkspaceController(options: WorkspaceOptions) {
   const { bridge, setStatus, pushToast, announceDesktopOnly, onWorkspaceInstalled, onWorkspaceRemounted, onSearchActivated, onAnalysisLoaded, refreshOperationHistory } = options;

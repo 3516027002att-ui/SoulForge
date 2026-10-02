@@ -84,7 +84,7 @@ it('an old selected-row payload result cannot populate the next document cache',
 it('an old explicit reload cannot overwrite a newly selected document', async () => {
   const p = ports(), h = await mount(p.options), pending = deferred<OpenParamSessionSuccess>();
   p.options.bridge!.openParamSession = request => request.sourceUri.endsWith('/a') ? pending.promise : Promise.resolve(opened('b'));
-  let reloading!: Promise<void>; await act(async () => { reloading = h.current().reloadParamRowsFromSource(); });
+  let reloading!: ReturnType<ParamDocumentController['reloadParamRowsFromSource']>; await act(async () => { reloading = h.current().reloadParamRowsFromSource(); });
   await h.update({ ...p.options, selectedFile: file('b') });
   await act(async () => { pending.resolve(opened('a')); await reloading; });
   assert.equal(h.current().paramSourceHash, 'hash-b'); assert.equal(h.current().paramTypeName, 'b');
@@ -175,4 +175,57 @@ it('a late postcommit reload failure after disposal retains the original receipt
   let result!: Awaited<typeof saving>;
   await act(async () => { pending.reject(new Error('owned disposed reload failure')); result = await saving; });
   assert.equal(result, receipt); assert.deepEqual(p.toasts, []); assert.equal(p.histories(), 0);
+});
+
+it('shared PARAM command ownership follows the actual reset lifetime and cannot revive a retained closure', async () => {
+  for (const boundary of ['selection', 'reset', 'bridge', 'round-trip', 'unmount'] as const) {
+    const p = ports(), h = await mount(p.options);
+    const owns = h.current().ownsParamDocument;
+    assert.equal(owns(), true);
+    if (boundary === 'selection') await h.update({ ...p.options, selectedFile: file('b') });
+    else if (boundary === 'reset') await act(async () => h.current().resetParamDocument());
+    else if (boundary === 'bridge') await h.update({ ...p.options, bridge: { ...p.options.bridge! } });
+    else if (boundary === 'round-trip') { await h.update({ ...p.options, selectedFile: file('b') }); await h.update(p.options); }
+    else await h.unmount();
+    assert.equal(owns(), false, `${boundary} invalidates the old command owner`);
+    if (boundary !== 'unmount') assert.equal(h.current().ownsParamDocument(), true);
+    assert.deepEqual(p.saves, []);
+  }
+});
+
+for (const phase of ['open', 'index'] as const) {
+  it(`committed field structured ${phase} readback failure returns its receipt with a fixed warning`, async () => {
+    const p = ports(), h = await mount(p.options);
+    const receipt = { ok: true as const, changedFiles: ['resource://owned/a'], diagnostics: [], opId: 'owned-commit' };
+    const diagnostic = { severity: 'error' as const, code: 'OWNED_READBACK_FAILED', message: 'synthetic read failure' };
+    let saves = 0;
+    p.options.bridge!.applyParamFieldMutation = async () => { saves++; return receipt; };
+    if (phase === 'open') p.options.bridge!.openParamSession = async () => ({ ok: false, diagnostics: [diagnostic] });
+    else {
+      p.options.bridge!.openParamSession = async () => ({ ...opened('a'), rowCount: 2 });
+      p.options.bridge!.readParamIndexPage = async () => ({ ok: false, diagnostics: [diagnostic] });
+    }
+    let result!: Awaited<ReturnType<ParamDocumentController['applyParamFieldMutationFromPanel']>>;
+    await act(async () => { result = await h.current().applyParamFieldMutationFromPanel({ rowId: 10, identity: identity('a'), fieldId: 'priority', value: 7, rowDataBase64: 'AA==', definition: h.current().paramFieldDefinition }); });
+    assert.equal(result.ok, true); assert.equal(saves, 1);
+    assert.equal((result as typeof receipt).opId, receipt.opId);
+    assert.deepEqual((result as typeof receipt).changedFiles, receipt.changedFiles);
+    assert.ok(result.diagnostics?.some(d => d.code === 'POSTCOMMIT_PARAM_RELOAD_FAILED'));
+    assert.deepEqual(p.toasts, ['PARAM 字段 priority 已保存，但文档重读失败。']);
+    assert.equal(p.histories(), 0);
+  });
+}
+
+it('a structured history failure preserves committed field facts and warning feedback', async () => {
+  const p = ports(), h = await mount(p.options);
+  const receipt = { ok: true as const, changedFiles: ['resource://owned/a'], diagnostics: [], opId: 'owned-commit' };
+  p.options.bridge!.applyParamFieldMutation = async (...args) => { p.saves.push(args); return receipt; };
+  p.options.refreshOperationHistory = async () => ({ ok: false }); await h.update(p.options);
+  let result!: Awaited<ReturnType<ParamDocumentController['applyParamFieldMutationFromPanel']>>;
+  await act(async () => { result = await h.current().applyParamFieldMutationFromPanel({ rowId: 10, identity: identity('a'), fieldId: 'priority', value: 7, rowDataBase64: 'AA==', definition: h.current().paramFieldDefinition }); });
+  assert.equal(result.ok, true); assert.equal((result as typeof receipt).opId, receipt.opId);
+  assert.deepEqual((result as typeof receipt).changedFiles, receipt.changedFiles);
+  assert.ok(result.diagnostics?.some(d => d.code === 'POSTCOMMIT_HISTORY_REFRESH_FAILED'));
+  assert.deepEqual(p.toasts, ['PARAM 字段 priority 已保存，但操作历史刷新失败。']);
+  assert.equal(p.saves.length, 1);
 });

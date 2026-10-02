@@ -5,60 +5,67 @@ import ts from 'typescript';
 import * as observationModule from '../apps/desktop/e2e/playwright/editor-save-observation.mjs';
 const { createEditorSaveObservation } = observationModule;
 
-async function actualParamCompletionHelper() {
+async function actualParamCompletionHelper(name = 'paramIpcCompletion') {
   const url = new URL('../apps/desktop/e2e/playwright/tests/editor-loaded-comparison.spec.mjs', import.meta.url);
   const source = await readFile(url, 'utf8');
   const ast = ts.createSourceFile(url.pathname, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
-  const helper = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'paramIpcCompletion');
+  const helper = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
   assert.ok(helper, 'The production spec helper must remain discoverable');
   return new Function(`return (${helper.getText(ast)});`)();
 }
 
-test('actual PARAM refetch helper consumes the second Electron evaluate argument and rejects stale or failed pairs', async () => {
+test('actual PARAM refetch helper reads the host tail and rejects stale, pending, failed or lost observations', async () => {
   const helper = await actualParamCompletionHelper(), method = 'resource.readContainerParamPage';
-  const original = Object.getOwnPropertyDescriptor(globalThis, '__editorSaveObservation');
-  const app = { evaluate: async (callback, argument) => callback(Object.freeze({ app: 'owned-electron-type' }), argument) };
+  const checkpoint = await actualParamCompletionHelper('paramObservationCheckpoint');
   const start = { stage: 'ipc', method, state: 'start' };
   const finish = { stage: 'ipc', method, state: 'finish', ok: true };
-  try {
-    for (const [events, observedEvents, after, expected] of [
-      [[start, finish], 12, 10, 12],
-      [[start, finish], 12, 12, null],
-      [[start, finish], 12, 11, null],
-      [[start], 11, 10, null],
-      [[start, { ...finish, ok: false }], 12, 10, null],
-      [[start, { stage: 'ipc', method, state: 'throw' }], 12, 10, null],
-      [[{ ...start, method: 'resource.readContainerParamRowIndex' }, { ...finish, method: 'resource.readContainerParamRowIndex' }], 12, 10, null]
-    ]) {
-      Reflect.set(globalThis, '__editorSaveObservation', () => ({ events, observedEvents }));
-      assert.equal(await helper(app, after, method), expected);
-    }
-  } finally {
-    if (original) Object.defineProperty(globalThis, '__editorSaveObservation', original);
-    else Reflect.deleteProperty(globalThis, '__editorSaveObservation');
+  const clean = { observerErrors: 0, droppedPublished: 0,
+    transportDroppedEvents: 0, transportDroppedInput: 0, transportErrors: 0 };
+  for (const [events, observedEvents, after, expected] of [
+    [[start, finish], 12, 10, 12],
+    [[start, finish], 12, 12, null],
+    [[start, finish], 12, 11, null],
+    [[start], 11, 10, null],
+    [[start, { ...finish, ok: false }], 12, 10, null],
+    [[start, { stage: 'ipc', method, state: 'throw' }], 12, 10, null],
+    [[{ ...start, method: 'resource.readContainerParamRowIndex' }, { ...finish, method: 'resource.readContainerParamRowIndex' }], 12, 10, null],
+    [[start, { ...finish, ok: false }, start, finish], 14, 10, 14]
+  ]) {
+    const tail = { snapshot: () => ({ ...clean, events, observedEvents }) };
+    assert.equal(await checkpoint(tail), observedEvents);
+    assert.equal(await helper(tail, after, method), expected);
+  }
+  for (const counter of Object.keys(clean)) {
+    const tail = { snapshot: () => ({ ...clean, [counter]: 1, events: [start, finish], observedEvents: 12 }) };
+    await assert.rejects(() => checkpoint(tail), /EDITOR_SAVE_OBSERVATION_TRANSPORT_LOST/);
+    await assert.rejects(() => helper(tail, 10, method), /EDITOR_SAVE_OBSERVATION_TRANSPORT_LOST/);
   }
 });
 
-test('current PARAM save remains pending until its original observed listener finishes, despite an older success', async () => {
-  const helper = await actualParamCompletionHelper(), h = ports(), method = 'resource.applyContainerParamFieldMutation';
-  const original = Object.getOwnPropertyDescriptor(globalThis, '__editorSaveObservation');
-  const app = { evaluate: async (callback, argument) => callback(Object.freeze({ app: 'owned-electron-type' }), argument) };
+test('current PARAM save is read from the original published tail, staying pending after an older success', async () => {
+  const helper = await actualParamCompletionHelper(), method = 'resource.applyContainerParamFieldMutation';
+  const tail = observationModule.createEditorSaveObservationTail();
+  let hold = false; const withheld = [];
+  const h = ports(undefined, (event, counters) => {
+    const packet = `${observationModule.EDITOR_SAVE_OBSERVATION_PREFIX}${JSON.stringify({ event, counters })}\n`;
+    if (hold) withheld.push(packet); else tail.consume(packet);
+  });
   let resolve;
   try {
     h.ipcMain.handle(method, () => ({ ok: true }));
     await h.handlers.get(method)();
-    const checkpoint = h.snapshot().observedEvents;
+    // Original invalid save has settled, but its stdout copy arrives later.
+    hold = true; h.ipcMain.handle(method, () => ({ ok: false }));
+    await h.handlers.get(method)();
+    const checkpoint = tail.snapshot().observedEvents;
+    hold = false; for (const packet of withheld) tail.consume(packet);
+    assert.equal(await helper(tail, checkpoint, method), null);
     h.ipcMain.handle(method, () => new Promise(done => { resolve = done; }));
     const pending = h.handlers.get(method)();
-    Reflect.set(globalThis, '__editorSaveObservation', h.snapshot);
-    assert.equal(await helper(app, checkpoint, method), null);
+    assert.equal(await helper(tail, checkpoint, method), null);
     resolve({ ok: true }); await pending;
-    assert.equal(await helper(app, checkpoint, method), h.snapshot().observedEvents);
-  } finally {
-    h.restore();
-    if (original) Object.defineProperty(globalThis, '__editorSaveObservation', original);
-    else Reflect.deleteProperty(globalThis, '__editorSaveObservation');
-  }
+    assert.equal(await helper(tail, checkpoint, method), h.snapshot().observedEvents);
+  } finally { h.restore(); }
 });
 
 function ports(clock = (() => { let time = 0; return () => ++time; })(), publish) {

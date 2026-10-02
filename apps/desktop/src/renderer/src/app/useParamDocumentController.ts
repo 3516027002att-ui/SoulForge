@@ -1,3 +1,4 @@
+import type { OperationHistoryRefreshOutcome } from './useChangeOperationsController.js';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { PARAM_PAGE_SIZE, createParamSessionMaterializationTracker, paramPhysicalRowKey } from '@soulforge/shared';
 import type { Diagnostic, ParamDefDocument, ParamFieldDef, ParamIndexRow, ParamNativeTelemetry, ParamPhysicalRowIdentity, ParamSessionMaterializationSnapshot } from '@soulforge/shared';
@@ -12,9 +13,11 @@ export interface ParamDocumentOptions {
   selectedFile: RendererIndexedFile | null;
   setStatus(message: string): void;
   pushToast(message: string, kind?: 'ok' | 'warn'): void;
-  refreshOperationHistory(): Promise<void>;
+  refreshOperationHistory(): Promise<OperationHistoryRefreshOutcome>;
   describeBridgeAbsence(operation: string): string;
 }
+
+export type ParamReloadOutcome = void | { ok: false; diagnostics: Diagnostic[] };
 
 const EMPTY_PARAM_ROWS: ParamRowView[] = [];
 
@@ -115,6 +118,13 @@ export function useParamDocumentController(options: ParamDocumentOptions) {
   function ownsDocument(generation: number): boolean {
     const lifetime = documentLifetimeRef.current;
     return lifetime.mounted && lifetime.generation === generation && lifetime.bridge === bridge && lifetime.selectedFile === selectedFile;
+  }
+
+  // Container and raw-row commands share the loaded document's existing reset owner.
+  function ownsParamDocument(): boolean {
+    const lifetime = documentLifetimeRef.current;
+    return lifetime.mounted && lifetime.bridge === bridge && lifetime.selectedFile === selectedFile
+      && lifetime.submissionOwner === submissionOwner;
   }
 
   function resetParamDocument(): void {
@@ -321,7 +331,7 @@ export function useParamDocumentController(options: ParamDocumentOptions) {
     return result.rows;
   }
 
-  async function reloadParamRowsFromSource(): Promise<void> {
+  async function reloadParamRowsFromSource(): Promise<ParamReloadOutcome> {
     if (!bridge || !selectedFile || typeof bridge.openParamSession !== 'function') return;
     const generation = documentLifetimeRef.current.generation;
     if (!ownsDocument(generation)) return;
@@ -330,7 +340,9 @@ export function useParamDocumentController(options: ParamDocumentOptions) {
     if (!reload.ok) {
       setParamLive(false);
       setParamIndexDiagnostic(reload.diagnostics?.[0]?.message ?? 'PARAM 写回后重开会话失败。');
-      return;
+      return { ok: false, diagnostics: reload.diagnostics?.length ? reload.diagnostics : [{
+        severity: 'error', code: 'PARAM_RELOAD_OPEN_FAILED', message: 'PARAM 写回后重开会话失败。'
+      }] };
     }
     const sessionToken = reload.sessionToken;
     paramSessionTokenRef.current = sessionToken;
@@ -375,7 +387,9 @@ export function useParamDocumentController(options: ParamDocumentOptions) {
         if (!ownsDocument(generation)) return;
         if (!pageResult.ok) {
           setParamIndexDiagnostic(pageResult.diagnostics?.[0]?.message ?? 'PARAM 写回后索引续读失败。');
-          break;
+          return { ok: false, diagnostics: pageResult.diagnostics?.length ? pageResult.diagnostics : [{
+            severity: 'error', code: 'PARAM_RELOAD_INDEX_FAILED', message: 'PARAM 写回后索引续读失败。'
+          }] };
         }
         tracker.observeIndex(pageResult.rows);
         setParamRows((current) => mergeParamRowViews(current, pageResult.rows));
@@ -449,7 +463,8 @@ export function useParamDocumentController(options: ParamDocumentOptions) {
       // only invalidates its projection; it never cancels or replays the write.
       if (!ownsDocument(generation)) return result;
       try {
-        await reloadParamRowsFromSource();
+        const reloaded = await reloadParamRowsFromSource();
+        if (reloaded?.ok === false) throw new Error('PARAM structured readback failed');
       } catch {
         if (!ownsDocument(generation)) return result;
         const message = `PARAM 字段 ${input.fieldId} 已保存，但文档重读失败。`;
@@ -459,7 +474,8 @@ export function useParamDocumentController(options: ParamDocumentOptions) {
       }
       if (!ownsDocument(generation)) return result;
       try {
-        await refreshOperationHistory();
+        const history = await refreshOperationHistory();
+        if (history?.ok === false) throw new Error('History refresh failed');
       } catch {
         if (!ownsDocument(generation)) return result;
         const message = `PARAM 字段 ${input.fieldId} 已保存，但操作历史刷新失败。`;
@@ -493,6 +509,6 @@ export function useParamDocumentController(options: ParamDocumentOptions) {
     };
   }, [paramFieldDefs, paramTypeName, paramRowDataSize, paramFieldDefsOrigin]);
 
-  return { paramTypeName, paramRows, paramRowCount, paramSourceHash, paramLive, paramRowPayloads, paramIndexLoading, paramIndexDiagnostic, paramFieldDefs, paramFieldEnums, paramFieldDefsOrigin, paramFieldDefsDiagnostic, paramRowDataSize, paramRevealRowId, setParamRevealRowId, readParamRowsForPanel, reloadParamRowsFromSource, applyParamFieldMutationFromPanel, paramFieldDefinition, resetParamDocument };
+  return { paramTypeName, paramRows, paramRowCount, paramSourceHash, paramLive, paramRowPayloads, paramIndexLoading, paramIndexDiagnostic, paramFieldDefs, paramFieldEnums, paramFieldDefsOrigin, paramFieldDefsDiagnostic, paramRowDataSize, paramRevealRowId, setParamRevealRowId, readParamRowsForPanel, reloadParamRowsFromSource, applyParamFieldMutationFromPanel, paramFieldDefinition, resetParamDocument, ownsParamDocument };
 }
 export type ParamDocumentController = ReturnType<typeof useParamDocumentController>;

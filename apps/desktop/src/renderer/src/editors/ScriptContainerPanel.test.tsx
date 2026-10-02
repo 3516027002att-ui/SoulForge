@@ -149,23 +149,24 @@ describe('13-A luabnd 子项按 index 走 native 读链（名字 basename / 失�
     join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'ScriptContainerPanel.tsx'),
     'utf8'
   );
-  // IPC 物理拆分后，脚本容器读链位于 ipc/raw.ts（save 链仍在组合根 ipc.ts）。
+  // IPC 物理拆分后，脚本容器读链位于 services/rawResourceService.ts（save 链仍在组合根 ipc.ts）。
   const ipcSource = readFileSync(
-    join(repoRoot, 'apps', 'desktop', 'src', 'main', 'ipc', 'raw.ts'),
+    join(repoRoot, 'apps', 'desktop', 'src', 'main', 'services', 'rawResourceService.ts'),
     'utf8'
   );
   // 切片到具体 handler，避免把别的通道（save / plaintext 视图）算进来。
   const listHandler = ipcSource.slice(
-    ipcSource.indexOf("'resource.listScriptContainerEntriesPage'"),
-    ipcSource.indexOf("'resource.readScriptEntryPlaintext'")
+    ipcSource.indexOf('const listScriptContainerEntriesPage = async'),
+    ipcSource.indexOf('const readScriptEntryPlaintext = async')
   );
   // saveScriptSource 不在本文件；readScriptSource 是最后一个读链 handler。
   const sourceHandler = ipcSource.slice(
-    ipcSource.indexOf("'resource.readScriptSource'")
+    ipcSource.indexOf('const readScriptSource = async'),
+    ipcSource.indexOf('const supersededRead')
   );
   const childReader = ipcSource.slice(
     ipcSource.indexOf('function scriptEntryEvidenceFromBridge'),
-    ipcSource.indexOf('export function clearRawIpcCaches')
+    ipcSource.indexOf('export function clearRawResourceCaches')
   );
 
   it('列表出站名经 sanitizeEntryName（内层绝对路径不被打成「本机路径已隐藏」）', () => {
@@ -182,6 +183,7 @@ describe('13-A luabnd 子项按 index 走 native 读链（名字 basename / 失�
     // readContainerChild→readSyntheticBnd（真 luabnd 无 SFBN 标记必失败）。
     assert.match(sourceHandler, /readScriptContainerChildByIndex\(/);
     assert.doesNotMatch(sourceHandler, /readContainerChild\(/);
+    assert.doesNotMatch(sourceHandler, /readNativeContainerChild\(/);
     assert.doesNotMatch(sourceHandler, /const childUri =/);
     assert.match(childReader, /snapshot-bnd4-child/);
     assert.match(childReader, /commandOptions: \{ entryIndex: input\.entryIndex \}/);
@@ -225,9 +227,9 @@ describe('S34 脚本全量读写（main 侧按打开编码写回，不硬编码 
     join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'services', 'scriptSourceService.ts'),
     'utf8'
   );
-  // 读取侧（encoding 回传）在 ipc/raw.ts，脚本保存链由 application service 持有。
+  // 读取侧（encoding 回传）在 services/rawResourceService.ts，脚本保存链由 application service 持有。
   const rawSource = readFileSync(
-    join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc', 'raw.ts'),
+    join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'services', 'rawResourceService.ts'),
     'utf8'
   );
   // 容器条目分支与独立文件分支都在同一个 application operation 内。

@@ -125,41 +125,50 @@ async function readParamRow(page, sourceUri) {
   }, sourceUri);
 }
 
-/** @param {import('playwright').ElectronApplication} app */
-async function paramObservationCheckpoint(app) {
-  return app.evaluate(() => {
-    const snapshot = Reflect.get(globalThis, '__editorSaveObservation');
-    if (typeof snapshot !== 'function') throw new Error('EDITOR_SAVE_OBSERVER_UNAVAILABLE');
-    return snapshot().observedEvents;
-  });
+// These fixed counters are populated/validated by the existing host-tail parser;
+// Object.fromEntries does not retain their names in its inferred return type.
+/** @typedef {ReturnType<ReturnType<typeof createEditorSaveObservationTail>['snapshot']> & {
+ * observedEvents: number, observerErrors: number, droppedPublished: number
+ * }} EditorObservationSnapshot */
+
+/** @param {ReturnType<typeof createEditorSaveObservationTail>} observationTail */
+async function paramObservationCheckpoint(observationTail) {
+  const observation = /** @type {EditorObservationSnapshot} */ (observationTail.snapshot());
+  if ([observation.observerErrors, observation.droppedPublished, observation.transportDroppedEvents,
+    observation.transportDroppedInput, observation.transportErrors].some(count => count !== 0)) {
+    throw new Error('EDITOR_SAVE_OBSERVATION_TRANSPORT_LOST');
+  }
+  return observation.observedEvents;
 }
 
-/** @param {import('playwright').ElectronApplication} app */
-async function paramIpcCompletion(app, after, method) {
-  return app.evaluate((_electron, { after, method }) => {
-    const snapshot = Reflect.get(globalThis, '__editorSaveObservation');
-    if (typeof snapshot !== 'function') throw new Error('EDITOR_SAVE_OBSERVER_UNAVAILABLE');
-    const observation = snapshot();
-    let started = false;
-    for (const [index, event] of observation.events.entries()) {
-      const sequence = observation.observedEvents - observation.events.length + index + 1;
-      if (sequence <= after || event.stage !== 'ipc' || event.method !== method) continue;
-      if (event.state === 'start') started = true;
-      else if (started && event.state === 'finish' && event.ok === true) return sequence;
-      else if (started && (event.state === 'finish' || event.state === 'throw')) return null;
-    }
-    return null;
-  }, { after, method });
+/** @param {ReturnType<typeof createEditorSaveObservationTail>} observationTail */
+async function paramIpcCompletion(observationTail, after, method) {
+  const observation = /** @type {EditorObservationSnapshot} */ (observationTail.snapshot());
+  if ([observation.observerErrors, observation.droppedPublished, observation.transportDroppedEvents,
+    observation.transportDroppedInput, observation.transportErrors].some(count => count !== 0)) {
+    throw new Error('EDITOR_SAVE_OBSERVATION_TRANSPORT_LOST');
+  }
+  let started = false;
+  for (const [index, event] of observation.events.entries()) {
+    const sequence = observation.observedEvents - observation.events.length + index + 1;
+    if (sequence <= after || event.stage !== 'ipc' || event.method !== method) continue;
+    if (event.state === 'start') started = true;
+    else if (started && event.state === 'finish' && event.ok === true) return sequence;
+    // A delayed prior invalid-save packet can precede the new blur's pair.
+    // Its failure never completes a wait; only a later new successful pair can.
+    else if (started && (event.state === 'finish' || event.state === 'throw')) started = false;
+  }
+  return null;
 }
 
-/** @param {import('playwright').ElectronApplication} app */
-async function waitForParamReload(app, beforeSave) {
+/** @param {ReturnType<typeof createEditorSaveObservationTail>} observationTail */
+async function waitForParamReload(observationTail, beforeSave) {
   // The current save must finish before its UI-owned index -> payload reads.
   // No native API is called here; a stale toast or draft value cannot pass.
   const waitRead = async (after, method, timeout) => {
     let finished = null;
     await expect.poll(async () => {
-      finished = await paramIpcCompletion(app, after, method);
+      finished = await paramIpcCompletion(observationTail, after, method);
       return finished !== null;
     }, { timeout }).toBe(true);
     return finished;
@@ -292,11 +301,11 @@ for (const mode of ['opal', 'obsidian']) {
       await priority.fill('7');
       await page.screenshot({ path: test.info().outputPath(`param-comparison-${mode}.png`) });
       phase = 'param-save';
-      const saveCheckpoint = await paramObservationCheckpoint(app);
+      const saveCheckpoint = await paramObservationCheckpoint(observationTail);
       await priority.press('Tab'); // Real blur -> native field write -> reload.
       await expect(workbench.locator('.wb-toast')).toHaveText('已保存', { timeout: NATIVE_SAVE_COMPLETION_TIMEOUT_MS });
       await expect(workbench.locator('.wb-toast')).toHaveClass(/\bwb-toast--ok\b/);
-      await waitForParamReload(app, saveCheckpoint);
+      await waitForParamReload(observationTail, saveCheckpoint);
       await expect(fieldComparison).toHaveJSProperty('open', false);
       await expect(priority).toBeEditable();
       await expect(priority).toHaveValue('7');
@@ -327,11 +336,11 @@ for (const mode of ['opal', 'obsidian']) {
       phase = 'param-revert';
       await expect(fieldComparison).toContainText('没有草稿差异。');
       // Switch while unchanged: existing blur-save semantics remain in force.
-      const revertCheckpoint = await paramObservationCheckpoint(app);
+      const revertCheckpoint = await paramObservationCheckpoint(observationTail);
       await priority.press('Tab');
       await expect(workbench.locator('.wb-toast')).toHaveText('已保存', { timeout: NATIVE_SAVE_COMPLETION_TIMEOUT_MS });
       await expect(workbench.locator('.wb-toast')).toHaveClass(/\bwb-toast--ok\b/);
-      await waitForParamReload(app, revertCheckpoint);
+      await waitForParamReload(observationTail, revertCheckpoint);
       await expect(priority).toBeEditable();
       await expect(priority).toHaveValue('7');
       await workbench.getByRole('region', { name: '行', exact: true }).getByRole('row', { name: /^101\b/ }).click();

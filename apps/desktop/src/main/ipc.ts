@@ -55,7 +55,7 @@ import { createSessionCommitPort } from './services/sessionCommitService.js';
 import { registerAgentIpcHandlers, hasActiveAgentRuns, isAgentSessionActive, scheduleInternalRagEmbedding } from './ipc/agent.js';
 import { registerResourceIpcHandlers } from './ipc/resource.js';
 import { resolveWorkspaceStoragePaths, type WorkspaceStoragePaths } from './workspaceStorage.js';
-import { WorkspaceDatabaseOpenGate } from './workspaceDatabaseOpenGate.js';
+import { createWorkspaceUtilityLifecycleService } from './services/workspaceUtilityLifecycleService.js';
 import { createPostCommitSemanticAnalysisOptions } from './postCommitSemanticAnalysis.js';
 import {
   analyzeWorkspace,
@@ -121,7 +121,6 @@ import {
   readRawResourceMetadata,
   readRawResourceRange,
   replaceContainerChild,
-  resolveOperationLogStorePath,
   resolveResourceCapabilities,
   rollbackFile,
   rollbackOperation,
@@ -166,8 +165,6 @@ import {
   bumpPathSourceGeneration,
   mapExportFromMsbDocument
 } from '@soulforge/core';
-import type { KnowledgeStore } from '@soulforge/core';
-import { createReadOnlyKnowledgeStore } from './knowledgeStoreSnapshot.js';
 import {
   CONTAINER_PAGE_SIZE,
   FMG_PAGE_SIZE,
@@ -247,7 +244,6 @@ import {
 } from './rendererDto.js';
 import { OperationLogUtilityClient, type WorkspaceBoundUtilityStore } from './operationLogUtilityClient.js';
 import { clearRecentPath, readRecentPath, writeRecentPath } from './recentPaths.js';
-import { executeRecoveryCleanup } from './recoveryCleanup.js';
 import { ModelServiceCredentialVault } from './modelServiceCredentials.js';
 import { MainMe3RuntimeGateway } from './me3RuntimeGateway.js';
 import { persistRagCorpusBySourceDelta } from './ragPersistence.js';
@@ -302,18 +298,6 @@ function safeExists(path: string): boolean {
   }
 }
 
-let activeOperationLog: OperationLogUtilityClient | null = null;
-let activeOperationLogWorkspaceId: string | null = null;
-let activeKnowledgeStore: KnowledgeStore | null = null;
-let activeKnowledgeWorkspaceId: string | null = null;
-let activeKnowledgeStoreError: string | null = null;
-let activeKnowledgeLoad: Promise<void> | null = null;
-let activeKnowledgeLoadWorkspaceId: string | null = null;
-let activeKnowledgeLoadToken: symbol | null = null;
-let activeKnowledgeFailureWorkspaceId: string | null = null;
-let activeKnowledgeRetryAt = 0;
-const KNOWLEDGE_RETRY_COOLDOWN_MS = 1_000;
-const operationLogOpenGate = new WorkspaceDatabaseOpenGate();
 let semanticRefreshInFlight: Promise<void> | null = null;
 let semanticRefreshQueued = false;
 const semanticRefreshSources = new Set<string>();
@@ -565,6 +549,14 @@ const operationLogUtility = new OperationLogUtilityClient(
   15_000,
   sqliteNativeBindingPath
 );
+const utilityLifecycle = createWorkspaceUtilityLifecycleService({
+  operationLogUtility,
+  getActiveSession: getWorkspaceSession,
+  workspaceStoragePaths,
+  getUserDataPath: () => app.getPath('userData'),
+  reportRecoveryCleanupRejections: items => process.stderr.write(`[SoulForge recovery cleanup] ${JSON.stringify(items)}\n`),
+  reportKnowledgeSnapshotUnavailable: message => console.warn(`[SoulForge knowledge] utility snapshot unavailable: ${message}`)
+});
 const modelServiceVault = new ModelServiceCredentialVault(app.getPath('userData'));
 const memoryManager = new MemoryManager(app.getPath('userData'));
 
@@ -605,65 +597,10 @@ interface DirectorySelectionRecord extends DirectorySelection {
   expiresAt: number;
 }
 
-function legacyOperationLogPathForWorkspace(workspaceId: string): string {
-  // workspaceId is a file:// URL from makeWorkspaceId; never join it raw into a Windows path.
-  return resolveOperationLogStorePath(join(app.getPath('userData'), 'operation-logs'), workspaceId);
-}
 
-async function ensureActiveOperationLog(session: WorkspaceSession): Promise<OperationLogUtilityClient> {
-  const workspaceId = session.meta.workspaceId;
-  const assertCurrentSession = (): void => {
-    if (getWorkspaceSession() !== session) {
-      throw Object.assign(new Error('工作区会话已切换，拒绝重新打开旧数据库。'), {
-        code: 'DATABASE_UTILITY_SESSION_STALE'
-      });
-    }
-  };
-  assertCurrentSession();
-  if (activeOperationLog === operationLogUtility && activeOperationLogWorkspaceId === workspaceId) {
-    await ensureActiveKnowledgeStore(session);
-    return operationLogUtility;
-  }
 
-  return operationLogOpenGate.run(workspaceId, async () => {
-    assertCurrentSession();
-    // A concurrent caller may have completed the open while this request was
-    // queued. Never reopen the process-global SQLite utility for the same key.
-    if (activeOperationLog === operationLogUtility && activeOperationLogWorkspaceId === workspaceId) {
-      await ensureActiveKnowledgeStore(session);
-      return operationLogUtility;
-    }
-
-    const storage = workspaceStoragePaths(workspaceId, session.layers.overlayRoot);
-    await operationLogUtility.openWorkspace({
-      appDatabasePath: join(app.getPath('userData'), 'app.db'),
-      databasePath: join(storage.root, 'workspace.db'),
-      ...(storage.migrationSourceDatabasePath ? { migrationSourceDatabasePath: storage.migrationSourceDatabasePath } : {}),
-      workspaceId,
-      rootPath: session.layers.overlayRoot,
-      game: session.meta.game,
-      legacyOperationLogPath: legacyOperationLogPathForWorkspace(workspaceId),
-      legacyBackupDirectory: join(storage.root, 'legacy-operation-logs'),
-      legacySemanticSnapshotPath: join(session.layers.overlayRoot, 'semantic-snapshot.json'),
-      legacySemanticBackupDirectory: join(storage.root, 'legacy-semantic-snapshots')
-    });
-    assertCurrentSession();
-
-    const cleanupPlan = await operationLogUtility.planRecoveryCleanup();
-    const cleanup = await executeRecoveryCleanup({
-      plan: cleanupPlan,
-      allowedRoots: [storage.backupBaseDir, storage.recoveryDir],
-      store: operationLogUtility
-    });
-    if (cleanup.rejected.length > 0) {
-      process.stderr.write(`[SoulForge recovery cleanup] ${JSON.stringify(cleanup.rejected)}\n`);
-    }
-    assertCurrentSession();
-    activeOperationLog = operationLogUtility;
-    activeOperationLogWorkspaceId = workspaceId;
-    await ensureActiveKnowledgeStore(session);
-    return operationLogUtility;
-  }, session);
+function ensureActiveOperationLog(session: WorkspaceSession): Promise<OperationLogUtilityClient> {
+  return utilityLifecycle.ensureActiveOperationLog(session);
 }
 
 function currentToolContext(): ToolContext {
@@ -676,8 +613,8 @@ function currentToolContext(): ToolContext {
   const nativeVersionEpoch = index?.getNativeVersionEpoch();
   const storage = session ? durableStoragePaths(session.meta.workspaceId) : undefined;
   const memoryStore = memoryManager.getStore(index?.workspaceId);
-  const knowledgeStore = session && activeKnowledgeWorkspaceId === session.meta.workspaceId
-    ? activeKnowledgeStore
+  const knowledgeStore = session && utilityLifecycle.activeKnowledgeWorkspaceId === session.meta.workspaceId
+    ? utilityLifecycle.activeKnowledgeStore
     : null;
   return {
     workspaceIndex: index,
@@ -697,10 +634,10 @@ function currentToolContext(): ToolContext {
       ragIndexedFilesRevision: ragSnapshot.indexedFilesRevision
     } : {}),
     ...(session ? { session } : {}),
-    ...(activeOperationLog ? { operationLogStore: activeOperationLog } : {}),
+    ...(utilityLifecycle.activeOperationLog ? { operationLogStore: utilityLifecycle.activeOperationLog } : {}),
     ...(storage ? { backupBaseDir: storage.backupBaseDir, recoveryDir: storage.recoveryDir } : {}),
     ...(knowledgeStore ? { knowledgeStore } : {}),
-    ...(activeKnowledgeStoreError ? { knowledgeStoreDiagnostic: activeKnowledgeStoreError } : {}),
+    ...(utilityLifecycle.activeKnowledgeStoreError ? { knowledgeStoreDiagnostic: utilityLifecycle.activeKnowledgeStoreError } : {}),
     onSemanticEvidenceUpdated: refreshActiveIndexAfterSemanticEvidence,
     onNativeWriteCommitted: refreshActiveIndexAfterNativeWrite,
     isWorkspaceContextCurrent: () => {
@@ -728,75 +665,9 @@ function currentToolContext(): ToolContext {
  * mirror its snapshot into a read-only in-memory KnowledgeStore instead of
  * opening the same SQLite file synchronously on Electron's main thread.
  */
-async function ensureActiveKnowledgeStore(session: WorkspaceSession): Promise<void> {
-  const workspaceId = session.meta.workspaceId;
-  if (activeKnowledgeWorkspaceId === workspaceId && activeKnowledgeStore !== null) return;
-  if (activeKnowledgeLoad && activeKnowledgeLoadWorkspaceId === workspaceId) {
-    await activeKnowledgeLoad;
-    return;
-  }
-  if (activeKnowledgeFailureWorkspaceId === workspaceId && Date.now() < activeKnowledgeRetryAt) return;
-  await disposeActiveKnowledgeStore();
-  const token = Symbol('knowledge-load');
-  activeKnowledgeLoadToken = token;
-  activeKnowledgeLoadWorkspaceId = workspaceId;
-  const load = (async () => {
-    let lastError: unknown;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      if (activeKnowledgeLoadToken !== token) return;
-      if (attempt > 0) await new Promise<void>((resolve) => setTimeout(resolve, 50));
-      try {
-        const snapshot = await operationLogUtility.loadKnowledgeSnapshot({
-          workspaceId,
-          rootPath: session.layers.overlayRoot,
-          game: session.meta.game
-        });
-        if (activeKnowledgeLoadToken !== token) return;
-        activeKnowledgeStore = createReadOnlyKnowledgeStore(snapshot);
-        activeKnowledgeWorkspaceId = workspaceId;
-        activeKnowledgeStoreError = null;
-        activeKnowledgeFailureWorkspaceId = null;
-        activeKnowledgeRetryAt = 0;
-        return;
-      } catch (error) {
-        lastError = error;
-      }
-    }
-    try {
-      if (activeKnowledgeLoadToken !== token) return;
-      activeKnowledgeWorkspaceId = workspaceId;
-      activeKnowledgeStore = null;
-      activeKnowledgeStoreError = lastError instanceof Error ? lastError.message : String(lastError);
-      activeKnowledgeFailureWorkspaceId = workspaceId;
-      activeKnowledgeRetryAt = Date.now() + KNOWLEDGE_RETRY_COOLDOWN_MS;
-      console.warn(`[SoulForge knowledge] utility snapshot unavailable: ${activeKnowledgeStoreError}`);
-    } catch {
-      // A stale load token must never turn cleanup into a new failure.
-    }
-  })();
-  activeKnowledgeLoad = load;
-  try {
-    await load;
-  } finally {
-    if (activeKnowledgeLoadToken === token) {
-      activeKnowledgeLoad = null;
-      activeKnowledgeLoadWorkspaceId = null;
-    }
-  }
-}
 
-async function disposeActiveKnowledgeStore(): Promise<void> {
-  const pending = activeKnowledgeLoad;
-  activeKnowledgeLoadToken = null;
-  activeKnowledgeLoad = null;
-  activeKnowledgeLoadWorkspaceId = null;
-  activeKnowledgeStore = null;
-  activeKnowledgeWorkspaceId = null;
-  activeKnowledgeStoreError = null;
-  activeKnowledgeFailureWorkspaceId = null;
-  activeKnowledgeRetryAt = 0;
-  await pending?.catch(() => undefined);
-}
+
+
 
 async function persistActiveRag(
   database: WorkspaceBoundUtilityStore,
@@ -988,7 +859,7 @@ async function performActiveIndexSemanticRefresh(
       telemetry.finish('invalidated');
       return;
     }
-    const database = activeOperationLog ?? await ensureActiveOperationLog(session);
+    const database = utilityLifecycle.activeOperationLog ?? await ensureActiveOperationLog(session);
     if (sessionId !== getActiveWorkspaceSessionIdState()) {
       telemetry.finish('invalidated');
       return;
@@ -1182,7 +1053,7 @@ async function refreshActiveIndexAfterNativeWrite(
     applyWorkspaceIndexSnapshot(currentIndex);
     assertCurrentGeneration();
 
-    const database = activeOperationLog ?? await ensureActiveOperationLog(session);
+    const database = utilityLifecycle.activeOperationLog ?? await ensureActiveOperationLog(session);
     assertCurrentGeneration();
     return refreshKnowledgeAfterCommit({
       index: currentIndex,
@@ -1483,10 +1354,7 @@ function rejectNonSekiroNativeWrite(sourceUri: string, file?: IndexedFile): Rend
 }
 
 export async function disposeOperationLogUtility(): Promise<void> {
-  activeOperationLog = null;
-  activeOperationLogWorkspaceId = null;
-  await disposeActiveKnowledgeStore();
-  await operationLogUtility.dispose();
+  await utilityLifecycle.dispose();
 }
 
 function handle<Args extends unknown[], Result>(
@@ -1682,8 +1550,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     hasActiveAgentRuns,
     hasActiveRollbacks: hasActiveRollbackRequests,
     hasActiveTransactions: async () => {
-      if (!activeOperationLog) return false;
-      const incomplete = await activeOperationLog.listIncompleteTransactions();
+      if (!utilityLifecycle.activeOperationLog) return false;
+      const incomplete = await utilityLifecycle.activeOperationLog.listIncompleteTransactions();
       return incomplete.length > 0;
     }
   });
@@ -1707,7 +1575,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   registerOperationIpcHandlers({
     handle: trustedHandle,
     get activeSession() { return getWorkspaceSession(); },
-    get activeOperationLog() { return activeOperationLog; },
+    get activeOperationLog() { return utilityLifecycle.activeOperationLog; },
     get indexedFiles() { return getWorkspaceIndexedFiles(); },
     durableStoragePaths,
     requestWriteConfirmation,
@@ -1840,12 +1708,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     handle: trustedHandle,
     ensureActiveOperationLog,
     releaseEditorCaches: releaseWorkspaceEditorCaches,
-    clearActiveOperationLog: async () => {
-      activeOperationLog = null;
-      activeOperationLogWorkspaceId = null;
-      await disposeActiveKnowledgeStore();
-      await operationLogUtility.dispose();
-    },
+    clearActiveOperationLog: () => utilityLifecycle.dispose(),
     verifiedReadRoots,
     scheduleRagEmbedding: scheduleInternalRagEmbedding
   });

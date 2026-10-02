@@ -274,10 +274,8 @@ describe('两处复位站点必须走统一调度', () => {
     // 在 selectFile 实际委派的复位协调体内注入手写清空，判据必须报出来。
     // 用正则而不是字面量匹配：源文件是 CRLF，字面量里的 \n 不会命中，注入会静默
     // 失败而本用例照样通过——那正是「负向 fixture 自己失效」的形态。
-    const injected = source.replace(
-      /resetAllDocuments\(documentResetActions\);(\r?\n\s*)setBnd4Forced\(false\);/,
-      'setTaeData(null);$1setBnd4Forced(false);'
-    );
+    const target = functionBody(source, 'activateResourceSelection');
+    const injected = source.replace(target, target.replace('resetAllDocuments(documentResetActions);', 'setTaeData(null);'));
     assert.notEqual(injected, source, '注入失败：靶标已变，请更新本用例');
 
     const body = functionBody(injected, 'activateResourceSelection');

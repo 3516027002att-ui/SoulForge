@@ -408,3 +408,32 @@ for (const [channel, request] of [
     });
   }
 }
+
+// Owned source-only adapter controls; real runtime capture is separate.
+for (const flag of [undefined, '0', '1']) {
+ test('owned MSB adapter timing option flag '+String(flag), async () => {
+  const original=process.env.SF_MAP_NATIVE_TIMING;
+  if(flag===undefined)delete process.env.SF_MAP_NATIVE_TIMING;else process.env.SF_MAP_NATIVE_TIMING=flag;
+  try {
+   const h=harness();await h.invoke(channels[0],msb.sourceUri);
+   const input=h.calls.find(([kind])=>kind==='msbRead')[1];
+   assert.equal(Object.hasOwn(input,'diagnosticTimings'),flag==='1');
+   assert.equal(Object.hasOwn(input,'workspaceSessionId'),flag==='1');
+   if(flag==='1'){assert.equal(input.diagnosticTimings,true);assert.equal(input.workspaceSessionId,'owned-session');}
+  }finally{if(original===undefined)delete process.env.SF_MAP_NATIVE_TIMING;else process.env.SF_MAP_NATIVE_TIMING=original;}
+ });
+}
+test('owned MSB diagnostic session label is captured before verified-root await',async()=>{
+ const original=process.env.SF_MAP_NATIVE_TIMING;process.env.SF_MAP_NATIVE_TIMING='1';
+ try {
+  const begun=deferred(),roots=deferred();const h=harness({roots:async()=>{begun.resolve();return roots.promise;}});
+  const pending=h.invoke(channels[0],msb.sourceUri);await begun.promise;h.deps.activeWorkspaceSessionId='later-label';
+  roots.resolve({allowedRoots:['/owned/mod'],diagnostics:[]});await pending;
+  assert.equal(h.calls.find(([kind])=>kind==='msbRead')[1].workspaceSessionId,'owned-session');
+ }finally{if(original===undefined)delete process.env.SF_MAP_NATIVE_TIMING;else process.env.SF_MAP_NATIVE_TIMING=original;}
+});
+test('owned missing session label does not invent a logical session',async()=>{
+ const original=process.env.SF_MAP_NATIVE_TIMING;process.env.SF_MAP_NATIVE_TIMING='1';
+ try {const h=harness();h.deps.activeWorkspaceSessionId=null;await h.invoke(channels[0],msb.sourceUri);assert.equal(Object.hasOwn(h.calls.find(([kind])=>kind==='msbRead')[1],'workspaceSessionId'),false);}
+ finally{if(original===undefined)delete process.env.SF_MAP_NATIVE_TIMING;else process.env.SF_MAP_NATIVE_TIMING=original;}
+});

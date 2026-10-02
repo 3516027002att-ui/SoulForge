@@ -1,3 +1,4 @@
+import type { OperationHistoryRefreshOutcome } from './useChangeOperationsController.js';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Diagnostic } from '@soulforge/shared';
 import type { RendererIndexedFile, RendererResourcePreview, RendererSaveResult } from '../../../main/rendererDto.js';
@@ -12,7 +13,7 @@ export interface ResourceDocumentOptions {
   bridge: ResourceDocumentBridge | null;
   setStatus(message: string): void;
   pushToast(message: string, kind?: 'ok' | 'warn'): void;
-  refreshOperationHistory(): Promise<void>;
+  refreshOperationHistory(): Promise<OperationHistoryRefreshOutcome>;
   describeBridgeAbsence(operation: string): string;
   /** Synchronous shell coordination, including the existing document reset registry. */
   onSelectionActivated(): void;
@@ -246,7 +247,10 @@ export function useResourceDocumentController(options: ResourceDocumentOptions) 
       portsRef.current.setStatus(`保存失败：${message}`); portsRef.current.pushToast(`保存失败：${message}`, 'warn');
       return result;
     }
-    try { await portsRef.current.refreshOperationHistory(); }
+    try {
+      const history = await portsRef.current.refreshOperationHistory();
+      if (history?.ok === false) throw new Error('History refresh failed');
+    }
     catch {
       if (ownsDocument()) result = postcommitWarning(result, 'POSTCOMMIT_TEXT_HISTORY_FAILED', '文本已保存，但操作历史刷新失败。');
     }
@@ -279,7 +283,10 @@ export function useResourceDocumentController(options: ResourceDocumentOptions) 
       if (!isCurrent()) return result;
       result = postcommitWarning(result, 'POSTCOMMIT_FLVER_RELOAD_FAILED', 'FLVER 已保存，但文档重读失败。');
     }
-    try { await portsRef.current.refreshOperationHistory(); }
+    try {
+      const history = await portsRef.current.refreshOperationHistory();
+      if (history?.ok === false) throw new Error('History refresh failed');
+    }
     catch {
       if (isCurrent()) result = postcommitWarning(result, 'POSTCOMMIT_FLVER_HISTORY_FAILED', 'FLVER 已保存，但操作历史刷新失败。');
     }

@@ -52,23 +52,37 @@ export class WorkspaceReadLifetime {
     return ((...args:Parameters<Call>)=>this.isCurrent()?call(...args):undefined) as Call;
   }
 
+  /** Application entry without IPC channel or event authority. */
+  run<Result, Superseded>(
+    currentSession: () => WorkspaceSession | null,
+    readOnly: boolean,
+    operation: () => Result | Promise<Result>,
+    onSuperseded: (error: Error) => Superseded
+  ): Promise<Result | Superseded> {
+    return this.reads.run({epoch:this.epoch,session:currentSession(),currentSession,readOnly},async()=>{
+      try {
+        if (readOnly) this.assertCurrent();
+        const result = await operation();
+        if (readOnly) this.assertCurrent();
+        return result;
+      }catch(error){
+        if (!readOnly || !(error instanceof SupersededWorkspaceRead)) throw error;
+        return onSuperseded(error);
+      }
+    });
+  }
+
   register(handle:TrustedIpcHandle,currentSession:()=>WorkspaceSession|null):TrustedIpcHandle {
     return <Args extends unknown[],Result>(channel:string,listener:(event:IpcMainInvokeEvent,...args:Args)=>Result|Promise<Result>)=>{
       // These operations expose resource projections; mutation/commit handlers
       // continue to return their concrete transaction outcomes after settlement.
       const readOnly=/^resource\.(?:read|openParamSession|list|inspect|roundTrip|validate|probe|scriptContainerEvidence)/u.test(channel)
         || /^document\.(?:open|get|page|readContent)$/u.test(channel);
-      handle(channel,(event:IpcMainInvokeEvent,...args:Args)=>this.reads.run({epoch:this.epoch,session:currentSession(),currentSession,readOnly},async()=>{
-        try {
-          if(readOnly)this.assertCurrent();const result=await listener(event,...args);if(readOnly)this.assertCurrent();return result;
-        }catch(error){
-          if(!readOnly||!(error instanceof SupersededWorkspaceRead))throw error;
-          return {ok:false,cancelled:true,...(channel.startsWith('document.')?{code:'runtime-blocked',retryable:true}:{}),diagnostics:[{
+      handle(channel,(event:IpcMainInvokeEvent,...args:Args)=>this.run(currentSession,readOnly,()=>listener(event,...args),()=>
+          ({ok:false,cancelled:true,...(channel.startsWith('document.')?{code:'runtime-blocked',retryable:true}:{}),diagnostics:[{
             severity:'info' as const,code:'WORKSPACE_READ_SUPERSEDED',
             message:'工作区已更换，旧读取结果已丢弃。'
-          }]};
-        }
-      }));
+          }]})));
     };
   }
 

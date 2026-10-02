@@ -50,6 +50,12 @@ const ipcSourcePath = typeof __SOULFORGE_REPO_ROOT__ !== 'undefined'
   : fileURLToPath(new URL('./ipc.ts', import.meta.url));
 const ipcSource = await readFile(ipcSourcePath, 'utf8');
 assert.equal(ipcSource.includes('openWorkspaceDatabase('), false, 'main currentToolContext must not open SQLite synchronously');
-assert.match(ipcSource, /loadKnowledgeSnapshot/);
+const lifecycleSourcePath = typeof __SOULFORGE_REPO_ROOT__ !== 'undefined'
+  ? join(__SOULFORGE_REPO_ROOT__, 'apps/desktop/src/main/services/workspaceUtilityLifecycleService.ts')
+  : fileURLToPath(new URL('./services/workspaceUtilityLifecycleService.ts', import.meta.url));
+const lifecycleSource = await readFile(lifecycleSourcePath, 'utf8');
+assert.equal(lifecycleSource.includes('openWorkspaceDatabase('), false, 'application lifecycle must not open SQLite synchronously');
+assert.match(ipcSource, /createWorkspaceUtilityLifecycleService/);
+assert.match(lifecycleSource, /loadKnowledgeSnapshot/);
 
 console.log('knowledgeStoreSnapshot: PASS (read-only CAS fail-closed)');

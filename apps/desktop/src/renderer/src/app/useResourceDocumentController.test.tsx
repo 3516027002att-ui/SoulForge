@@ -356,3 +356,20 @@ for (const edit of ['add', 'remove'] as const) {
     assert.equal(h.current().msgRows, rows); assert.equal(h.current().editDirty, true);
   });
 }
+
+for (const kind of ['text', 'flver'] as const) {
+  it(`structured history refusal preserves ${kind} receipt facts and warning feedback`, async () => {
+    const p = ports(), h = await mount(p.options); await h.select(file('a', kind === 'text' ? 'txt' : 'flver'));
+    p.options.refreshOperationHistory = async () => ({ ok: false }); await h.update(p.options);
+    if (kind === 'text') await act(async () => h.current().setEditText('committed text'));
+    let result!: RendererSaveResult | null;
+    await act(async () => { result = kind === 'text' ? await h.current().saveCurrentText()
+      : await h.current().applyFlverMaterialSlotSetAndReload({ meshStableId: 'mesh', materialStableId: 'material' }); });
+    assert.equal(result?.ok, true); assert.equal(result?.opId, receipt.opId);
+    assert.deepEqual(result?.changedFiles, receipt.changedFiles);
+    assert.equal(result?.diagnostics.at(-1)?.code, kind === 'text' ? 'POSTCOMMIT_TEXT_HISTORY_FAILED' : 'POSTCOMMIT_FLVER_HISTORY_FAILED');
+    assert.equal(p.toasts.at(-1)?.[1], 'warn');
+    assert.match(p.toasts.at(-1)?.[0] ?? '', /已保存，但操作历史刷新失败/);
+    assert.equal(kind === 'text' ? p.textWrites.length : p.flverWrites.length, 1);
+  });
+}
