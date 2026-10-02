@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, readdirSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { resolve, dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
 import ts from 'typescript';
@@ -158,6 +159,36 @@ test('the generator catches stale projections and generates identical bytes from
   assert.deepEqual(checkPublicIpcOutputs(repoRoot, changed), ['apps/desktop/src/preload/index.ts']);
   const missing = new Map([['apps/desktop/src/ipc/missing.generated.ts', 'missing']]);
   assert.deepEqual(checkPublicIpcOutputs(repoRoot, missing), ['apps/desktop/src/ipc/missing.generated.ts']);
+});
+
+test('generated IPC projections accept LF/CRLF transport but retain content and lone-CR drift', () => {
+  const source = readFileSync(resolve(repoRoot, 'apps/desktop/src/ipc/publicContract.ts'), 'utf8').replace(/\r\n/g, '\n');
+  const outputs = renderPublicIpc(source);
+  const crlfOutputs = renderPublicIpc(source.replace(/\n/g, '\r\n'));
+  assert.deepEqual([...crlfOutputs.keys()], [...outputs.keys()]);
+  for (const [path, output] of outputs) assert.equal(crlfOutputs.get(path) === output, true, `${path}: LF/CRLF generation differs`);
+  const root = mkdtempSync(join(tmpdir(), 'sf-public-ipc-eol-'));
+  try {
+    for (const [path, output] of outputs) {
+      const target = resolve(root, path);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, output.replace(/\n/g, '\r\n'));
+    }
+    assert.deepEqual(checkPublicIpcOutputs(root, outputs), []);
+    const preload = 'apps/desktop/src/preload/index.ts';
+    const changedChannel = outputs.get(preload).replace("'window.setThemeMode'", "'window.changedThemeMode'");
+    assert.notEqual(changedChannel, outputs.get(preload));
+    writeFileSync(resolve(root, preload), changedChannel);
+    assert.deepEqual(checkPublicIpcOutputs(root, outputs), [preload]);
+    writeFileSync(resolve(root, preload), outputs.get(preload));
+    const types = 'apps/desktop/src/ipc/publicApi.generated.ts';
+    const loneCr = outputs.get(types).replace('\n', '\r');
+    assert.notEqual(loneCr, outputs.get(types));
+    writeFileSync(resolve(root, types), loneCr);
+    assert.deepEqual(checkPublicIpcOutputs(root, outputs), [types]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('the generator refuses dynamic exposure, arbitrary transport methods and unknown transforms', () => {
