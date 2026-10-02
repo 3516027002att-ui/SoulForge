@@ -448,3 +448,43 @@ const resolveChrbndPreview = async (animSourceUri: string) => {
 return Object.freeze({ readTaeChrbndPreview, resolveChrbndPreview });
 }
 export type CharacterPreviewService = ReturnType<typeof createCharacterPreviewService>;
+
+/** Existing asset lookup belongs to the same character support owner. */
+export interface CharacterResourceResolutionPorts {
+ getActiveSession(): WorkspaceSession | null;
+ getIndexedFiles(): readonly IndexedFile[];
+ exists(path: string): boolean;
+}
+export function resolveChrbndVirtualResource(ports: CharacterResourceResolutionPorts, sourceUri: string): { absolutePath: string; relativePath: string } | null {
+  if (!sourceUri.startsWith('chrbnd:')) return null;
+  const relativePath = sourceUri.slice('chrbnd:'.length).replace(/[/\\]+/g, '/').replace(/^[/\\]+/, '');
+  if (!relativePath || relativePath.split('/').some((segment) => segment === '..' || segment === '')) {
+    return null;
+  }
+  const chrbndSession = ports.getActiveSession();
+  const overlay = chrbndSession?.layers.overlayRoot?.trim();
+  if (overlay) {
+    const candidate = join(overlay, relativePath);
+    try {
+      if (ports.exists(candidate)) return { absolutePath: candidate, relativePath };
+    } catch {
+      // 不可读，继续下一个候选。
+    }
+  }
+  const base = chrbndSession?.layers.baseRoot?.trim();
+  if (base) {
+    const candidate = join(base, relativePath);
+    try {
+      if (ports.exists(candidate)) return { absolutePath: candidate, relativePath };
+    } catch {
+      // 不可读。
+    }
+  }
+  return null;
+}
+
+export function resolveCharacterFlverResource(ports: CharacterResourceResolutionPorts, sourceUri: string): { absolutePath: string; relativePath: string } | null {
+  const indexed = ports.getIndexedFiles().find((item) => item.sourceUri === sourceUri);
+  if (indexed) return { absolutePath: indexed.absolutePath, relativePath: indexed.relativePath };
+  return resolveChrbndVirtualResource(ports, sourceUri);
+}

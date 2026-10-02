@@ -264,20 +264,69 @@ test('trusted transport refusal prevents provider admission, grants and run disp
   } finally { await h.close(); }
 });
 test('closing the admitted later window settles its exact approval without affecting another owner', async () => {
-  let first = true; const h = await harness({ complete: async () => { if (first) { first = false; return ownedCall('commit_owned'); } return response('Owned cancellation.'); } });
+  const delivery = deferred(), runnerFinished = deferred(), approvalSettled = deferred();
+  const bounded = (promise, label) => {
+    let timer;
+    return Promise.race([promise, new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`Owned fixture did not observe ${label}`)), 5000);
+    })]).finally(() => clearTimeout(timer));
+  };
+  const h = await harness({
+    complete: async input => input.messages.some(message => message.toolCalls?.length)
+      ? response('Owned approval settled.') : ownedCall('commit_owned'),
+    runner: async params => {
+      const closingOwner = params.prompt === 'Owned second-window task.';
+      const result = await realCore.runAgentSession({ ...params, requestApproval: async request => {
+        const decision = await params.requestApproval(request);
+        if (closingOwner) approvalSettled.resolve({ request, decision });
+        return decision;
+      } });
+      if (closingOwner) { runnerFinished.resolve(result); await delivery.promise; }
+      return result;
+    }
+  });
   const second = new EventEmitter(); Object.assign(second, { id: 22, events: [], destroyed: false,
     isDestroyed() { return this.destroyed; }, send(_channel, envelope) { this.events.push(envelope); this.emit('agent', envelope); } });
   try {
+    const first = await h.request('normal'); await bounded(h.waitEvent('approval-requested'), 'first owner approval');
     const grant = await h.invokeFrom(second, channels[0], 'normal');
     const accepted = await h.invokeFrom(second, 'ai.agent.run', { configId: 'owned-config', prompt: 'Owned second-window task.', mode: 'normal', permissionGrantId: grant.grantId, streaming: false });
-    await h.waitEventFor(second, 'approval-requested'); const visible = second.events.length;
+    await bounded(h.waitEventFor(second, 'approval-requested'), 'later owner approval');
+    const visible = second.events.length, firstVisible = h.target.events.length;
+    const run = h.calls.find(([name, params]) => name === 'utilityRun' && params.sessionId === accepted.sessionId)[1];
+    const otherRun = h.calls.find(([name, params]) => name === 'utilityRun' && params.sessionId === first.sessionId)[1];
     second.destroyed = true; second.emit('destroyed');
-    await new Promise(done => setTimeout(done, 25));
+    assert.equal(run.signal.aborted, true); assert.equal(otherRun.signal.aborted, false);
+    assert.equal(h.api.isAgentSessionActive(first.sessionId), true);
+    assert.equal(h.target.events.length, firstVisible, 'closing another owner must not publish into the first window');
     assert.equal((await h.invokeFrom(second, 'ai.agent.approval.respond', { sessionId: accepted.sessionId, callId: 'owned-call', decision: 'once' })).matched, false);
-    assert.equal(h.calls.filter(([name]) => name === 'commitTool').length, 0); assert.equal(h.target.events.length, 0);
-    assert.equal(second.events.length, visible); assert.equal(h.api.isAgentSessionActive(accepted.sessionId), false);
-    assert.equal(h.calls.find(([name]) => name === 'utilityRun')[1].signal.aborted, true);
-  } finally { await h.close(); }
+    const settled = await bounded(approvalSettled.promise, 'exact closed-owner approval rejection');
+    assert.equal(settled.request.callId, 'owned-call'); assert.equal(settled.request.toolName, 'commit_owned');
+    assert.equal(settled.decision.decision, 'reject');
+    assert.equal([...h.timers.values()].filter(timer => timer.delay === 600_000).length, 1, 'the other owner approval stays parked');
+    const result = await bounded(runnerFinished.promise, 'cancelled real runner result');
+    assert.equal(result.run.finishReason, 'cancelled');
+    assert.equal(h.api.isAgentSessionActive(accepted.sessionId), true, 'active receipt remains until the actual runner result is delivered');
+    assert.equal(h.calls.filter(([name]) => name === 'commitTool').length, 0);
+    assert.equal(second.events.length, visible);
+    assert.equal((await h.invoke('ai.agent.approval.respond', { sessionId: first.sessionId, callId: 'owned-call', decision: 'reject' })).matched, true);
+    await bounded(h.waitEvent('session-done'), 'unaffected owner terminal result');
+    delivery.resolve();
+    let observingSettlement = true;
+    try {
+      await bounded((async () => {
+        while (observingSettlement && h.api.isAgentSessionActive(accepted.sessionId)) await new Promise(done => setImmediate(done));
+      })(), 'closed owner application settlement');
+    } finally { observingSettlement = false; }
+    assert.equal(h.api.isAgentSessionActive(accepted.sessionId), false);
+    const replay = await h.invokeFrom(second, 'ai.agent.events', accepted.sessionId);
+    assert.equal(replay.ok, true); assert.equal(replay.events.at(-1).event.type, 'session-done');
+    assert.equal(replay.events.at(-1).event.finishReason, 'cancelled');
+    assert.equal(h.calls.filter(([name]) => name === 'commitTool').length, 0);
+    assert.equal(h.target.events.every(envelope => envelope.sessionId === first.sessionId), true);
+    assert.equal(second.events.every(envelope => envelope.sessionId === accepted.sessionId), true);
+    assert.equal(second.events.length, visible); assert.equal(h.api.isAgentSessionActive(first.sessionId), false);
+  } finally { delivery.resolve(); await h.close(); }
 });
 test('approval timeout remains a host fact and removes its pending resolver', async () => {
   let first = true; const h = await harness({ complete: async () => { if (first) { first = false; return ownedCall('commit_owned'); } return response('Owned timeout.'); } });

@@ -1,3 +1,4 @@
+import { resolveCharacterFlverResource } from './services/characterPreviewService.js';
 import type {
   AnalyzeWorkspaceSummary,
   RendererWorkspaceSession,
@@ -319,50 +320,9 @@ function releaseWorkspaceEditorCaches(): void {
   resetEditorDocumentStore();
 }
 
-/**
- * S17（2026-08-15）：动作域 TAE 的伴生 chrbnd 只读解析。
- *
- * 虚拟 sourceUri 形如 `chrbnd:chr/c1130.chrbnd.dcx` —— renderer 只持有这个
- * 逻辑标识，真实路径永远留在 main。查找顺序：overlay 根 → 已挂载原版根。
- * 拒绝 `..` 等越界片段。找不到返回 null，由调用方给空态文案。
- */
-function resolveChrbndVirtualFile(sourceUri: string): { absolutePath: string; relativePath: string } | null {
-  if (!sourceUri.startsWith('chrbnd:')) return null;
-  const relativePath = sourceUri.slice('chrbnd:'.length).replace(/[/\\]+/g, '/').replace(/^[/\\]+/, '');
-  if (!relativePath || relativePath.split('/').some((segment) => segment === '..' || segment === '')) {
-    return null;
-  }
-  const chrbndSession = getWorkspaceSession();
-  const overlay = chrbndSession?.layers.overlayRoot?.trim();
-  if (overlay) {
-    const candidate = join(overlay, relativePath);
-    try {
-      if (existsSync(candidate)) return { absolutePath: candidate, relativePath };
-    } catch {
-      // 不可读，继续下一个候选。
-    }
-  }
-  const base = chrbndSession?.layers.baseRoot?.trim();
-  if (base) {
-    const candidate = join(base, relativePath);
-    try {
-      if (existsSync(candidate)) return { absolutePath: candidate, relativePath };
-    } catch {
-      // 不可读。
-    }
-  }
-  return null;
-}
-
-/**
- * S17：FLVER 读通道的资源解析 —— 先走已索引文件，再走 chrbnd 虚拟标识
- * （伴生模型预览）。返回 null 时调用方按 RESOURCE_NOT_INDEXED 处理。
- */
-function resolveFlverReadFile(sourceUri: string): { absolutePath: string; relativePath: string } | null {
-  const indexed = getWorkspaceIndexedFiles().find((item) => item.sourceUri === sourceUri);
-  if (indexed) return { absolutePath: indexed.absolutePath, relativePath: indexed.relativePath };
-  return resolveChrbndVirtualFile(sourceUri);
-}
+const resolveFlverReadFile = (sourceUri: string) => resolveCharacterFlverResource({
+  getActiveSession: getWorkspaceSession, getIndexedFiles: getWorkspaceIndexedFiles, exists: existsSync
+}, sourceUri);
 
 // EMEDF registry cache moved to ipc/event.ts (domain-owned).
 let handlersRegistered = false;

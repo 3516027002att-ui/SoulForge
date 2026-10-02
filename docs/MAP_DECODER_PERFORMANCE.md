@@ -697,3 +697,42 @@ capability receipt in the current restored environment; older receipts were lost
 Current GPU availability is unknown, and hosted editor/native-frame successes do
 not establish it. Actual MAPBND KRAK decoding and GPU first-frame evidence remain
 separate limits.
+
+### Renderer scene projection path checks
+
+A source-bound CPU capture reused the actual returned MSB DTO and the current
+controller's field expressions plus compiled browser-safe scene functions.
+For 9,996 semantic entities and 8,910 drawable nodes, four warmups and twelve rows
+gave medians of 1.604 ms for field projection, 61.379 ms for scene-manifest
+construction and 24.645 ms for draw-list construction; the local projection span
+was 88.027 ms. This excludes React scheduling, collision filtering, scene mount,
+Electron IPC and GPU submission. Source/output equality and before/after pins
+were checked; report `81950d60...` is under
+`.local-validation/renderer-scene-projection/`.
+
+Separate diagnostic instrumentation attributed 54.082 ms inside manifest
+construction and 21.741 ms inside draw construction to the existing object path
+guards. Their JSON serialization is nested inside those spans and still runs
+unchanged. A structured-walk bypass was not adopted because public mutable,
+getter and serialization semantics need to remain intact.
+
+The accepted small candidate combines the three path predicates into their exact
+union. It preserves JSON serialization, output order and error behavior while
+scanning each serialized projection once. In ten pairs per B/C and C/B order,
+manifest-plus-draw medians were 95.655 → 89.495 ms (-6.44%) and
+103.108 → 96.418 ms (-6.49%); CPU medians fell by about 4 ms. All 48 rows and
+293,970 raw/serialized/key/actual-field controls are retained in report
+`fc9dc832...`, with unchanged full-output hashes and source/input pins.
+Actual source regressions went from 5/6 RED to 6/6 GREEN, including every UTF16
+code unit, public output identity/order, getter/toJSON errors, cycles, BigInt,
+sparse arrays and nonfinite values. Strict checking passed. These are local
+scene-preparation CPU results; natural-GC snapshots do not establish exact
+allocation, retained-memory, whole-MAP, GPU or first-frame improvement.
+
+The restored normal production App also started on the native desktop with an
+owned profile and its original sandbox settings. Its ambient fallback and stock
+log establish WebGL1 blocklisting only. Native inspector input failed before any
+capability expression ran, so WebGL2 context and WebGPU adapter availability
+remain unknown; the owned test windows were closed normally. Current TSL
+secondary-diffuse source and the existing three CPU shader-construction tests
+are present and pass, but do not establish actual GPU image parity.
