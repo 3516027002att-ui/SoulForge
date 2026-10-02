@@ -3,11 +3,13 @@ import type { AgentToolBridge } from '../ai/agentToolBridge.js';
 import { LocalSessionHost } from '../cli/localSessionHost.js';
 import type { CoreToolSession } from '../runtime/coreToolSession.js';
 import { runAgentSession, type AgentSessionRunParams } from './agentSessionHost.js';
+import {composeAgentSessionOptions,type AgentHostComposition} from './agentHostComposition.js';
 
 /** Desktop, CLI and evaluators use one assembly surface over the same domain bridge. */
 export function createAgentRunAssembly(bridge: AgentToolBridge, options: {
   sessionRunner?: typeof runAgentSession;
   coreSession?: CoreToolSession;
+  composition?: AgentHostComposition;
 } = {}) {
   const pendingOperations = new Set<Promise<unknown>>();
   return {
@@ -51,7 +53,7 @@ export function createAgentRunAssembly(bridge: AgentToolBridge, options: {
         void task.then(()=>pendingOperations.delete(task),()=>pendingOperations.delete(task));
         return task;
       };
-      return (options.sessionRunner ?? runAgentSession)({ ...params, sessionId, tools: bridge.tools, executeTool });
+      return (options.sessionRunner ?? runAgentSession)({ ...composeAgentSessionOptions(params,options.composition), sessionId, tools: bridge.tools, executeTool });
     }
   };
 }

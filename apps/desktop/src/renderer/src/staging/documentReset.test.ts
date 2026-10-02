@@ -45,7 +45,12 @@ declare const __SOULFORGE_RENDERER_ROOT__: string;
  * 期真的生效，那部分由 e2e 覆盖。
  */
 function readAppSource(): string {
-  return readFileSync(resolve(__SOULFORGE_RENDERER_ROOT__, 'App.tsx'), 'utf8');
+  const app = readFileSync(resolve(__SOULFORGE_RENDERER_ROOT__, 'App.tsx'), 'utf8');
+  // State now belongs to domain controllers invoked by App. Follow only those
+  // actual imports, preserving the existing missing/extra-setter negatives.
+  const owners = [...app.matchAll(/from ['"]\.\/app\/(use\w+Controller)\.js['"]/g)]
+    .map(match => readFileSync(resolve(__SOULFORGE_RENDERER_ROOT__, 'app', `${match[1]}.ts`), 'utf8'));
+  return [app, ...owners].join('\n');
 }
 
 function makeActions(record: DocumentFamily[]): DocumentResetActions {

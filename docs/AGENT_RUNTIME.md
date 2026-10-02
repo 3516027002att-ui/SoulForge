@@ -8,7 +8,9 @@ Desktop sessions now run their provider/control loop in a fixed `agentUtility` u
 
 The finite kernel lives in `@soulforge/agent` and has no dependency on core, Electron, renderer or the domain index. It holds a bounded transcript and current calls. Time, step, output, context, response, result, queue and configured cost limits terminate explicitly. Model termination remains separate from independent task evaluation.
 
-The remaining desktop composition is a separate structural limit: `ipc/agent.ts` still prepares tool/workspace context, approvals, RAG and compaction defaults around the shared assembly. The independent kernel and utility host are implemented; those facts do not establish that every desktop host is thin. Extracting that remaining composition is local engineering work and does not require a real provider call or change the current retrieval policy.
+`agentHostComposition` now owns execution-option normalization, native/tool-session construction, live tool-context binding and bounded automatic RAG readiness. `createAgentRunAssembly` applies that same composition for desktop, CLI and evaluators. Desktop adapters supply Electron credentials, approval UI, secure resource/diff access, workspace storage and retrieval ports; CLI adapters supply local storage and explicit run options.
+
+Host defaults remain explicit: desktop requests use 180 seconds unless overridden and always configure compaction at 80% of the trusted context window (500K tokens when absent). Headless runs retain their explicit 1,800-second default and do not gain automatic RAG or compaction ports. Renderer controls cannot replace provider configuration, permission grants or approval policy. Every tool call keeps the captured workspace/CoreToolSession, proof principal and edit session; replacement rejects the old request before domain dispatch or native session construction after asynchronous storage opening. A late committed result remains committed. Its refresh refuses a replacement host and reports that refresh failure separately; it cannot attach the replacement workspace's index to the old session.
 
 ## Headless CLI
 

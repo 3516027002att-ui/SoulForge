@@ -26,7 +26,7 @@ using System.Text;
 /// </summary>
 internal sealed class MsbNativeDocument
 {
-    private const int MaxSourceBytes = 128 * 1024 * 1024;
+    internal const int MaxSourceBytes = 128 * 1024 * 1024;
     private const int MaxEntriesPerParam = 1_000_000;
 
     // Family field offsets (relative to entry start).

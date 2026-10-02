@@ -13,9 +13,7 @@ import {
 import {
   classifyWorkspaceOpen,
   EDITOR_DOMAIN_IDS,
-  PARAM_PAGE_SIZE,
   PARAM_ROW_PAYLOAD_BATCH_MAX,
-  createParamSessionMaterializationTracker,
   mergeCiteHits,
   paramPhysicalRowKey
 } from '@soulforge/shared';
@@ -31,11 +29,7 @@ import type {
   MsbRouteLike,
   MsbSceneSourceCounts,
   ParamDefDocument,
-  ParamFieldDef,
-  ParamIndexRow,
-  ParamNativeTelemetry,
   ParamPhysicalRowIdentity,
-  ParamSessionMaterializationSnapshot,
   ResourceKind,
   RagLocalModelStatus,
   UpdatePublicState
@@ -66,19 +60,15 @@ import { GparamWorkbench, type GparamBankView } from './workbench/GparamWorkbenc
 import { selectEditor } from './workbench/selectEditor.js';
 import {
   planResourceOpen,
-  shouldLoadEmevd,
   shouldLoadFmg,
   shouldLoadMsb,
   shouldLoadParam
 } from './workbench/documentLoadGates.js';
 
 import { MsbScenePanel } from './editors/MsbScenePanel.js';
-import {
-  EventSourceWorkbenchPanel,
-  type EventSourceTabData
-} from './editors/EventSourceWorkbenchPanel.js';
+import { EventSourceWorkbenchPanel } from './editors/EventSourceWorkbenchPanel.js';
 import { FmgWorkbenchPanel } from './editors/FmgWorkbenchPanel.js';
-import { ParamTablePanel, type ParamRowView } from './editors/ParamTablePanel.js';
+import { ParamTablePanel } from './editors/ParamTablePanel.js';
 import {
   findCatalogContainer,
   resolveFmgJump,
@@ -97,9 +87,6 @@ import { MaterialWorkbenchPanel, type MaterialFileView } from './editors/Materia
 import { VfxWorkbenchPanel, type VfxFileView } from './editors/VfxWorkbenchPanel.js';
 import { ScriptContainerPanel } from './editors/ScriptContainerPanel.js';
 import { Bnd4WorkbenchPanel } from './editors/Bnd4WorkbenchPanel.js';
-import type { EmevdEditorDocument } from '@soulforge/shared';
-import { emevdPendingTabFromFullDocument } from './emevd/emevdPendingTab.js';
-import { assembleEmevdSource } from './emevd/assembleEmevdSource.js';
 import {
   ChangeControlStore,
   type CandidateChange,
@@ -110,7 +97,6 @@ import {
   describeBridgeAbsence,
   getRendererRuntime
 } from './runtime/rendererRuntime.js';
-import { base64ToUint8Array } from './utils/binary.js';
 import type { ResourceMode } from './navigation/resourceFamilies.js';
 import type { DomainSummary, EditorDomainId } from '@soulforge/shared';
 import { buildDomainSummaries, domainLabel } from './navigation/domainNavigation.js';
@@ -129,6 +115,8 @@ import { AmbientField } from './theme/AmbientField.js';
 import { ThemeSettings } from './theme/ThemeSettings.js';
 import { useSpectralTheme } from './theme/useSpectralTheme.js';
 import { shouldShowEditorWelcome } from './theme/editorWelcome.js';
+import { useEventDocumentController } from './app/useEventDocumentController.js';
+import { useParamDocumentController } from './app/useParamDocumentController.js';
 import { useRuntimeSettingsController } from './app/useRuntimeSettingsController.js';
 import { Me3RuntimePanel } from './runtime/Me3RuntimePanel.js';
 import { AgentSidebar } from './agent/AgentSidebar.js';
@@ -235,19 +223,7 @@ function SidebarCloseButton({ onClose }: { onClose: () => void }): ReactElement 
   );
 }
 
-/** 无实时 EMEVD 文档时的空文档（真实文档经 Bridge 读取后替换）。 */
-const EMPTY_EMEVD_DOCUMENT: EmevdEditorDocument = {
-  schemaVersion: 1,
-  resourceUri: '',
-  revision: 0,
-  bytesBase64: '',
-  events: [],
-  diagnostics: []
-};
-
 const EMPTY_FMG_ENTRIES: Array<{ id: number; text: string }> = [];
-
-const EMPTY_PARAM_ROWS: ParamRowView[] = [];
 
 function updateStateLabel(state: UpdatePublicState): string {
   switch (state.status) {
@@ -285,39 +261,6 @@ function ragLocalModelSourceLabel(source: RagLocalModelStatus['source']): string
   }
 }
 
-function paramRowViewFromIndex(row: ParamIndexRow): ParamRowView {
-  return {
-    rowIndex: row.rowIndex,
-    id: row.id,
-    dataHash: row.dataHash,
-    dataHexPreview: '',
-    ...(row.name !== null ? { name: row.name } : {})
-  };
-}
-
-function mergeParamRowViews(
-  existing: readonly ParamRowView[],
-  incoming: readonly ParamIndexRow[]
-): ParamRowView[] {
-  const byRowIndex = new Map(existing.map((row) => [row.rowIndex, row]));
-  for (const row of incoming) {
-    const next = paramRowViewFromIndex(row);
-    const previous = byRowIndex.get(row.rowIndex);
-    byRowIndex.set(row.rowIndex, previous
-      ? { ...next, ...(previous.dataBase64 ? { dataBase64: previous.dataBase64 } : {}), ...(previous.dataHexPreview ? { dataHexPreview: previous.dataHexPreview } : {}) }
-      : next);
-  }
-  return [...byRowIndex.values()].sort((left, right) => left.rowIndex - right.rowIndex);
-}
-
-function paramDataHexPreview(dataBase64: string): string {
-  try {
-    return Array.from(base64ToUint8Array(dataBase64).slice(0, 16), (value) => value.toString(16).padStart(2, '0')).join(' ');
-  } catch {
-    return '';
-  }
-}
-
 const AGENT_MIN_WIDTH = 96; // S8:下限收到约一条工具栏宽,不要 340
 const AGENT_MAX_WIDTH = 620;
 const AGENT_DEFAULT_WIDTH = 440;
@@ -341,16 +284,6 @@ function shellUiStorageKey(
 ): string {
   const uiKey = workspaceSessionId ?? 'preview';
   return `soulforge.ui.shell.v1.${uiKey}.${field}`;
-}
-
-/**
- * S14：事件文档标签短名 —— `event/common.emevd.dcx` → `common`、
- * `m11_02_71_10.emevd.dcx` → `m11_02_71_10`。App 文件标签已承载完整资源，
- * 工作台内层 tab 只留短名，不再重复整条相对路径。
- */
-function eventTabShortTitle(relativePath: string): string {
-  const base = relativePath.split(/[\\/]/).pop() ?? relativePath;
-  return base.replace(/\.emevd(\.dcx)?$/i, '').replace(/\.dcx$/i, '');
 }
 
 /**
@@ -457,18 +390,12 @@ export function App(): ReactElement {
     code: string;
     message: string;
   } | null>(null);
-  /**
-   * EVENT-30B：最近一次打开/刷新的 EMEVD 逻辑文档标签（有界 DSL 投影 + 派生
-   * document）。工作台按 tabId 去重合并；renderer 永不持有文件系统路径或完整
-   * document（bounded outline + 有界模板）。
-   */
-  const [eventPendingTab, setEventPendingTab] = useState<EventSourceTabData | null>(null);
-  /** EVENT-30B：读 EMEVD 在飞标志。打开期间工作台显示可行动等待态，而不是空壳。 */
-  const [eventOpening, setEventOpening] = useState(false);
-  /** 3.1 前缀：全文未齐时先画 $Event，不建 CodeMirror。 */
-  const [eventSourcePreview, setEventSourcePreview] = useState<string | null>(null);
-  /** 打开请求代次：切文件/切域时旧请求的 finally 不得把新请求的 opening 清掉。 */
-  const eventOpenRequestRef = useRef(0);
+  const { eventPendingTab, eventOpening, eventSourcePreview, resetEventDocument, submitEventDsl } =
+    useEventDocumentController({
+      bridge, selectedFile, setStatus, describeBridgeAbsence,
+      onEventOpenFailure: failure => setLastOpenFailure(current =>
+        failure ?? (current?.kind === 'event-open-failed' ? null : current))
+    });
   const [taeData, setTaeData] = useState<Record<string, unknown> | null>(null);
   const [esdData, setEsdData] = useState<Record<string, unknown> | null>(null);
   const [flverData, setFlverData] = useState<Record<string, unknown> | null>(null);
@@ -489,50 +416,17 @@ export function App(): ReactElement {
   });
   const [, setMsbLive] = useState(false);
   const [msbSourceHash, setMsbSourceHash] = useState<string | null>(null);
-  const [paramTypeName, setParamTypeName] = useState('');
-  const [paramRows, setParamRows] = useState(EMPTY_PARAM_ROWS);
-  const [paramRowCount, setParamRowCount] = useState(0);
-  const [paramSourceHash, setParamSourceHash] = useState<string | null>(null);
-  const [paramLive, setParamLive] = useState(false);
-  const [paramSessionToken, setParamSessionToken] = useState<string | null>(null);
-  const paramSessionTokenRef = useRef<string | null>(null);
-  const [paramRowPayloads, setParamRowPayloads] = useState<Map<string, string>>(new Map());
-  const paramMaterializationRef = useRef<ReturnType<typeof createParamSessionMaterializationTracker> | null>(null);
-  const [paramMaterialization, setParamMaterialization] = useState<ParamSessionMaterializationSnapshot | null>(null);
-  const [paramNativeTelemetry, setParamNativeTelemetry] = useState<ParamNativeTelemetry | null>(null);
-  const [paramIndexLoading, setParamIndexLoading] = useState(false);
-  const [paramIndexDiagnostic, setParamIndexDiagnostic] = useState<string | null>(null);
-  /**
-   * 主进程给出的 SoulForge 内置字段定义与缺失原因。
-   *
-   * main 侧只接受版本化、内容寻址的 first-party schema，并在返回前完成
-   * 包来源、行宽和描述符匹配。字段定义不再依赖用户安装的第三方编辑器；
-   * 未覆盖或行宽不匹配时保留结构化诊断并维持只读。
-   */
-  const [paramFieldDefs, setParamFieldDefs] = useState<ParamFieldDef[] | null>(null);
-  /**
-   * 字段枚举表（enumRef → 值列表）。
-   *
-   * 主进程早就随 readParamDocument 返回 fieldEnums（ipc.ts 的 fieldEnums 分支），
-   * 但渲染器此前**零引用**——数据被丢弃，于是枚举字段只显示裸数字。
-   * 这是「最后一跳断线」的又一处：后端产出、前端不取，没有任何编译或测试信号。
-   */
-  const [paramFieldEnums, setParamFieldEnums] = useState<
-    Array<{ id: string; name: string; values: Array<{ value: number; label: string }> }> | null
-  >(null);
-  /**
-   * 字段定义的来源。first-party 只有在内置包校验、行宽核对和描述符匹配通过后
-   * 才能放行写入；fixture 及覆盖缺口保持只读。渲染器只消费主进程裁定的值。
-   */
-  const [paramFieldDefsOrigin, setParamFieldDefsOrigin] = useState<
-    'first-party' | 'fixture' | 'imported' | 'user-derived'
-  >('fixture');
-  const [paramFieldDefsDiagnostic, setParamFieldDefsDiagnostic] = useState<
-    { code: string; message: string } | null
-  >(null);
-  const [paramRowDataSize, setParamRowDataSize] = useState<number>(16);
 
-  /** GitHub Release 更新状态只来自 main/preload，renderer 不保存路径或句柄。 */
+  const {
+    paramTypeName, paramRows, paramRowCount, paramSourceHash,
+    paramLive, paramRowPayloads, paramIndexLoading, paramIndexDiagnostic,
+    paramFieldDefs, paramFieldEnums, paramFieldDefsOrigin, paramFieldDefsDiagnostic,
+    paramRowDataSize, paramRevealRowId, setParamRevealRowId, readParamRowsForPanel,
+    reloadParamRowsFromSource, applyParamFieldMutationFromPanel, paramFieldDefinition, resetParamDocument,
+  } = useParamDocumentController({
+    bridge, selectedFile, setStatus, pushToast, refreshOperationHistory, describeBridgeAbsence
+  });
+
   const { updateState, updateActionBusy, ragModelStatus, runUpdateCommand, changeUpdateChannel, currentUpdateAction } =
     useRuntimeSettingsController({ bridge, setStatus, pushToast, announceDesktopOnly });
 
@@ -586,8 +480,6 @@ export function App(): ReactElement {
   const [openTabs, setOpenTabs] = useState<RendererIndexedFile[]>([]);
   /** S31：文本目录缓存（事件实参 → 已打开文本表的匹配用，只读 metadata）。 */
   const [textCatalog, setTextCatalog] = useState<TextCatalogResponse | null>(null);
-  /** S31：PARAM 面板的外部 reveal 请求（行 id）；面板处理后经回调清除。 */
-  const [paramRevealRowId, setParamRevealRowId] = useState<number | null>(null);
   /** S31：FMG 面板的外部 reveal 请求（表 + 条目 id）；面板处理后经回调清除。 */
   const [fmgRevealRequest, setFmgRevealRequest] = useState<{ tableId: string; entryId: number } | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -626,36 +518,8 @@ export function App(): ReactElement {
       setTextCatalog(null);
       setFmgRevealRequest(null);
     },
-    param: () => {
-      setParamRows(EMPTY_PARAM_ROWS);
-      setParamTypeName('');
-      setParamSourceHash(null);
-      setParamLive(false);
-      setParamRowPayloads(new Map());
-      setParamRowCount(0);
-      setParamSessionToken(null);
-      paramSessionTokenRef.current = null;
-      setParamMaterialization(null);
-      paramMaterializationRef.current = null;
-      setParamNativeTelemetry(null);
-      setParamIndexLoading(false);
-      setParamIndexDiagnostic(null);
-      // 字段定义必须一起清：两张 param 表的行宽通常不同，残留的字段列会让用户
-      // 对着上一张表的字段名看新表的字节。
-      setParamFieldDefs(null);
-      setParamFieldEnums(null);
-      setParamFieldDefsDiagnostic(null);
-      // 来源回落到只读：上一个 param 的 first-party 定义若残留，新 param 的字段
-      // 会被错误地显示为可写。写入判定必须由新文档的 fieldDefsOrigin 重新给出。
-      setParamFieldDefsOrigin('fixture');
-      // S31：一次性 PARAM reveal 请求随 param 族清空，避免残留到别的表误滚动。
-      setParamRevealRowId(null);
-    },
-    emevd: () => {
-      setEventPendingTab(null);
-      setEventOpening(false);
-      setEventSourcePreview(null);
-    },
+    param: resetParamDocument,
+    emevd: resetEventDocument,
     msb: () => {
       setMsbParts(EMPTY_MSB_PARTS);
       setMsbModels([]);
@@ -864,17 +728,7 @@ export function App(): ReactElement {
    * 「内置元数据字段偏移与真实 PARAM 是否对得上」：偏移错了就是往错误
    * 字节位置写数值，存出来的 param 静默损坏。
    */
-  const paramFieldDefinition = useMemo<ParamDefDocument | null>(() => {
-    if (!paramFieldDefs || paramFieldDefs.length === 0) return null;
-    return {
-      schemaVersion: 1,
-      typeName: paramTypeName,
-      version: 0,
-      rowDataSize: paramRowDataSize,
-      origin: paramFieldDefsOrigin,
-      fields: paramFieldDefs
-    };
-  }, [paramFieldDefs, paramTypeName, paramRowDataSize, paramFieldDefsOrigin]);
+
   const editDirty = editText !== lastSavedText;
   const changeStore = useMemo(() => new ChangeControlStore(), []);
   const changeState = useSyncExternalStore(changeStore.subscribe, changeStore.getState);
@@ -1189,174 +1043,6 @@ export function App(): ReactElement {
 
   useEffect(() => {
     let cancelled = false;
-    async function loadParam(): Promise<void> {
-      // SHELL-09：语义领域不再有兜底文件列表；只有用户显式选中的 param 文件才加载。
-      const target = selectedFile;
-      // P2 裁定：gparam 文件（.gparam/.gparam.dcx）走 GPARAM 工作台，绝不让
-      // PARAM 读链去碰它——否则会串域报「这个 PARAM 读不出来」。
-      if (!target || !shouldLoadParam(target)) {
-        setParamRows(EMPTY_PARAM_ROWS);
-        setParamTypeName('');
-        setParamSourceHash(null);
-        setParamLive(false);
-        setParamRowCount(0);
-        setParamSessionToken(null);
-        paramSessionTokenRef.current = null;
-        setParamRowPayloads(new Map());
-        return;
-      }
-      if (!bridge || typeof bridge.openParamSession !== 'function') {
-        setParamRows(EMPTY_PARAM_ROWS);
-        setParamTypeName('');
-        setParamSourceHash(null);
-        setParamLive(false);
-        setParamRowCount(0);
-        setParamSessionToken(null);
-        paramSessionTokenRef.current = null;
-        setParamRowPayloads(new Map());
-        return;
-      }
-      setStatus(`正在读取 PARAM：${target.relativePath}`);
-      setParamIndexLoading(true);
-      setParamIndexDiagnostic(null);
-      try {
-        const result = await bridge.openParamSession({ sourceUri: target.sourceUri });
-        if (cancelled) return;
-        if (!result.ok) {
-          setParamRows(EMPTY_PARAM_ROWS);
-          setParamLive(false);
-          setParamSourceHash(null);
-          setParamRowCount(0);
-          setParamSessionToken(null);
-          paramSessionTokenRef.current = null;
-          setParamRowPayloads(new Map());
-          setParamFieldDefs(null);
-          setParamFieldEnums(null);
-          setParamFieldDefsDiagnostic(null);
-          // 读取失败同样要清来源：否则上一个 param 的 first-party 残留，会让
-          // 这个读不出来的资源看起来仍可写入字段。
-          setParamFieldDefsOrigin('fixture');
-          setStatus(result.diagnostics?.[0]?.message ?? '这个 PARAM 读不出来。');
-          return;
-        }
-        const sessionToken = result.sessionToken;
-        paramSessionTokenRef.current = sessionToken;
-        setParamSessionToken(sessionToken);
-        setParamRowCount(result.rowCount);
-        setParamSourceHash(result.sourceHash);
-        setParamTypeName(result.metadata.typeName || target.relativePath);
-        setParamRowDataSize(result.metadata.rowDataSize);
-        setParamFieldDefs(result.metadata.fieldDefs);
-        setParamFieldEnums(result.metadata.fieldEnums);
-        setParamFieldDefsOrigin(
-          result.metadata.fieldDefsOrigin === 'first-party'
-            || result.metadata.fieldDefsOrigin === 'imported'
-            || result.metadata.fieldDefsOrigin === 'user-derived'
-            ? result.metadata.fieldDefsOrigin
-            : 'fixture'
-        );
-        setParamFieldDefsDiagnostic(
-          result.metadata.fieldDefsDiagnostic
-            ? { code: result.metadata.fieldDefsDiagnostic.code, message: result.metadata.fieldDefsDiagnostic.message }
-            : null
-        );
-        setParamNativeTelemetry(result.nativeTelemetry);
-        const tracker = createParamSessionMaterializationTracker(result.rowCount);
-        paramMaterializationRef.current = tracker;
-        tracker.observeIndex(result.firstPage.rows);
-        setParamRows(result.firstPage.rows.map(paramRowViewFromIndex));
-        setParamMaterialization(tracker.snapshot());
-        setParamRowPayloads(new Map());
-        setParamLive(true);
-        setParamIndexLoading(true);
-        setStatus(
-          `已打开 PARAM：${result.rowCount} 行索引（首批 ${result.firstPage.rows.length} 行）`
-        );
-        let loadedThrough = result.firstPage.rows.reduce(
-          (max, row) => Math.max(max, row.rowIndex + 1),
-          0
-        );
-        let page = result.firstPage.page + 1;
-        while (!cancelled && loadedThrough < result.rowCount) {
-          const pageResult = await bridge.readParamIndexPage({
-            sourceUri: target.sourceUri,
-            sessionToken,
-            page,
-            pageSize: PARAM_PAGE_SIZE
-          });
-          if (cancelled) return;
-          if (!pageResult.ok) {
-            setParamIndexDiagnostic(pageResult.diagnostics?.[0]?.message ?? 'PARAM 索引续读失败。');
-            break;
-          }
-          tracker.observeIndex(pageResult.rows);
-          setParamRows((current) => mergeParamRowViews(current, pageResult.rows));
-          setParamMaterialization(tracker.snapshot());
-          setParamNativeTelemetry(pageResult.nativeTelemetry);
-          const nextLoadedThrough = pageResult.rows.reduce(
-            (max, row) => Math.max(max, row.rowIndex + 1),
-            loadedThrough
-          );
-          if (pageResult.rows.length === 0 || nextLoadedThrough <= loadedThrough) break;
-          loadedThrough = nextLoadedThrough;
-          page += 1;
-          if (pageResult.rows.length < PARAM_PAGE_SIZE) break;
-        }
-      } catch (error) {
-        if (cancelled) return;
-        setParamLive(false);
-        setParamSessionToken(null);
-        paramSessionTokenRef.current = null;
-        setStatus(error instanceof Error ? error.message : 'PARAM 读取异常');
-      } finally {
-        if (!cancelled) setParamIndexLoading(false);
-      }
-    }
-    void loadParam();
-    return () => {
-      cancelled = true;
-    };
-  }, [bridge, selectedFile]);
-
-  async function readParamRowsForPanel(
-    identities: readonly ParamPhysicalRowIdentity[]
-  ): Promise<ReadonlyArray<{ identity: ParamPhysicalRowIdentity; dataBase64: string }>> {
-    if (!bridge || !selectedFile || !paramSessionToken || identities.length === 0) {
-      throw new Error('PARAM 会话未就绪，无法读取选中行。');
-    }
-    if (typeof bridge.readParamRows !== 'function') {
-      throw new Error('当前预加载未暴露 readParamRows。');
-    }
-    const result = await bridge.readParamRows({
-      sourceUri: selectedFile.sourceUri,
-      sessionToken: paramSessionToken,
-      rows: [...identities]
-    });
-    if (!result.ok) {
-      throw new Error(result.diagnostics?.[0]?.message ?? '读取选中 PARAM 行失败。');
-    }
-    const tracker = paramMaterializationRef.current;
-    tracker?.observePayload(identities, result.rows);
-    if (tracker) setParamMaterialization(tracker.snapshot());
-    setParamNativeTelemetry(result.nativeTelemetry);
-    const payloadByKey = new Map(result.rows.map((row) => [paramPhysicalRowKey(row.identity), row.dataBase64]));
-    setParamRowPayloads((current) => {
-      const next = new Map(current);
-      for (const row of result.rows) next.set(paramPhysicalRowKey(row.identity), row.dataBase64);
-      return next;
-    });
-    setParamRows((current) => current.map((row) => {
-      const identity = { rowIndex: row.rowIndex, id: row.id, dataHash: row.dataHash };
-      const dataBase64 = payloadByKey.get(paramPhysicalRowKey(identity));
-      return dataBase64
-        ? { ...row, dataBase64, dataHexPreview: paramDataHexPreview(dataBase64) }
-        : row;
-    }));
-    return result.rows;
-  }
-
-  useEffect(() => {
-    let cancelled = false;
     async function loadFmg(): Promise<void> {
       // SHELL-09：只有用户显式选中的 msg 资源才加载；语义领域无兜底列表。
       const target = selectedFile;
@@ -1594,162 +1280,6 @@ export function App(): ReactElement {
     };
   }, [bridge, selectedFile]);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function loadEmevd(): Promise<void> {
-      // SHELL-09：只有用户显式选中的 event 资源才加载；语义领域无兜底列表。
-      const target = selectedFile;
-      if (!target || !shouldLoadEmevd(target)) {
-        setEventPendingTab(null);
-        setEventSourcePreview(null);
-        setEventOpening(false);
-        // S15：事件没在打开，上一份事件失败不再对当前选区成立（Agent 元数据同理）。
-        setLastOpenFailure((current) => current?.kind === 'event-open-failed' ? null : current);
-        return;
-      }
-      if (!bridge || typeof bridge.readEmevdFullDocument !== 'function') {
-        setEventPendingTab(null);
-        setEventSourcePreview(null);
-        setEventOpening(false);
-        return;
-      }
-      const requestId = eventOpenRequestRef.current + 1;
-      eventOpenRequestRef.current = requestId;
-      setEventOpening(true);
-      setEventSourcePreview(null);
-      setStatus(`正在读取 EMEVD：${target.relativePath}`);
-      try {
-        // 一次读到底。以前这里是两次 IPC：先 readEmevdDocument 拿有界 envelope
-        // 投影（128 事件 / 每事件最多 64 条指令），再 readEmevdFullDocument 拿
-        // 权威源码。第一次读除了 sourceHash / 计数 / authority 三个标量，唯一实际
-        // 用途是给 gutter 数「未知指令条数」—— 而它的 instructionsSample 默认只
-        // 覆盖前 256 条指令，第 256 条之后的事件全被当成「指令全未知」，1730
-        // 事件的真实文件里那些标记基本都是假的。现在这三个标量与 gutter 判据
-        // 都由 readEmevdFullDocument 的 outline 给（unknownCount 按完整 EMEDF
-        // registry 逐条判，覆盖 4096 个事件），第一次读整体删掉。
-        const full = await bridge.readEmevdFullDocument(
-          target.sourceUri,
-          `renderer-${target.sourceUri}-${Date.now()}`
-        );
-        if (cancelled) return;
-        // main 侧取消：快速切换时旧请求被更晚的打开请求取代。它也是 ok:false，
-        // 但不是「这个文件读不出来」，不能落成 EMEVD_LIVE_READ_FAILED 警告条 ——
-        // 静默丢弃，UI 归后到的那份请求。上面的 cancelled 布尔量仍是兜底，
-        // 但不再是唯一机制：真正的取消发生在 main，reader 侧只是不覆盖而已。
-        if (full?.cancelled) return;
-        if (!full?.ok) {
-          // S15 失败面：真实失败码 + 可行动句。KRAK 缺 Oodle 时 Bridge 已给完整
-          // 话术（EMEVD_DOCUMENT_KRAK_OODLE_UNAVAILABLE）；其它失败至少给码 +
-          // 下一步，不再只丢一句「这个事件脚本读不出来」。
-          const failureDiag = full?.diagnostics?.[0];
-          const failureCode = failureDiag?.code ?? 'EMEVD_LIVE_READ_FAILED';
-          const failureMessage = failureDiag?.message
-            ?? (failureCode === 'EMEVD_DOCUMENT_KRAK_OODLE_UNAVAILABLE'
-              ? '这份事件是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再打开。'
-              : '这个事件脚本读不出来。');
-          setLastOpenFailure({
-            kind: 'event-open-failed',
-            document: target.relativePath,
-            code: failureCode,
-            message: failureMessage
-          });
-          setEventPendingTab({
-            tabId: target.sourceUri,
-            title: eventTabShortTitle(target.relativePath),
-            resourceUri: target.sourceUri,
-            document: {
-              ...EMPTY_EMEVD_DOCUMENT,
-              resourceUri: target.sourceUri,
-              diagnostics: [{
-                severity: 'error',
-                code: failureCode,
-                message: failureMessage
-              }]
-            },
-            sourceHash: null,
-            live: false,
-            dslTemplate: null,
-            dslTemplateTruncated: false,
-            dslTemplateTotalLines: 0,
-            sourceStyle: 'none'
-          });
-          setStatus('这个事件脚本读不出来。');
-          return;
-        }
-        setLastOpenFailure((current) => current?.kind === 'event-open-failed' ? null : current);
-        if (full.sourcePrefix) setEventSourcePreview(full.sourcePrefix);
-        // S35（event-common-load.md §3.2）：打开不再拼 7 万行全文 —— 首帧只给
-        // 前缀 + opaque token，全文由工作台按视口续载；查找（Ctrl+F）/ 提交 /
-        // 脏标记时才拉齐。禁止为了「查找要全文」在打开时同步拉全文。
-        const hasIncrementalSource = Boolean(
-          full.sourceToken && full.sourcePrefix !== undefined && full.sourcePrefix !== null
-        );
-        let dslTemplate: string | null = null;
-        if (!hasIncrementalSource) {
-          dslTemplate = full.dslTemplate ?? null;
-        }
-        let dslTemplateTruncated = full.dslTemplateTruncated ?? false;
-        let dslTemplateTotalLines = hasIncrementalSource
-          ? full.sourceTotalLines ?? full.dslTemplateTotalLines ?? 0
-          : full.dslTemplateTotalLines ?? (dslTemplate ? dslTemplate.split('\n').length : 0);
-        // R3/P4 裁定：源码形态由主进程按 EMEDF 可用性裁定（dark-script /
-        // none 失败关闭）。
-        let sourceStyle: 'dark-script' | 'patch-dsl' | 'none' = full.sourceStyle ?? 'none';
-        if (dslTemplate && sourceStyle === 'none') {
-          sourceStyle = /^\$Event\(/m.test(dslTemplate) ? 'dark-script' : 'patch-dsl';
-        }
-        // 拼不出全文且不是 EMEDF 失败关闭：当作打开失败，不要拿前缀建编辑器。
-        // （增量源有 token + 前缀，不算「拼不出全文」。）
-        if (!dslTemplate && sourceStyle === 'dark-script' && !hasIncrementalSource) {
-          setEventSourcePreview(null);
-          setEventPendingTab(null);
-          setStatus('事件源码切片未齐，未打开编辑器。');
-          return;
-        }
-        setEventSourcePreview(null);
-        setEventPendingTab(emevdPendingTabFromFullDocument({
-          tabId: target.sourceUri,
-          title: eventTabShortTitle(target.relativePath),
-          resourceUri: target.sourceUri,
-          full,
-          dslTemplate,
-          dslTemplateTruncated,
-          dslTemplateTotalLines,
-          sourceStyle,
-          ...(hasIncrementalSource
-            ? {
-                sourceToken: full.sourceToken,
-                sourcePrefix: full.sourcePrefix,
-                sourceTotalLines: dslTemplateTotalLines
-              }
-            : {})
-        }));
-        setStatus(
-          `已加载 EMEVD：${full.eventCount ?? full.outline?.eventCount ?? 0} 事件 / `
-          + `${full.instructionCount ?? full.outline?.instructionTotal ?? 0} 指令`
-           + `（读取级别：${readLevelLabel(full.authority)}）`
-        );
-      } catch (error) {
-        if (cancelled) return;
-        setEventPendingTab(null);
-        setStatus(error instanceof Error ? error.message : 'EMEVD 读取异常');
-      } finally {
-        // 只有最新一代请求能清 opening：旧请求被 cancel 后迟到返回时，
-        // UI 已经在等新请求，不能把等待态清成假就绪。
-        if (eventOpenRequestRef.current === requestId) setEventOpening(false);
-      }
-    }
-    void loadEmevd();
-    return () => {
-      cancelled = true;
-      // 本地布尔量只让 renderer 不覆盖 UI，主进程那边照旧把剩余分页读、outline
-      // 和整段反汇编跑完。切到 PARAM/MAP 域、关掉编辑器时不会再有打开请求去隐式
-      // 顶掉它，所以必须显式发一条取消 —— 否则那次读的工作量一分不少，只是产物
-      // 没人接。取消失败不影响 renderer 的正确性（本地已置 cancelled），静默吞掉。
-      void bridge?.cancelEmevdFullDocument?.().catch(() => undefined);
-    };
-  }, [bridge, selectedFile]);
-
   async function refreshOperationHistory(): Promise<void> {
     if (!bridge) return;
     const requestId = ++operationHistoryRequestRef.current;
@@ -1769,134 +1299,6 @@ export function App(): ReactElement {
     const next = operationHistoryRefreshRef.current.then(load, load);
     operationHistoryRefreshRef.current = next.catch(() => undefined);
     await next;
-  }
-
-  async function reloadParamRowsFromSource(): Promise<void> {
-    if (!bridge || !selectedFile || typeof bridge.openParamSession !== 'function') return;
-    const reload = await bridge.openParamSession({ sourceUri: selectedFile.sourceUri });
-    if (!reload.ok) {
-      setParamLive(false);
-      setParamIndexDiagnostic(reload.diagnostics?.[0]?.message ?? 'PARAM 写回后重开会话失败。');
-      return;
-    }
-    const sessionToken = reload.sessionToken;
-    paramSessionTokenRef.current = sessionToken;
-    setParamSessionToken(sessionToken);
-    setParamSourceHash(reload.sourceHash);
-    setParamTypeName(reload.metadata.typeName || selectedFile.relativePath);
-    setParamRowDataSize(reload.metadata.rowDataSize);
-    setParamRowCount(reload.rowCount);
-    setParamFieldDefs(reload.metadata.fieldDefs);
-    setParamFieldEnums(reload.metadata.fieldEnums);
-    setParamFieldDefsOrigin(
-      reload.metadata.fieldDefsOrigin === 'first-party'
-        || reload.metadata.fieldDefsOrigin === 'imported'
-        || reload.metadata.fieldDefsOrigin === 'user-derived'
-        ? reload.metadata.fieldDefsOrigin
-        : 'fixture'
-    );
-    setParamFieldDefsDiagnostic(reload.metadata.fieldDefsDiagnostic);
-    setParamNativeTelemetry(reload.nativeTelemetry);
-    const tracker = createParamSessionMaterializationTracker(reload.rowCount);
-    paramMaterializationRef.current = tracker;
-    tracker.observeIndex(reload.firstPage.rows);
-    setParamRows(reload.firstPage.rows.map(paramRowViewFromIndex));
-    setParamRowPayloads(new Map());
-    setParamMaterialization(tracker.snapshot());
-    setParamLive(true);
-    setParamIndexLoading(true);
-    setParamIndexDiagnostic(null);
-    try {
-      let loadedThrough = reload.firstPage.rows.reduce(
-        (max, row) => Math.max(max, row.rowIndex + 1),
-        0
-      );
-      let page = reload.firstPage.page + 1;
-      while (loadedThrough < reload.rowCount) {
-        const pageResult = await bridge.readParamIndexPage({
-          sourceUri: selectedFile.sourceUri,
-          sessionToken,
-          page,
-          pageSize: PARAM_PAGE_SIZE
-        });
-        if (!pageResult.ok) {
-          setParamIndexDiagnostic(pageResult.diagnostics?.[0]?.message ?? 'PARAM 写回后索引续读失败。');
-          break;
-        }
-        tracker.observeIndex(pageResult.rows);
-        setParamRows((current) => mergeParamRowViews(current, pageResult.rows));
-        setParamMaterialization(tracker.snapshot());
-        setParamNativeTelemetry(pageResult.nativeTelemetry);
-        const nextLoadedThrough = pageResult.rows.reduce(
-          (max, row) => Math.max(max, row.rowIndex + 1),
-          loadedThrough
-        );
-        if (pageResult.rows.length === 0 || nextLoadedThrough <= loadedThrough) break;
-        loadedThrough = nextLoadedThrough;
-        page += 1;
-        if (pageResult.rows.length < PARAM_PAGE_SIZE) break;
-      }
-    } finally {
-      setParamIndexLoading(false);
-    }
-  }
-
-  async function applyParamFieldMutationFromPanel(input: {
-    rowId: number;
-    identity?: ParamPhysicalRowIdentity;
-    fieldId: string;
-    value: number | string | boolean;
-    rowDataBase64: string;
-    definition: unknown;
-  }): Promise<{ ok: boolean; diagnostics?: Array<{ code: string; message: string }> }> {
-    if (!selectedFile) {
-      return {
-        ok: false,
-        diagnostics: [{ code: 'PARAM_FIELD_NO_LIVE_DOCUMENT', message: '需要实时 PARAM 文档才能提交字段。' }]
-      };
-    }
-    if (!bridge) {
-      return {
-        ok: false,
-        diagnostics: [{ code: 'BRIDGE_UNAVAILABLE', message: describeBridgeAbsence('提交 PARAM 字段') }]
-      };
-    }
-    if (typeof bridge.applyParamFieldMutation !== 'function') {
-      return {
-        ok: false,
-        diagnostics: [{ code: 'PRELOAD_MISSING', message: '当前预加载未暴露 applyParamFieldMutation。' }]
-      };
-    }
-    setStatus('正在保存 PARAM 字段…');
-    // S29：哈希只留 main 做并发凭据，renderer 空串不拒写（main 写时现算兜底）。
-    const result = await bridge.applyParamFieldMutation(
-      selectedFile.sourceUri,
-      paramSourceHash ?? '',
-      {
-        rowId: input.rowId,
-        ...(input.identity
-          ? { rowIndex: input.identity.rowIndex, expectedDataHash: input.identity.dataHash }
-          : {}),
-        fieldId: input.fieldId,
-        value: input.value,
-        rowDataBase64: input.rowDataBase64,
-        definition: input.definition
-      }
-    );
-    if (result.ok) {
-      await reloadParamRowsFromSource();
-      await refreshOperationHistory();
-      setStatus(`PARAM 字段 ${input.fieldId} 已保存。`);
-      pushToast('已保存');
-      return { ok: true, diagnostics: result.diagnostics ?? [] };
-    }
-    return {
-      ok: false,
-      diagnostics: (result.diagnostics ?? []).map((diagnostic: Diagnostic) => ({
-        code: diagnostic.code,
-        message: diagnostic.message
-      }))
-    };
   }
 
   /**
@@ -4462,80 +3864,7 @@ export function App(): ReactElement {
                 openingPreview={eventSourcePreview}
                 pendingTab={eventPendingTab}
                 onJumpResource={jumpToResource}
-                onDslSubmit={async (tab, sourceText) => {
-                  if (!tab.live) {
-                    return {
-                      ok: false,
-                      diagnostics: [{ severity: 'error', code: 'EMEVD_DSL_NO_LIVE_DOCUMENT', message: '需要实时 EMEVD 文档才能提交 DSL。' }]
-                    };
-                  }
-                  if (!bridge) {
-                    return {
-                      ok: false,
-                      diagnostics: [{ severity: 'error', code: 'BRIDGE_UNAVAILABLE', message: describeBridgeAbsence('提交 EMEVD DSL') }]
-                    };
-                  }
-                  if (typeof bridge.submitEmevdDslPlan !== 'function') {
-                    return {
-                      ok: false,
-                      diagnostics: [{ severity: 'error', code: 'PRELOAD_MISSING', message: '当前预加载未暴露 submitEmevdDslPlan。' }]
-                    };
-                  }
-                  const result = await bridge.submitEmevdDslPlan(
-                    tab.resourceUri,
-                    sourceText,
-                    tab.sourceStyle === 'dark-script' ? 'dark-script' : 'patch'
-                  );
-                  if (result.ok) {
-                    // 同 loadEmevd：提交后重读也只发一次。以前这里紧跟一次
-                    // readEmevdDocument 去换 sourceHash 与 gutter 判据，两者现在
-                    // 都在 reload 的响应里（sourceHash / outline）。
-                    const reload = await bridge.readEmevdFullDocument(
-                      tab.resourceUri,
-                      `renderer-${tab.resourceUri}-${Date.now()}`
-                    );
-                    if (reload?.ok) {
-                      const assembled = await assembleEmevdSource({
-                        dslTemplate: reload.dslTemplate ?? null,
-                        sourcePrefix: reload.sourcePrefix ?? null,
-                        sourceToken: reload.sourceToken ?? null,
-                        sourceTotalLines: reload.sourceTotalLines ?? reload.dslTemplateTotalLines,
-                        readSlice: async (token, fromLine, lineCount) => {
-                          if (typeof bridge.readEmevdSourceSlice !== 'function') {
-                            return { ok: false };
-                          }
-                          return bridge.readEmevdSourceSlice(token, fromLine, lineCount);
-                        }
-                      });
-                      if (assembled.text) {
-                        setEventPendingTab(emevdPendingTabFromFullDocument({
-                          tabId: tab.tabId,
-                          title: tab.title,
-                          resourceUri: tab.resourceUri,
-                          full: reload,
-                          dslTemplate: assembled.text,
-                          dslTemplateTruncated: reload.dslTemplateTruncated ?? false,
-                          dslTemplateTotalLines: reload.dslTemplateTotalLines
-                            ?? assembled.text.split('\n').length,
-                          sourceStyle: reload.sourceStyle ?? tab.sourceStyle ?? 'none'
-                        }));
-                        return {
-                          ok: true,
-                          diagnostics: result.diagnostics ?? [],
-                          nextDslTemplate: assembled.text
-                        };
-                      }
-                    }
-                  }
-                  return {
-                    ok: result.ok,
-                    diagnostics: result.diagnostics ?? [{
-                      severity: 'error',
-                      code: 'EMEVD_DSL_SUBMIT_FAILED',
-                      message: 'DSL 提交失败。'
-                    }]
-                  };
-                }}
+                onDslSubmit={submitEventDsl}
               />
             </div>
           </PanelErrorBoundary>

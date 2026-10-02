@@ -12,11 +12,12 @@ import {
   createAgentToolBridge,
   createConfiguredModelServiceAdapter,
   createConfirmationReceipt,
-  createContextBroker,
   createUnifiedDiff,
   getRagStaleChunkMaskCached,
   CoreToolSession,
-  nativeEditSessionFromContext,
+  openAgentCoreToolSession,
+  createAgentToolContextProvider,
+  createAgentRagSearch,
   retrieveEvidence,
   retrieveEvidenceHybrid,
   resolveRagCorpus,
@@ -67,8 +68,7 @@ import type { OperationLogUtilityClient, WorkspaceBoundUtilityStore } from '../o
 import { INTERNAL_RAG_EMBEDDING, InternalRagEmbeddingService } from '../ragEmbedding.js';
 import { prepareAgentRagSearchCorpus } from '../ragRefreshCorpus.js';
 import {
-  createAgentBridgeBaseContext,
-  wrapAgentToolContextRefreshCallbacks
+  createAgentBridgeBaseContext
 } from './agentBridgeContext.js';
 import { isAgentRagSearchIdentityCurrent } from './agentRagIdentity.js';
 import { countGeneratedTextDiffLines } from './generatedTextDiffCounts.js';
@@ -115,8 +115,6 @@ export interface AiAgentEventEnvelope { sessionId: string; seq: number; event: A
 export type AgentResourceReferenceCreateIpcResult = { ok: true; reference: AgentResourceReference } | { ok: false; error: { code: string; message: string; diagnostics?: readonly { code: string; path: string; message: string }[]; }; };
 export type AgentAttachmentCreateIpcResult = { ok: true; reference: { token: string; mediaType: 'image/png' | 'image/jpeg' | 'image/webp' | 'text/plain'; byteLength: number; expiresAt: string; }; label: string; } | { ok: false; cancelled?: boolean; error: { code: string; message: string }; };
 
-const DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS = 500_000;
-const AGENT_CONTEXT_COMPACTION_RATIO = 0.8;
 const APPROVAL_TIMEOUT_MS = 600_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 180_000;
 const AGENT_EVENT_HISTORY_LIMIT = 4_096;
@@ -738,17 +736,6 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
             : {})
       };
       const contextWindowTokens = stored!.contextWindowTokens;
-      const effectiveAutoCompactTokenLimit = request.autoCompactTokenLimit != null
-        && request.autoCompactTokenLimit > 0
-        ? Math.trunc(request.autoCompactTokenLimit)
-        : Math.max(
-          1,
-          Math.trunc(
-            (contextWindowTokens != null && contextWindowTokens > 0
-              ? contextWindowTokens
-              : DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS) * AGENT_CONTEXT_COMPACTION_RATIO
-          )
-        );
 
       let resumeFrom: ResumedRollout | undefined;
       if (request.resumeSessionPath !== undefined) {
@@ -791,50 +778,27 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       // subject. It is intentionally per-run, so proofs cannot cross Agent
       // identities or a later workspace session.
       const activeWorkspaceSession = deps.getActiveSession();
+      const activeWorkspaceIndex = deps.getActiveIndex();
       let coreSession: CoreToolSession | undefined;
       if (activeWorkspaceSession) {
         const storage = deps.durableStoragePaths(activeWorkspaceSession.meta.workspaceId);
-        const operationLog = await deps.ensureActiveOperationLog(activeWorkspaceSession);
-        const editSession = nativeEditSessionFromContext({
-          session: activeWorkspaceSession,
-          operationLog,
-          backupBaseDir: storage.backupBaseDir,
-          recoveryDir: storage.recoveryDir,
-          stagingRoot: storage.stagingRoot
-        });
-        coreSession = new CoreToolSession({
+        coreSession = await openAgentCoreToolSession({
           principal: `agent:${sessionId}`,
-          workspaceId: activeWorkspaceSession.meta.workspaceId,
           workspaceSession: activeWorkspaceSession,
-          ...(deps.getActiveIndex() ? { workspaceIndex: deps.getActiveIndex()! } : {}),
-          editSession,
-          operationLog,
+          ...(activeWorkspaceIndex ? { workspaceIndex: activeWorkspaceIndex } : {}),
+          getWorkspaceSession: () => deps.getActiveSession(),
+          getOperationLog: (session) => deps.ensureActiveOperationLog(session),
+          storage,
           modeCeiling: mode
         });
       }
-      const updateCoreSessionWorkspaceIndex = (): void => {
-        const activeSession = deps.getActiveSession();
-        if (coreSession && activeWorkspaceSession && activeSession === activeWorkspaceSession) {
-          const activeIndex = deps.getActiveIndex();
-          if (activeIndex) coreSession.updateWorkspaceIndex(activeIndex, activeSession);
-        }
-      };
-      const currentAgentContext = (): ToolContext => {
-        updateCoreSessionWorkspaceIndex();
-        const hostContext = deps.currentToolContext();
-        const refreshAwareContext = coreSession
-          ? wrapAgentToolContextRefreshCallbacks(hostContext, updateCoreSessionWorkspaceIndex)
-          : hostContext;
-        return {
-          ...refreshAwareContext,
-          ...(coreSession ? {
-            coreSession,
-            nativeReadProofs: coreSession.proofStore,
-            proofPrincipal: coreSession.principal,
-            ...(coreSession.editSession ? { editSession: coreSession.editSession } : {})
-          } : {})
-        };
-      };
+      const currentAgentContext = createAgentToolContextProvider({
+        ...(coreSession ? { coreSession } : {}),
+        ...(activeWorkspaceSession ? { workspaceSession: activeWorkspaceSession } : {}),
+        getWorkspaceSession: () => deps.getActiveSession(),
+        getWorkspaceIndex: () => deps.getActiveIndex(),
+        getToolContext: () => deps.currentToolContext()
+      });
       // 无工作区时 deps.getActiveIndex() 为 null：工具层按工具守卫（WORKSPACE_REQUIRED），
       // 需要工作区的工具干净失败，不整次拒绝（T6）。
       const bridge = createAgentToolBridge({
@@ -1200,7 +1164,29 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       };
       const ragSearchAvailable = request.useRagSearch === true ? await hasRagSearchCorpus() : false;
 
-      const assembly = createAgentRunAssembly(bridge, {sessionRunner:runAgentUtilitySession,...(coreSession?{coreSession}:{})});
+      const ragWorkspace = activeWorkspaceSession ?? deps.getActiveSession();
+      const ragSearch = ragSearchAvailable && ragWorkspace ? createAgentRagSearch({
+        workspaceSession: ragWorkspace,
+        getWorkspaceSession: () => deps.getActiveSession(),
+        signal: controller.signal,
+        waitForIndexing: (signal) => deps.waitForWorkspaceIndexing(signal),
+        retrieve: (query, signal) => searchWorkspaceEvidence(
+          deps.operationLogUtility.forWorkspace(ragWorkspace.meta.workspaceId), query, { signal }
+        )
+      }) : undefined;
+      const assembly = createAgentRunAssembly(bridge, {
+        sessionRunner: runAgentUtilitySession,
+        ...(coreSession ? { coreSession } : {}),
+        composition: {
+          controls: request,
+          defaultTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+          maxStepsCeiling: 200,
+          autoCompaction: true,
+          ...(contextWindowTokens !== undefined ? { contextWindowTokens } : {}),
+          sampling,
+          ...(ragSearch ? { ragSearch } : {})
+        }
+      });
       void assembly.run({
         sessionsDir: agentSessionsBaseDir,
         sessionId,
@@ -1227,92 +1213,6 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         // Only an explicitly main-granted fullPermission session may disable
         // the core loop's default approval levels.
         ...(mode === 'fullPermission' ? { approvalRequiredLevels: [] } : {}),
-        ...(request.streaming === true ? { streaming: true } : {}),
-        timeoutMs: request.timeoutMs != null && request.timeoutMs > 0
-          ? Math.trunc(request.timeoutMs)
-          : DEFAULT_REQUEST_TIMEOUT_MS,
-        ...(request.maxTotalOutputTokens != null && request.maxTotalOutputTokens > 0
-          ? { maxTotalOutputTokens: Math.trunc(request.maxTotalOutputTokens) }
-          : {}),
-        ...(request.maxSteps != null && request.maxSteps > 0
-          ? { maxSteps: Math.min(200, Math.trunc(request.maxSteps)) }
-          : {}),
-        // Always arm compaction. Missing provider metadata uses the same 500K
-        // default shown in settings and compacts at 80%; an explicit request
-        // override remains exact for deterministic callers/tests.
-        compaction: {
-          autoCompactTokenLimit: request.autoCompactTokenLimit != null && request.autoCompactTokenLimit > 0
-            ? Math.trunc(request.autoCompactTokenLimit)
-            : effectiveAutoCompactTokenLimit
-        },
-        ...(Object.keys(sampling).length > 0 ? { sampling } : {}),
-        ...(ragSearchAvailable
-          ? {
-              ragSearch: {
-                ...(request.ragSearchMaxHits != null && request.ragSearchMaxHits > 0
-                  ? { maxHits: Math.min(8, Math.trunc(request.ragSearchMaxHits)) }
-                  : {}),
-                // RAG 自动注入：仅在已就绪真实 embedding 向量时启用。
-                // 每次模型调用前用最近用户消息检索工作区证据；无工作区时返回 WORKSPACE_REQUIRED。
-                retrieve: async (query: string) => {
-                  if (!deps.getActiveIndex() || !deps.getActiveSession()) {
-                    return { ok: false as const, code: 'WORKSPACE_REQUIRED' as const, message: '先打开 Mod 工作区。' };
-                  }
-                  // RAG retrieval is a read-only model preflight. It uses the
-                  // current in-memory corpus first; vector persistence is
-                  // recovered by the background embedding task, never by this
-                  // query and never by running recovery cleanup.
-                  // Always join the workspace's one single-flight semantic
-                  // analysis before the first lookup. The renderer starts it
-                  // after the shell becomes interactive, but an Agent can be
-                  // submitted in that race window; waiting only when the
-                  // corpus is unavailable would accept an older partial corpus
-                  // that happens to contain text/event/map rows but no PARAM.
-                  // 设定有界等待超时（至多 3 秒），防止大工作区深度解析（如全量 MSB/PARAM 需数分钟）导致 Agent 对话死等挂起。
-                  const indexingAbort = new AbortController();
-                  const onParentAbort = () => indexingAbort.abort();
-                  controller.signal.addEventListener('abort', onParentAbort, { once: true });
-                  const indexingTimer = setTimeout(() => indexingAbort.abort(), 3_000);
-                  try {
-                    await deps.waitForWorkspaceIndexing(indexingAbort.signal);
-                  } catch (error) {
-                    if (controller.signal.aborted) {
-                      return {
-                        ok: false as const,
-                        code: 'RAG_UNAVAILABLE' as const,
-                        message: '等待工作区语义索引期间任务已取消。'
-                      };
-                    }
-                    // 超时未完成则降级直接利用已有索引检索，绝不长时间挂起会话
-                  } finally {
-                    clearTimeout(indexingTimer);
-                    controller.signal.removeEventListener('abort', onParentAbort);
-                  }
-                  return searchWorkspaceEvidence(
-                    deps.operationLogUtility.forWorkspace(deps.getActiveIndex()!.workspaceId),
-                    query,
-                    { signal: controller.signal }
-                  );
-                }
-              }
-            }
-          : {}),
-        // Only the attempt count is renderer-controllable, and it is clamped:
-        // backoff base and jitter stay at the loop's defaults. Exposing those
-        // would let the renderer configure a hot retry loop against a
-        // third-party provider. Read inline so the value's origin is visible at
-        // the call site rather than in a variable computed elsewhere.
-        ...(request.retryMaxAttempts != null && request.retryMaxAttempts > 0
-          ? { retryPolicy: { maxAttempts: Math.min(8, Math.trunc(request.retryMaxAttempts)) } }
-          : {}),
-        ...(request.useContextBroker === true
-          ? {
-              contextBroker: createContextBroker(),
-              ...(request.contextMaxBytes != null && request.contextMaxBytes > 0
-                ? { contextBrokerOptions: { maxBytes: Math.trunc(request.contextMaxBytes) } }
-                : {})
-            }
-          : {}),
         ...(resumeFrom ? { resumeFrom } : {}),
         onEvent: (event) => sendAgentEvent(sessionId, event)
       }).then((result) => {

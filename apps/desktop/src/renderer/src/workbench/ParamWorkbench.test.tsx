@@ -171,10 +171,9 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
   const paramIpcSource = stripComments(['paramService.ts', 'paramSessionService.ts'].map(name => readFileSync(
     join(repoRoot, 'apps', 'desktop', 'src', 'main', 'services', name), 'utf8'
   )).join('\n'));
-  const assetIpcSource = stripComments(readFileSync(
-    join(repoRoot, 'apps', 'desktop', 'src', 'main', 'ipc', 'assets.ts'),
-    'utf8'
-  ));
+  const assetIpcSource = stripComments(['assetReadService.ts', 'assetMutationService.ts'].map(name => readFileSync(
+    join(repoRoot, 'apps', 'desktop', 'src', 'main', 'services', name), 'utf8'
+  )).join('\n'));
   const preloadSource = stripComments(readFileSync(
     join(repoRoot, 'apps', 'desktop', 'src', 'preload', 'index.ts'),
     'utf8'

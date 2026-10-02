@@ -6,12 +6,13 @@ import { openWorkspaceSession } from '../workspace/workspaceSession.js';
 import { scanWorkspace } from '../workspace/scanWorkspace.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { analyzeWorkspace, type AnalyzeWorkspaceProgress } from '../pipeline/workspacePipeline.js';
-import { nativeEditSessionFromContext, type NativeEditSession } from '../editing/nativeEditSession.js';
+import { type NativeEditSession } from '../editing/nativeEditSession.js';
 import { MemoryOperationLogStore, type OperationLogStore } from '../patch/operationLog.js';
 import { openSqliteOperationLogStore } from '../patch/sqliteOperationLogStore.js';
-import { createDefaultToolRegistry, type ToolRegistry } from '../ai/toolRegistry.js';
+import { createDefaultToolRegistry, type ToolRegistry, type ToolContext } from '../ai/toolRegistry.js';
 import { createAgentToolBridge, type AgentToolBridge } from '../ai/agentToolBridge.js';
-import { CoreToolSession } from '../runtime/coreToolSession.js';
+import { type CoreToolSession } from '../runtime/coreToolSession.js';
+import { createAgentBridgeBaseContext,createAgentCoreToolSession,createAgentToolContextProvider } from '../model-services/agentHostComposition.js';
 import { disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { KnowledgeStore } from '../knowledge/knowledgeStore.js';
 import { SqliteKnowledgeStorePersistence } from '../knowledge/sqliteKnowledgeStore.js';
@@ -341,27 +342,15 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
     }
   }
 
-  const editSession = nativeEditSessionFromContext({
-    session,
-    operationLog,
-    backupBaseDir: join(root, 'backups'),
-    recoveryDir: join(root, 'recovery'),
-    stagingRoot: join(root, 'staging')
-  });
   const mode = options.mode ?? 'normal';
-  const coreSession = new CoreToolSession({
-    principal: options.principal ?? 'local-cli',
-    workspaceId,
-    workspaceSession: session,
-    workspaceIndex,
-    editSession,
-    operationLog,
-    modeCeiling: mode
+  const coreSession = createAgentCoreToolSession({
+    principal: options.principal ?? 'local-cli', workspaceId, workspaceSession: session,
+    workspaceIndex, operationLog, modeCeiling: mode,
+    storage: {backupBaseDir:join(root,'backups'),recoveryDir:join(root,'recovery'),stagingRoot:join(root,'staging')}
   });
+  const editSession = coreSession.requireEditSession();
   const registry = createDefaultToolRegistry();
-  const rawBridge = createAgentToolBridge({
-    registry,
-    context: {
+  const localToolContext: ToolContext = {
       get workspaceIndex() { return coreSession.workspaceIndex; },
       mode,
       modeCeiling: mode,
@@ -390,7 +379,13 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
       },
       ...(knowledgeStore ? { knowledgeStore } : {}),
       ...(!knowledgeStore ? { knowledgeStoreDiagnostic: 'CLI 持久知识数据库不可用。' } : {})
-    }
+    };
+  const rawBridge = createAgentToolBridge({
+    registry,
+    context: createAgentBridgeBaseContext(mode),
+    contextProvider: createAgentToolContextProvider({coreSession,workspaceSession:session,
+      getWorkspaceSession:()=>session,getWorkspaceIndex:()=>coreSession.workspaceIndex,
+      getToolContext:()=>localToolContext})
   });
   const mutatingTools = new Set(registry.list().filter(tool => tool.effect === 'write' || tool.effect === 'rollback').map(tool => tool.name));
 

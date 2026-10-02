@@ -394,3 +394,58 @@ fingerprint is
 (306 inputs). This is isolated compiled-source evidence, not a packaged-app,
 Windows, full MAP causal-DAG, first-frame or GPU result. Normal desktop wall time,
 consumer decoding and graphics performance remain unmeasured by this probe.
+
+## MSB request phases and bounded source snapshot
+
+A subsequent actual daemon run used the same m10 DFLT MSB at the normal 16 MiB
+frame budget, one active request and the compiled producer `1994b73f...`.
+Twenty warm requests had median send-to-complete-result-byte time 45.021 ms,
+owned Python JSON processing 18.270 ms and native progress-window time 21.424 ms.
+Those progress timestamps include frame/enqueue work and did not expose pure
+MSB native execution. The Python reader is not Electron main or Core; these
+intervals are not a complete MAP causal DAG or first-frame measurement.
+
+MSB reads now opt into the existing bounded timing collector using
+`diagnosticTimings: true`. A separate `MSB_NATIVE_TIMINGS` diagnostic exposes six
+fixed phases, native queue/start/completion timestamps and scalar source receipts.
+The same captured outer bytes supply both physical identity and leaf decoding.
+Physical SHA256 `8dca8500...` and decoded MSB SHA256 `d418012f...` remain distinct.
+Default-off output retains the exact original result; static MAP geometry keeps
+its existing timing schema. Unexecuted phases and source identities remain
+explicitly unavailable, including early missing-file failure.
+
+That inspection also found the previous MSB path allocated the complete outer
+file before its native size checks. The MSB-only source reader now borrows one
+opened handle, checks the existing 512 MiB DCX outer and 128 MiB MSB raw/declared
+leaf limits before full allocation or supported leaf decoding, and rejects
+growth or truncation instead of publishing a partial snapshot. The handle uses
+the former `FileShare.Read` behavior and closes on failure or cancellation.
+Existing codecs retain malformed/unknown-header diagnosis and source-path
+context. This is a local read safeguard, not a whole-MAP memory solution.
+
+On the observed source input `2a566c9c...` (307 inputs) and DLL `3f3c3fc1...`,
+twenty warm opt-in requests measured median native total 20.299 ms and queue
+wait 0.228 ms. Phase medians were file read 0.169 ms, physical hashing 0.271 ms,
+DCX resolution 3.723 ms, initial MSB parse 3.061 ms, verification 13.028 ms and
+envelope projection 0.471 ms. Verification's mean 14.667 ms was about 63% of
+mean native total 23.269 ms. It includes a source copy, another MSB parse and
+hashes, so it is the next concrete CPU/allocation target; adding its nested work
+or historical stage medians to native total would double count.
+
+The opt-in run's send-to-result-byte median was 58.516 ms and owned Python parse
+median 19.616 ms. It is an observation run, not a paired optimization comparison
+with the earlier producer. Default result identity, opt-in base result, queued
+cancellation, same-source reopen, zero active/queued health, workspace close and
+native process exit were verified. Full source/input/producer pins and rows are
+retained in `.local-validation/msb-native-timing/final-receipt.json`. Independent
+review reproduced an important final-header boundary: valid DCA magic at 0xFC
+has its length at 0x100–0x103. The reader now captures 0x104 bytes while keeping
+the codec's original 0x100 magic-search limit. The actual reader negative failed
+before that correction; the final source `5879f573...` and DLL `07795d12...`
+passed 75/75 native cases with zero skips. A bounded current-producer read
+reconfirmed default silence, opt-in source receipts and cancel/reopen/close
+without repeating the twenty-sample phase experiment. Its separate rebind
+receipt preserves the earlier timing evidence's original producer identity.
+Renderer/main-process timing, actual m10 static-model geometry and GPU first
+frame remain outside this capture; the restored m10 MAPBND is still KRAK and
+unavailable to the current Linux decoder.

@@ -20,7 +20,10 @@ const [collectorSource, characterCollectorSource, transportCollectorSource, runB
   readFile(new URL('../bridge/SoulForge.Bridge/BridgeDaemonHost.cs', import.meta.url), 'utf8'),
   readFile(new URL('../bridge/SoulForge.Bridge/BridgeCommandService.cs', import.meta.url), 'utf8'),
   readFile(new URL('../bridge/SoulForge.Bridge/MapStaticGeometryService.cs', import.meta.url), 'utf8'),
-  readFile(new URL('../apps/desktop/src/main/ipc/map.ts', import.meta.url), 'utf8'),
+  Promise.all([
+    readFile(new URL('../apps/desktop/src/main/ipc/map.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../apps/desktop/src/main/services/mapService.ts', import.meta.url), 'utf8')
+  ]).then(parts => parts.join('\n')),
   readFile(new URL('../apps/desktop/src/main/mapTimingTelemetry.ts', import.meta.url), 'utf8'),
   readFile(new URL('../apps/desktop/src/main/characterTimingTelemetry.ts', import.meta.url), 'utf8'),
   readFile(new URL('../scripts/character-native-timing-aggregate.mjs', import.meta.url), 'utf8'),

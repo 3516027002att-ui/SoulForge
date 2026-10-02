@@ -171,7 +171,7 @@ describe('knowledge refresh ownership', () => {
     const param = readSource('apps', 'desktop', 'src', 'main', 'services', 'paramService.ts');
     const event = readSource('apps', 'desktop', 'src', 'main', 'ipc', 'event.ts');
     const text = readSource('apps', 'desktop', 'src', 'main', 'ipc', 'text.ts');
-    const assets = readSource('apps', 'desktop', 'src', 'main', 'ipc', 'assets.ts');
+    const assets = readSource('apps', 'desktop', 'src', 'main', 'services', 'assetMutationService.ts');
 
     assert.equal((param.match(/knowledgeRefreshOwner: 'caller'/g) ?? []).length, 6);
     assert.equal((event.match(/knowledgeRefreshOwner: 'caller'/g) ?? []).length, 1);

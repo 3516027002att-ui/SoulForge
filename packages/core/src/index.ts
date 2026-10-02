@@ -74,6 +74,7 @@ export * from './workspace/importLegacySemanticSnapshot.js';
 export * from './character/characterAssembly.js';
 export * from './ai/evidencePackBuilder.js';
 export * from './model-services/index.js';
+export * from './model-services/agentHostComposition.js';
 export * from './feedback/index.js';
 export * from './mutter/index.js';
 export * from './assets/assetImport.js';

@@ -53,7 +53,7 @@ import {
 import {
   buildActionBinderMembershipIndex,
   resolveActionEffectiveBaseRoot
-} from './action.js';
+} from '../services/actionService.js';
 
 // Workspace types – originally in ipc.ts composition root, now owned here.
 export interface DirectorySelection {

@@ -555,6 +555,16 @@ internal static class BridgeDaemonHost
                     Diagnostics = diagnostics.ToArray()
                 };
             }
+            else if (string.Equals(payload.Command, "read-msb-document", StringComparison.OrdinalIgnoreCase)
+                && mapTiming?.IsMsbDocument == true)
+            {
+                result = result with
+                {
+                    Diagnostics = result.Diagnostics.Append(new Diagnostic(
+                        "info", "MSB_NATIVE_TIMINGS", "MSB 文档 native 读链路的 opt-in 计时快照。",
+                        result.SourceUri, mapTiming.Snapshot())).ToArray()
+                };
+            }
             else if (string.Equals(payload.Command, "read-chrbnd-flver-preview", StringComparison.OrdinalIgnoreCase)
                 && characterTiming is not null)
             {

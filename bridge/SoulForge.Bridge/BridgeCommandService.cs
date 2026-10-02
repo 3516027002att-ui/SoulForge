@@ -1124,8 +1124,25 @@ internal sealed class BridgeCommandService
             if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
-                var document = MsbNativeDocument.Read(NativeLeafPayload.Resolve(file, oodleRuntimeRoot));
-                var roundTrip = document.VerifyRoundTrip();
+                // Preserve one owned outer receipt for path, physical hash,
+                // DCX resolution and leaf parsing. Default reads do not hash
+                // the outer source solely for telemetry.
+                byte[] source;
+                using (mapTiming?.Measure("fileReadMs")) source = MsbSourceSnapshotReader.Read(file, cancellationToken);
+                string? physicalHash = null;
+                if (mapTiming?.IsMsbDocument == true)
+                {
+                    using (mapTiming.Measure("sourceHashMs")) physicalHash = HashHex(source);
+                    mapTiming.ObserveMsbSource(physicalHash, source.LongLength);
+                }
+                byte[] leaf;
+                using (mapTiming?.Measure("dcxResolveMs")) leaf = NativeLeafPayload.Resolve(source, file, oodleRuntimeRoot);
+                MsbNativeDocument document;
+                using (mapTiming?.Measure("msbReadMs")) document = MsbNativeDocument.Read(leaf);
+                MsbRoundTripReport roundTrip;
+                using (mapTiming?.Measure("verifyRoundTripMs")) roundTrip = document.VerifyRoundTrip();
+                if (mapTiming?.IsMsbDocument == true)
+                    mapTiming.ObserveMsbSource(physicalHash, source.LongLength, document.SourceHash, leaf.LongLength);
                 var diagnostics = new[]
                 {
                     new Diagnostic(
@@ -1137,7 +1154,9 @@ internal sealed class BridgeCommandService
                         BridgeResult<object>.MakeSourceUri(file),
                         roundTrip)
                 };
-                return BridgeResult<object>.Partial(file, "map", diagnostics, document.ToEnvelope(roundTrip));
+                object envelope;
+                using (mapTiming?.Measure("toEnvelopeMs")) envelope = document.ToEnvelope(roundTrip);
+                return BridgeResult<object>.Partial(file, "map", diagnostics, envelope);
             }
             catch (OodleRuntimeUnavailableException)
             {

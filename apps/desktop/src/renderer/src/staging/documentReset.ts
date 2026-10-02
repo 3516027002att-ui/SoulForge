@@ -68,6 +68,9 @@ export const DOCUMENT_STATE_SETTERS: Readonly<Record<DocumentFamily, readonly st
       'setFmgRevealRequest'
     ]),
     param: Object.freeze([
+      // Domain callback ownership advances on reset, including an already-empty
+      // document. Old retained submission callbacks must not start a new write.
+      'setParamResetEpoch',
       'setParamRows',
       'setParamTypeName',
       'setParamSourceHash',
@@ -99,7 +102,7 @@ export const DOCUMENT_STATE_SETTERS: Readonly<Record<DocumentFamily, readonly st
     // EVENT-30B：EMEVD 编辑态收敛为单个 pendingTab（工作台内部自持 tabs/dirty/
     // draft/per-tab EditorState）。复位即清空 pendingTab；工作台收到 null 后回到
     // 空态，不会把上一个事件的源码残留到新资源旁边。
-    emevd: Object.freeze(['setEventPendingTab', 'setEventOpening', 'setEventSourcePreview']),
+    emevd: Object.freeze(['setEventPendingTab', 'setEventOpening', 'setEventSourcePreview', 'setEventResetEpoch']),
     msb: Object.freeze([
       'setMsbParts',
       'setMsbModels',
