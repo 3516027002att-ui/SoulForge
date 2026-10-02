@@ -11,13 +11,13 @@ const exec=promisify(execFile),entry=resolve('scripts/agent-owned-corpus-compari
 
 async function withPorts(run){
  const root=await mkdtemp(join(tmpdir(),'sf-owned-control-entry-'));
- const loader=join(root,'ports.mjs'),runtime=pathToFileURL(resolve('scripts/testing/owned-native-agent-comparison.mjs')).href;
+ const loader=join(root,'ports # loader.mjs'),runtime=pathToFileURL(resolve('scripts/testing/owned-native-agent-comparison.mjs')).href;
  const identity=pathToFileURL(resolve('scripts/testing/legacy-agent-baseline.mjs')).href;
  const source=`import {selectLegacyAgentControl} from ${JSON.stringify(identity)};
  import {writeFile} from 'node:fs/promises';
  export function createOwnedNativeComparisonRuntime(options){const control=selectLegacyAgentControl(options.control);return {OUT:${JSON.stringify(root)},LEGACY:control.revision,TARGET:{},worker:async(kernel,scenario)=>console.log(JSON.stringify({controlId:control.id,revision:control.revision,kernel,scenario})),prepare:async()=>({status:'unavailable',code:'NATIVE_FIXTURE_MISSING',controlId:control.id,baselineRevision:control.revision}),save:async(path,value)=>writeFile(path,JSON.stringify(value))};}`;
  await writeFile(loader,`import {registerHooks} from 'node:module';globalThis.fetch=()=>{throw new Error('No network in comparison selection test');};registerHooks({load(url,context,next){return url===${JSON.stringify(runtime)}?{format:'module',shortCircuit:true,source:${JSON.stringify(source)}}:next(url,context);}});`);
- try{await run({root,invoke:args=>exec(process.execPath,['--import',loader,entry,...args],{cwd:process.cwd(),timeout:5000})});}
+ try{await run({root,invoke:args=>exec(process.execPath,['--import',pathToFileURL(loader).href,entry,...args],{cwd:process.cwd(),timeout:5000})});}
  finally{await rm(root,{recursive:true,force:true});}
 }
 
