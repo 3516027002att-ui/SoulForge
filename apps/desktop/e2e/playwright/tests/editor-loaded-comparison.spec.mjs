@@ -15,6 +15,8 @@ import { prepareEditorComparisonWorkspace, SCRIPT_TEXT, OTHER_SCRIPT_TEXT, LONG_
 const here = path.dirname(fileURLToPath(import.meta.url));
 const productionMain = path.resolve(here, '../editor-comparison-main.mjs');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+// Match the existing native Script/PARAM read-write budget; UI waits stay 10s.
+const NATIVE_SAVE_COMPLETION_TIMEOUT_MS = 120_000;
 
 async function launchOwnedProduction() {
   for (const artifact of ['main/index.js', 'preload/index.cjs', 'renderer/index.html']) {
@@ -165,7 +167,7 @@ for (const mode of ['opal', 'obsidian']) {
       await page.screenshot({ path: test.info().outputPath(`script-comparison-${mode}.png`) });
       phase = 'script-save';
       await page.keyboard.press('Control+s');
-      await expect(page.getByTestId('scp-status')).toHaveText('已应用，可回滚。');
+      await expect(page.getByTestId('scp-status')).toHaveText('已应用，可回滚。', { timeout: NATIVE_SAVE_COMPLETION_TIMEOUT_MS });
       await expect(comparison).toHaveJSProperty('open', false);
       // Small source fits one viewport; assert the actual reloaded DOM text,
       // independently of the comparison's own no-difference projection.
@@ -227,7 +229,7 @@ for (const mode of ['opal', 'obsidian']) {
       await page.screenshot({ path: test.info().outputPath(`param-comparison-${mode}.png`) });
       phase = 'param-save';
       await priority.press('Tab'); // Real blur -> native field write -> reload.
-      await expect(workbench.locator('.wb-toast')).toHaveText('已保存');
+      await expect(workbench.locator('.wb-toast')).toHaveText('已保存', { timeout: NATIVE_SAVE_COMPLETION_TIMEOUT_MS });
       await expect(workbench.locator('.wb-toast')).toHaveClass(/\bwb-toast--ok\b/);
       await expect(fieldComparison).toHaveJSProperty('open', false);
       await expect(priority).toHaveValue('7');
@@ -259,7 +261,7 @@ for (const mode of ['opal', 'obsidian']) {
       await expect(fieldComparison).toContainText('没有草稿差异。');
       // Switch while unchanged: existing blur-save semantics remain in force.
       await priority.press('Tab');
-      await expect(workbench.locator('.wb-toast')).toHaveText('已保存');
+      await expect(workbench.locator('.wb-toast')).toHaveText('已保存', { timeout: NATIVE_SAVE_COMPLETION_TIMEOUT_MS });
       await expect(workbench.locator('.wb-toast')).toHaveClass(/\bwb-toast--ok\b/);
       await workbench.getByRole('region', { name: '行', exact: true }).getByRole('row', { name: /^101\b/ }).click();
       await expect(priority).toHaveValue('2');
