@@ -65,8 +65,8 @@ export async function createParamCacheFixture({ fileCount = 1, rows = 1, bytesPe
     bundle: true, platform: 'node', format: 'esm', external: ['node:*'],
     footer: { js: serviceSource === null ? captureCaches : '' },
     plugins: [{ name: 'param-cache-seams', setup(builder) {
-      builder.onLoad({ filter: /\/ipc\/param\.ts$/ }, () => ({ contents: handlerSource, loader: 'ts', resolveDir: resolve('apps/desktop/src/main/ipc') }));
-      if (instrumentedService !== null) builder.onLoad({ filter: /\/services\/paramService\.ts$/ }, () => ({ contents: instrumentedService,
+      builder.onLoad({ filter: /[\\/]ipc[\\/]param\.ts$/ }, () => ({ contents: handlerSource, loader: 'ts', resolveDir: resolve('apps/desktop/src/main/ipc') }));
+      if (instrumentedService !== null) builder.onLoad({ filter: /[\\/]services[\\/]paramService\.ts$/ }, () => ({ contents: instrumentedService,
         loader: 'ts', resolveDir: resolve('apps/desktop/src/main/services') }));
       builder.onResolve({ filter: /^file:/ }, (args) => args.path === coreUrl ? { path: coreUrl, external: true } : undefined);
       builder.onResolve({ filter: /^@soulforge\/core$/ }, () => ({ path: 'fixture-core', namespace: 'fixture' }));
