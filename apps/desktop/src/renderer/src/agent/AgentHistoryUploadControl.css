@@ -1,0 +1,11 @@
+.agent-history-upload {
+  display: flex; flex-direction: column; gap: 7px; margin-bottom: 12px; padding: 10px;
+  border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--forge-2);
+}
+.agent-history-upload__head { display: flex; flex-direction: column; gap: 3px; }
+.agent-history-upload__head strong { font-size: 12px; }
+.agent-history-upload__head .muted { font-size: 10px; line-height: 1.4; }
+.agent-history-upload__endpoint { margin: 0; color: var(--ink-3); font-size: 10px; }
+.agent-history-upload__status { margin: 0; font-size: 10px; line-height: 1.4; }
+.agent-history-upload__status.is-ok { color: var(--ok-text, var(--ok)); }
+.agent-history-upload__status.is-error { color: var(--danger-text, var(--danger)); }

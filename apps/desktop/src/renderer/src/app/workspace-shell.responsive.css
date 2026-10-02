@@ -1,0 +1,21 @@
+
+/* ═══════════ 响应式 ═══════════ */
+@media (max-width: 920px) {
+  .sidebar { --sidebar-w: 224px; }
+  /* 问题 1：workspace-switcher 是换文件夹的唯一常驻入口，窄屏不能藏按钮；只收窄标签。 */
+  .workspace-switcher__label { max-width: 20ch; }
+}
+@media (max-width: 720px) {
+  .cmdk-trigger span { display: none; }
+  .cmdk-trigger { width: auto; }
+  .st-item:not(.st-branch):not(.st-ok):not(.st-status) { display: none; }
+}
+
+/* ═══════════ 无障碍：减少动效 ═══════════ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}

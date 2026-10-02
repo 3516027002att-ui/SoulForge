@@ -57,6 +57,6 @@ test('the desktop terminal event projection preserves actual streamed auth failu
   assert.equal(state.phase,'error');assert.equal(state.rolloutFileName,'fixture.jsonl');assert.equal(state.steps,result.run.steps);
   assert.equal(state.error.code,'MODEL_SERVICE_AUTH_ERROR');assert.match(reducer.describeAgentTaskStatus(state),/configured credential was rejected/);
   assert.ok(reducer.extractCompletedTurnItems(state,null).some(item=>item.kind==='notice'&&item.text.includes('MODEL_SERVICE_AUTH_ERROR')));
-  const ipc=await readFile('apps/desktop/src/main/ipc/agent.ts','utf8');assert.match(ipc,/agentSessionOutcomeEvents\(result,\s*relativeRolloutPath\)/);
+  const application=await readFile('apps/desktop/src/main/services/agentSessionService.ts','utf8');assert.match(application,/agentSessionOutcomeEvents\(result,\s*relativeRolloutPath\)/);
  }finally{await rm(root,{recursive:true,force:true});}
 });

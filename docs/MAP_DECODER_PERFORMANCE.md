@@ -679,3 +679,21 @@ and report `36b2533f...` are under `.local-validation/msb-service-paired/`. This
 measures headless production application functions through native return and DTO
 projection. It does not execute Electron IPC/main runtime, renderer preparation or
 GPU first frame, and natural-GC memory snapshots remain limited.
+
+### Submitted-frame observation integrity
+
+The actual controller callback previously let submitted-frame clock/event errors
+escape after `renderer.render` had succeeded, preventing the next RAF from being
+scheduled. Five source-bound callback/loop controls went from 2/5 RED to 5/5 GREEN.
+Only observation is protected; actual renderer errors retain their original
+failure, and normal frame cadence/disposal stay unchanged. Missing or nonfinite
+observation clocks produce no fabricated submitted-frame timestamp. The actual
+controller and transitive source passed strict checking with real declarations;
+the combined frame/post-return regressions passed 14/14 with zero skips.
+
+These controls use a recording renderer and test observation integrity, not GPU
+execution or first-frame latency. There is no fresh supported normal-app GPU
+capability receipt in the current restored environment; older receipts were lost.
+Current GPU availability is unknown, and hosted editor/native-frame successes do
+not establish it. Actual MAPBND KRAK decoding and GPU first-frame evidence remain
+separate limits.

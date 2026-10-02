@@ -139,7 +139,7 @@ export function toRendererEditorDocumentResult<T>(
 
 export function toRendererHistoryEntry(
   entry: PatchHistoryEntry,
-  files: readonly IndexedFile[]
+  files: readonly RendererResourceLabelSource[]
 ): RendererPatchHistoryEntry {
   return {
     opId: entry.opId,

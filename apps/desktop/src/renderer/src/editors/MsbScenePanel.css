@@ -1,0 +1,110 @@
+
+/* MAP-50B：MSB 三栏地图工作台（Map Object List | Viewport | Properties） */
+.msb-object-list-shell { height: 100%; min-height: 0; }
+.msb-object-list {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+.msb-object-list__spacer { position: relative; width: 100%; }
+.msb-object-list__virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+.msb-object-group {
+  border: 0; border-bottom: 1px solid var(--line);
+  border-radius: 0; background: transparent;
+}
+.msb-object-group__summary {
+  cursor: pointer; padding: 6px 10px; color: var(--ink-1);
+  font-size: 12px; font-weight: 600; user-select: none;
+  transition: background var(--dur-micro);
+}
+.msb-object-group__summary:hover { background: var(--forge-hover); }
+.msb-object-group__toggle {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.msb-object-group__empty { padding: 4px 10px; font-size: 12px; }
+/* 对象行：单列标签（覆盖 binder-child-row 的六列默认模板） */
+.msb-object-row {
+  grid-template-columns: minmax(120px, 1fr);
+  min-width: 150px;
+}
+.msb-transform-modes {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--forge-2);
+}
+.msb-transform-modes button {
+  min-width: 48px;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  color: var(--ink-2);
+  background: transparent;
+  cursor: pointer;
+}
+.msb-transform-modes button:last-child { border-right: 0; }
+.msb-transform-modes button:hover { background: var(--forge-hover); }
+.msb-transform-modes button.is-active {
+  color: var(--ink-1);
+  background: var(--forge-active);
+}
+/* 问题4-A：对象名字给全——数据不 slice；窄栏 ellipsis + title 全名。 */
+.msb-object-name {
+  display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 属性行：Name / Value 两列（覆盖 binder-child-row 的六列默认模板） */
+.msb-property-row {
+  grid-template-columns: 120px minmax(120px, 1fr);
+  min-width: 260px;
+}
+/* 视口与漫游：msb-viewport 整栏纵向填满，scene-host 随栏伸缩不固定比例；不强制 aspect。 */
+/* 视口与漫游：msb-viewport 整栏纵向填满，scene-host 随栏伸缩不固定比例；不强制 aspect。
+   .workbench__column-body 本身是 flex:1 / overflow:auto，若不把高度传给子 flex 容器，
+   在有 padding 的情况下会出现“竖长条/窄条”—— 因此 .msb-viewport 用 flex:1 1 0 + height:100%
+   双保险，gap 不再导致首帧收缩；scene-host 用 flex:1 1 0 保证拖动时宽度跟随 .workbench__columns 变化。 */
+.msb-viewport { flex: 1 1 0; min-height: 0; min-width: 0; height: 100%; width: 100%; display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+.msb-viewport .scene-host { flex: 1 1 0; min-height: 200px; min-width: 0; width: 100%; height: 100%; display: block; }
+.msb-workbench-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.msb-workbench-toolbar .button { min-height: 28px; padding: 3px 10px; }
+.msb-viewport-status { flex: none; display: grid; gap: 3px; min-width: 0; font-size: 12px; line-height: 1.45; }
+.msb-viewport-status p { margin: 0; }
+.msb-viewport-status__primary { color: var(--ink-2); overflow-wrap: anywhere; }
+.msb-viewport-status__progress { width: 100%; height: 4px; accent-color: var(--ember); }
+.msb-viewport-status__hint { font-size: 11px; }
+.msb-viewport-diagnostics { color: var(--ink-3); font-size: 11px; }
+.msb-viewport-diagnostics summary { cursor: pointer; user-select: none; }
+.msb-viewport-diagnostics p { margin: 3px 0 0 15px; overflow-wrap: anywhere; }
+/* S19 失败面：地图打开失败的可行动错误块（code + 人话），复用 notice 视觉族 */
+.msb-open-failure {
+  display: grid; gap: 4px; padding: 10px 12px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-m);
+  background: var(--warn-soft); color: var(--warn); font-size: 12px; line-height: 1.5;
+}
+.msb-open-failure__code {
+  font-family: var(--font-mono); font-size: 10.5px; opacity: 0.75; word-break: break-all;
+}

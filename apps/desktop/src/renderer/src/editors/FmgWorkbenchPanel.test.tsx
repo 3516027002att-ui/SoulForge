@@ -28,6 +28,7 @@ import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { FmgWorkbenchPanel, findTableInCatalog, projectFmgDisplayText } from './FmgWorkbenchPanel.js';
 import { DomainLibraryList } from '../navigation/DomainLibraryList.js';
+import { readOrderedStyleSource } from '../styleSource.testSupport.js';
 
 // node 环境没有 window；getRendererRuntime 会读 window.soulforge。设为空对象 →
 // browser-preview 表面 → bridge 为 null → live 路径短路，SSR 输出纯初始结构
@@ -334,9 +335,8 @@ describe('S29 能打开就能写：FMG 直写不进审查队列（Text owner / A
 });
 
 describe('S20 三栏独立滚动 + TEXT 不被 Agent 挡（234048）', () => {
-  const cssSource = readFileSync(
-    join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'styles.css'),
-    'utf8'
+  const cssSource = readOrderedStyleSource(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'styles.css')
   );
 
   it('panel 填满视口：.viewer-content .panel 有 flex:1 + min-height:0（工作台高度参照）', () => {

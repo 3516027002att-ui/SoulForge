@@ -980,6 +980,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   registerOperationIpcHandlers({
     handle: trustedHandle,
     get activeSession() { return getWorkspaceSession(); },
+    get activeWorkspaceSessionGeneration() { return getActiveWorkspaceSessionGenerationState(); },
     get activeOperationLog() { return utilityLifecycle.activeOperationLog; },
     get indexedFiles() { return getWorkspaceIndexedFiles(); },
     durableStoragePaths,

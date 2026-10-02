@@ -1,0 +1,29 @@
+
+.agent-history, .agent-settings-drawer { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; }
+.agent-settings-drawer label,
+.model-service-form label,
+.stack.gap label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+.agent-settings-drawer label input,
+.agent-settings-drawer label select,
+.model-service-form label input,
+.model-service-form label select {
+  width: 100%;
+}
+.model-service-form__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+.agent-history__actions { display: flex; gap: 6px; margin-bottom: 10px; }
+.agent-history__item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
+.agent-history__item > div:first-child { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.agent-history__item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.agent-history__item span { color: var(--ink-3); font-size: 10px; }
+.agent-history__item-actions { display: flex; flex: none; gap: 4px; }

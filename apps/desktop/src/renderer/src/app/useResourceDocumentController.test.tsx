@@ -62,6 +62,20 @@ function assertPlainEmpty(value: ResourceDocumentController) {
   assert.deepEqual(value.msgRows, []); assert.deepEqual(value.saveDiagnostics, []);
 }
 
+it('resource opening failure owns the exact shared projection and functional kind-specific clearing', async () => {
+  const p = ports(), h = await mount(p.options);
+  assert.equal(h.current().lastOpenFailure, null);
+  const failure = { kind: 'msb-open-failed' as const, document: 'owned-map', code: 'OWNED_READ_FAILED', message: '读取失败' };
+  await act(async () => h.current().setLastOpenFailure(failure));
+  assert.equal(h.current().lastOpenFailure, failure);
+  await act(async () => h.current().setLastOpenFailure(current => current?.kind === 'event-open-failed' ? null : current));
+  assert.equal(h.current().lastOpenFailure, failure);
+  await h.update({ ...p.options, bridge: { ...p.options.bridge! } });
+  assert.equal(h.current().lastOpenFailure, failure, 'bridge replacement keeps the original shell failure projection until unified reset');
+  await act(async () => h.current().setLastOpenFailure(current => current?.kind === 'msb-open-failed' ? null : current));
+  assert.equal(h.current().lastOpenFailure, null);
+});
+
 it('selection reads own the generation after synchronous registry resets and keep exact text bytes', async () => {
   const p = ports(), h = await mount(p.options), target = file('a'), text = '\ufeffraw\r\n\t終\u0000';
   p.options.bridge!.openResourcePreview = async source => { p.previews.push(source); return opened(target, text); };

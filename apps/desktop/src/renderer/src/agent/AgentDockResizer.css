@@ -1,0 +1,21 @@
+
+/* §12.2：4px resizer，普通状态只有 1px 左分隔线（.agent 的 border-left 承担）。
+   手柄贴在 dock 左缘内侧（left:0），不再伸出 aside 外：.agent 的 overflow:hidden
+   会把伸出边界的 4px 命中区裁掉，导致手柄完全点不到（R4）。内侧贴边压住 border-left，
+   命中区不会被裁剪。absolute 定位脱离 grid 流，z-index 高于编辑区/抽屉层。 */
+.agent-dock-resizer {
+  position: absolute; left: 0;
+  top: 0; bottom: 0;
+  width: var(--agent-resizer-width);
+  height: 100%;
+  cursor: col-resize; pointer-events: auto; z-index: 40;
+  background: transparent;
+  grid-area: 1 / 1 / -1 / 1;
+  transition: background var(--dur-micro);
+}
+.agent-dock-resizer:hover,
+.agent-dock-resizer:focus-visible { background: var(--ember-soft); }
+/* 只有 dock 收起时才隐藏/禁用，正常工作时保持可拖。 */
+.agent-dock-resizer.is-hidden { display: none; }
+.agent.is-collapsed .agent-dock-resizer { pointer-events: none; }
+.agent-drawer { grid-area: 1 / 1 / -1 / -1; }

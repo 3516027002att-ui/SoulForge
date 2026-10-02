@@ -1,0 +1,72 @@
+
+/* ══════════ 缺失类名补齐 ══════════ */
+/* 这些类名在组件里已被引用但 styles.css 从未定义，全部退化为默认外观：
+   primary-action / secondary-action 是 EMEVD 视图切换与主提交按钮的唯一视觉
+   区分依据，diag-error 是 Hex/Bnd4 面板的错误色依据。零定义的类不会有任何
+   编译或测试信号——只会让「主按钮」和「次按钮」长得一模一样。 */
+.primary-action {
+  color: var(--on-primary); background: var(--primary-fill);
+  border: 1px solid transparent; border-radius: var(--radius-s);
+  padding: 4px 12px; font-size: 12px; font-weight: 500; cursor: pointer;
+}
+.primary-action:hover:not(:disabled) { background: var(--primary-fill-hover); }
+.primary-action:disabled { color: var(--ink-3); background: var(--forge-3); cursor: not-allowed; }
+.secondary-action {
+  color: var(--ink-1); background: var(--control-rest-bg);
+  border: 1px solid var(--line-strong); border-radius: var(--radius-s);
+  padding: 4px 12px; font-size: 12px; cursor: pointer;
+}
+.secondary-action:hover:not(:disabled) { background: var(--control-hover-bg); color: var(--ink-0); }
+.secondary-action:disabled { color: var(--ink-3); cursor: not-allowed; }
+.diag-error { color: var(--danger-text); font-family: var(--font-mono); font-size: 12px; }
+.diag-warn { color: var(--warn); font-family: var(--font-mono); font-size: 12px; }
+
+/* 面板根容器：这几个类被组件当作根节点用，却从未定义，于是面板内各区块之间
+   没有任何间距，标题、表格、按钮全部贴在一起——这是「排版散乱、不像编辑器」
+   观感的直接来源之一。给出统一的纵向节奏。 */
+.editor-hex, .emevd-four-view, .editor-msb-scene, .me3-runtime, .agent-tool-panel {
+  display: flex; flex-direction: column; gap: 8px; min-width: 0;
+}
+.container-diag { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.container-diag__codes {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  font-family: var(--font-mono); font-size: 11px; color: var(--ink-2);
+}
+.me3-runtime__diags {
+  display: flex; flex-direction: column; gap: 2px;
+  font-family: var(--font-mono); font-size: 11px; color: var(--ink-2);
+}
+.explorer-mount__item {
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 2px 4px; font-size: 11px; color: var(--ink-2);
+}
+
+/* 字段表与容器条目表：表头列与数据列必须对齐，否则数百行字段看起来就是一堆
+   无结构的文本。用 grid 而非 table——列宽由模板固定，不随内容跳动。 */
+.paramdef-field-table, .script-entry-table {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--line); border-radius: var(--radius-s);
+  overflow: hidden; font-size: 12px;
+}
+.paramdef-field-table [role='row'], .script-entry-table [role='row'] {
+  display: grid; grid-template-columns: minmax(10ch, 1.6fr) minmax(6ch, .8fr) minmax(8ch, 1.2fr) auto;
+  gap: 8px; align-items: center; padding: 3px 8px;
+  border-top: 1px solid var(--line); min-width: 0;
+}
+.paramdef-field-table [role='row']:first-child,
+.script-entry-table [role='row']:first-child {
+  border-top: none; background: var(--forge-2);
+  font-size: 10px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--ink-2);
+}
+.paramdef-field-table [role='row'] > *, .script-entry-table [role='row'] > * {
+  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.paramdef-field-table [role='row']:hover:not(:first-child),
+.script-entry-table [role='row']:hover:not(:first-child) { background: var(--forge-hover); }
+.paramdef-field-table [role='row'][aria-selected='true'],
+.script-entry-table [role='row'][aria-selected='true'] {
+  background: var(--ember-soft); color: var(--ink-0);
+}
+.paramdef-field-table [role='row']:focus-visible,
+.script-entry-table [role='row']:focus-visible { outline: 2px solid var(--ember); outline-offset: -2px; }

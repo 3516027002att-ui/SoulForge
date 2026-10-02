@@ -1,0 +1,212 @@
+
+/* ══════════ 多栏工作台 ══════════ */
+/* 参照 Smithbox 2.2.4：左类别 → 中条目 → 右属性 → 最右工具，各栏独立滚动、栏宽可拖。
+   工作台必须占满可用高度，否则长列表会把整页顶出滚动条——那正是「打开 param
+   先看到证据卡、行表被挤到滚动区外」的成因之一。 */
+.workbench {
+  display: flex; flex-direction: column;
+  min-height: 0; height: 100%;
+  border: 1px solid var(--line); border-radius: 0;
+  background: var(--forge-1); overflow: hidden;
+}
+.tae-workbench { container-type: inline-size; }
+.workbench__toolbar {
+  flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 10px; border-bottom: 1px solid var(--line);
+  background: var(--forge-1);
+}
+/* P1 裁定：栏宽被拖过后的「恢复默认栏宽」入口，右对齐的小行，不常驻。 */
+.workbench__layout-actions {
+  flex: none; display: flex; justify-content: flex-end;
+  padding: 2px 8px; border-bottom: 1px solid var(--line);
+  background: var(--forge-1);
+}
+.workbench__layout-actions .secondary-action {
+  padding: 1px 8px; font-size: 10.5px; border-radius: var(--radius-s, 3px);
+}
+/* min-height: 0 是必需的：flex 子项默认 min-height:auto，栏内长列表会把容器撑高
+   而不是自己滚动。漏掉它的表现正是「整页出现第二个滚动条」。 */
+.workbench__columns {
+  /* S20：窄主区（Agent 打开时）三栏 minWidth 总和可能超出容器 ——
+     允许横向滚动，TEXT 列可滚到而不是被 overflow:hidden 切掉。 */
+  flex: 1; display: flex; min-height: 0; align-items: stretch;
+  overflow-x: auto; overflow-y: hidden;
+}
+
+/*
+ * ACTION 是唯一同时需要动画、事件、详情和 viewport 的四栏工作台。
+ * Agent 抽屉打开后，主区可能只有约 520px；继续沿用四个 220px 的最小宽度
+ * 会把最后的 viewport 推到主区外，DOM 虽然存在，用户却完全看不到。只对
+ * ACTION 使用两行两栏的紧凑投影，桌面宽度仍保留可拖拽的四栏布局。
+ */
+@container (max-width: 900px) {
+  .tae-workbench .workbench__columns {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+    overflow: auto;
+    align-items: stretch;
+  }
+  .tae-workbench .workbench__column-slot {
+    width: auto !important;
+    min-width: 0 !important;
+    min-height: 0;
+    flex: 1 1 auto !important;
+  }
+  .tae-workbench .workbench__resizer { display: none; }
+}
+.workbench__column-slot { display: flex; min-width: 0; min-height: 0; position: relative; }
+.workbench__column {
+  flex: 1; display: flex; flex-direction: column;
+  min-width: 0; min-height: 0;
+  border-right: 1px solid var(--line);
+}
+.workbench__column-slot:last-child .workbench__column { border-right: none; }
+.workbench__column-header {
+  flex: none; display: flex; align-items: baseline; gap: 8px;
+  padding: 5px 10px; border-bottom: 1px solid var(--line);
+  background: var(--forge-1);
+}
+.workbench__column-title {
+  margin: 0; font-size: 11px; font-weight: 600;
+  letter-spacing: .04em; text-transform: uppercase; color: var(--ink-1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.workbench__column-hint {
+  font-size: 10px; color: var(--ink-3); margin-left: auto;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.workbench__column-action {
+  flex: none; margin-left: auto; padding: 1px 7px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-s, 3px);
+  background: transparent; color: var(--ink-2); font-size: 10px; line-height: 1.4;
+  cursor: pointer;
+}
+.workbench__column-hint + .workbench__column-action { margin-left: 0; }
+.workbench__column-action:hover:not(:disabled) { background: var(--forge-hover); color: var(--ink-1); }
+.workbench__column-action:disabled { opacity: .45; cursor: default; }
+.workbench__column-body { flex: 1; overflow: auto; min-height: 0; padding: 2px 0; overscroll-behavior: contain; }
+.workbench__column-body:has(> .msb-viewport) { display: flex; flex-direction: column; overflow: hidden; padding: 6px; }
+.workbench__column-body:has(> .esw-source) {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+/* 12-C：词义列与源码列之间一条稳定可见的分隔（末栏的 border-right 已被
+   :last-child 拿掉，改在词义列左侧补 border-left）；背景用 --forge-1，和源码
+   host 的 --forge-0 区分开，两栏一眼可分，滚轮不再落在「看起来是编辑器」
+   的右侧空白上。滚动仍归各栏自己的 body（源码列 body overflow:hidden，
+   滚轮只进 .cm-scroller；词义列 body overflow:auto 自己滚）。 */
+.workbench__column:has(> .workbench__column-body > .esw-meaning) {
+  border-left: 1px solid var(--line);
+}
+.workbench__column-body:has(> .esw-meaning) {
+  padding: 0;
+  overflow-y: auto;
+  min-height: 0;
+}
+.esw-meaning {
+  flex: 1;
+  min-height: 0;
+  background: var(--forge-1);
+}
+.workbench__footer {
+  flex: none; padding: 6px 10px; border-top: 1px solid var(--line);
+  background: var(--forge-1);
+}
+
+/* 分隔条：4px 命中区偏窄，用 ::after 扩到 9px 而不加宽视觉线——加宽视觉线会让
+   四栏布局看起来像被粗边框割开。键盘可聚焦（方向键调宽），因为拖拽对键盘不可达，
+   而栏宽决定字段名会不会被截断到认不出。 */
+.workbench__resizer {
+  flex: none; width: 4px; cursor: col-resize; touch-action: none;
+  background: transparent; position: relative; z-index: 1;
+}
+.workbench__resizer::after {
+  content: ''; position: absolute; inset: 0 -3px;
+}
+.workbench__resizer:hover { background: var(--ember-soft); }
+.workbench__resizer:focus-visible {
+  outline: 2px solid var(--ember); outline-offset: -1px; background: var(--ember-soft);
+}
+
+/* ── 工作台列表（类别栏 / 条目栏共用）── */
+.wb-list { display: flex; flex-direction: column; }
+.wb-list__group-label {
+  padding: 6px 10px 3px; font-size: 10px; font-weight: 600;
+  letter-spacing: .04em; color: var(--ink-3); text-transform: uppercase;
+}
+.tae-animation-group {
+  display: flex; flex-direction: column;
+  border-bottom: 1px solid var(--line);
+}
+.tae-animation-group__header {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 6px 10px;
+  border: 0; border-left: 2px solid transparent;
+  background: var(--forge-1); color: var(--ink-1);
+  font: inherit; font-size: 12px; text-align: left;
+  cursor: pointer;
+}
+.tae-animation-group__header:hover { background: var(--forge-hover); }
+.tae-animation-group__header:focus-visible {
+  outline: 2px solid var(--ember); outline-offset: -2px;
+}
+.tae-animation-group__chevron {
+  flex: none; width: 1em; color: var(--ember-text); font-family: var(--font-mono);
+}
+.tae-animation-group__label {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  font-family: var(--font-mono); font-weight: 600;
+}
+.tae-animation-group__count {
+  flex: none; margin-left: auto; color: var(--ink-3); font-size: 10px;
+}
+.tae-animation-group__rows {
+  display: flex; flex-direction: column;
+  padding-bottom: 2px; background: var(--forge-0);
+}
+.tae-animation-group__rows[hidden] { display: none; }
+.wb-row {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 3px 10px; cursor: default;
+  font-size: 12px; color: var(--ink-1);
+  border-left: 2px solid transparent;
+}
+.wb-row:hover { background: var(--forge-hover); }
+.wb-row[aria-selected='true'] {
+  background: var(--ember-soft); border-left-color: var(--ember);
+  color: var(--ink-0);
+}
+.wb-row:focus-visible { outline: 2px solid var(--ember); outline-offset: -2px; }
+.wb-row__id {
+  font-family: var(--font-mono); font-size: 11px; color: var(--ink-2);
+  flex: none; min-width: 7ch; text-align: right;
+}
+.wb-row__name {
+  flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 行名编辑框（T5-3）：与只读 span 等高同宽，点击不触发行选择。 */
+.wb-row__name-input {
+  flex: 1; min-width: 0; font: inherit; font-size: 12px;
+  border: 1px solid var(--line); border-radius: 2px; padding: 0 4px;
+  background: var(--forge-1); color: var(--ink-1);
+}
+.wb-row__name-input:focus { outline: 2px solid var(--ember); outline-offset: -1px; }
+.wb-row__meta { flex: none; font-size: 10px; color: var(--ink-3); }
+/* 读取失败的条目：仍列在表里（不像参照工具那样移除），但明确标出。
+   左边框 + 文字标记双通道 —— 只用颜色对色觉障碍用户不可分辨。 */
+.wb-row--failed { border-left-color: var(--danger); }
+.wb-row--failed .wb-row__name { color: var(--ink-2); text-decoration: underline dotted var(--danger); }
+/* 未知类型行（VFX-54B 等）：blocked/partial 语义，区别于 failed 的 danger 红。
+   仍可选中查看原始结构字段，但明确标出「类型未识别，不给字段含义假数据」。 */
+.wb-row--unknown { border-left-color: var(--warn); }
+.wb-row--unknown .wb-row__name { color: var(--ink-2); }
+.wb-row--unknown .wb-row__meta.diag-warn { color: var(--warn); }
+.wb-empty { padding: 10px; font-size: 12px; color: var(--ink-3); }
+
+/* 含虚拟列表的栏：本栏由内部虚拟容器滚动，这一层压成不滚。
+   同时它自己要能吃满栏高，否则 flex:1 的虚拟容器没有参照高度。 */
+.wb-list--virtual { flex: 1; min-height: 0; height: 100%; overflow: hidden; }
+.workbench__column-body:has(> .wb-list--virtual) { overflow: hidden; }

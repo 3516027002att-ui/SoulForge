@@ -46,9 +46,9 @@ const domainNavigationSource = readFileSync(
   join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'navigation', 'domainNavigation.ts'),
   'utf8'
 );
-// IPC 物理拆分后，回滚域 handler 位于 ipc/operations.ts（断言语义不变）。
+// 回滚业务位于 services/operationService.ts（断言语义不变）。
 const ipcSource = readFileSync(
-  join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc', 'operations.ts'),
+  join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'services', 'operationService.ts'),
   'utf8'
 );
 const workspaceIpcSource = readFileSync(
@@ -108,6 +108,8 @@ describe('问题 1 壳层：开始页只在首次打开；顶栏「开始」召�
     assert.doesNotMatch(appSource, /data-testid="start-sidebar-tools"/);
     assert.doesNotMatch(appSource, /data-testid="start-sidebar-file-list"/);
     assert.doesNotMatch(appSource, /START_SIDEBAR_FILE_LIMIT/);
+    assert.match(appSource, /import \{ WorkspaceSummaryView \} from '\.\/app\/WorkspaceSummaryView\.js'/);
+    assert.match(appSource, /<WorkspaceSummaryView workspace=\{workspaceController\} operations=\{changeOperations\} document=\{resourceDocument\}/);
   });
 
   it('mountWorkspace 不把 activeDomain 落回 project：恢复失败时默认进 param', () => {

@@ -1,6 +1,5 @@
 import { useMemo, useRef, useState, type CSSProperties, type ReactElement } from 'react';
 import type { RendererWorkspaceScanResult } from '../../main/ipc.js';
-import type { RendererIndexedFile } from '../../main/rendererDto.js';
 import { ScriptContainerPanel } from './editors/ScriptContainerPanel.js';
 import { Bnd4WorkbenchPanel } from './editors/Bnd4WorkbenchPanel.js';
 import {
@@ -29,6 +28,7 @@ import { WorkspaceHeaderView } from './app/WorkspaceHeaderView.js';
 import { NavigationSidebarViews } from './app/NavigationSidebarViews.js';
 import { CommandPaletteView } from './app/CommandPaletteView.js';
 import { ChangeOperationsSidebarViews, OperationsWorkbenchView } from './app/ChangeOperationsViews.js';
+import { WorkspaceSummaryView } from './app/WorkspaceSummaryView.js';
 import { ParamEditorView } from './app/ParamEditorView.js';
 import { useParamMutationController } from './app/useParamMutationController.js';
 import { useParamDocumentController } from './app/useParamDocumentController.js';
@@ -42,13 +42,6 @@ import { matchesCommandSearch } from './navigation/commandPaletteSearch.js';
 
 /** SoulForge 产品图标：标题栏和欢迎页使用透明 S 形标志。 */
 const SOULFORGE_ICON_URL = new URL('./assets/soulforge-icon.png', import.meta.url).href;
-
-/** 事件内层标签只留短名：`event/common.emevd.dcx` → `common`。 */
-function eventDocumentTitle(relativePath: string): string {
-  const normalized = relativePath.replace(/\\/g, '/');
-  const base = normalized.slice(normalized.lastIndexOf('/') + 1);
-  return base.replace(/\.emevd(?:\.dcx)?$/i, '') || base;
-}
 
 /**
  * R5 裁定：侧栏每个面板头部右上角的关闭按钮——关掉后最左活动栏的对应图标
@@ -94,37 +87,13 @@ export function App(): ReactElement {
     });
   const { workspace, sessionMeta, baseRootChoice, analysis, tools, files, allFiles, openWorkspace, chooseBaseDirectory, clearBaseDirectory, search: searchWorkspaceResources } = workspaceController;
 
-  /**
-   * S15/S19 失败面：最近一次资源打开失败的结构化记录（只含逻辑名，绝无绝对
-   * 路径——message 来自已过 sanitizer 的 IPC 诊断）。随下一次 runAiAgent 提交给
-   * 模型（main 校验后进系统提示），工作台同款话术直接进编辑区。
-   */
-  const [lastOpenFailure, setLastOpenFailure] = useState<{
-    kind:
-      | 'event-open-failed'
-      | 'msb-open-failed'
-      | 'fmg-open-failed'
-      | 'param-open-failed'
-      | 'script-open-failed'
-      | 'tae-open-failed';
-    document: string;
-    code: string;
-    message: string;
-  } | null>(null);
   const resourceDocument = useResourceDocumentController({ bridge, setStatus, pushToast, refreshOperationHistory, describeBridgeAbsence,
       onSelectionActivated: activateResourceSelection });
-  const { selectedFile, preview, editText, lastSavedText, msgRows, saveDiagnostics, openTabs, taeData, esdData, flverData,
-    canEditText, hasMsgTable, editDirty, selectFile, switchToOpenTab, closeTab, clearResourceSelection, clearResourcePreview,
-    resetWorkspaceDocuments, resetTaeDocument, resetEsdDocument, resetFlverDocument, setEditText, updateMsgRow, addMsgRow,
-    removeMsgRow, saveCurrentText, applyTextResourceAndReload, applyFlverMaterialSlotSetAndReload } = resourceDocument;
+  const { selectedFile, preview, openTabs, editDirty, selectFile, switchToOpenTab, closeTab,
+    clearResourceSelection, clearResourcePreview, resetWorkspaceDocuments, resetTaeDocument, resetEsdDocument,
+    resetFlverDocument, applyTextResourceAndReload, lastOpenFailure, setLastOpenFailure } = resourceDocument;
   const agent = useAgentUiController({ bridge, workspace, selectedFile, lastOpenFailure, setStatus, pushToast, announceDesktopOnly, describeBridgeAbsence });
-  const { agentOpen, setAgentOpen, agentWidth, setAgentWidth, agentExpanded, setAgentExpanded, agentInteractionMode,
-    changeAgentInteractionMode, setAgentResources, handleAgentAttachmentsChange, citeSelecting, setCiteSelecting,
-    pendingCiteHits, setPendingCiteHits, handleCiteSettle, aiProvider, setAiProvider, aiThinking, setAiThinking, aiMode,
-    aiPrompt, setAiPrompt, aiDraft, aiBusy, agentGoal, agentIdleNotice, agentTask, agentServices, agentServiceId,
-    setAgentServiceId, agentSessions, agentSessionsError, agentSessionDetail, respondingApprovalCallId, approvalError,
-    agentTools, toolOutput, eventUri, setEventUri, sendAgentPrompt, startNewAgentTask, runAgentTask, cancelAgentTask,
-    respondAgentApproval, refreshAgentSessions, loadAgentSession, runToolSearch, explainEvent,
+  const { agentOpen, setAgentOpen, agentWidth, citeSelecting, setCiteSelecting, handleCiteSettle, setEventUri,
     resetAgentWorkspaceState, resetAgentSelectionState } = agent;
 
   const eventDocument = useEventDocumentController({
@@ -132,15 +101,15 @@ export function App(): ReactElement {
       onEventOpenFailure: failure => setLastOpenFailure(current =>
         failure ?? (current?.kind === 'event-open-failed' ? null : current))
     });
-  const { eventPendingTab, eventOpening, eventSourcePreview, resetEventDocument, submitEventDsl } = eventDocument;
+  const { resetEventDocument } = eventDocument;
   const textDocument = useTextDocumentController({ bridge, selectedFile, setStatus, pushToast });
-  const { fmgEntries, fmgSourceHash, fmgLive, resetTextDocument, applyFmgMutationAndReload, submitFmgEntry } = textDocument;
+  const { fmgSourceHash, fmgLive, resetTextDocument, applyFmgMutationAndReload } = textDocument;
   const mapDocument = useMapDocumentController({
       bridge, selectedFile, setStatus,
       onMapOpenFailure: failure => setLastOpenFailure(current =>
         failure ?? (current?.kind === 'msb-open-failed' ? null : current))
     });
-  const { msbParts, msbModels, msbRegions, msbEvents, msbRoutes, msbSourceCounts, msbSourceHash, setMsbSourceHash, resetMapDocument } = mapDocument;
+  const { resetMapDocument } = mapDocument;
 
   const paramDocument = useParamDocumentController({
     bridge, selectedFile, setStatus, pushToast, refreshOperationHistory, describeBridgeAbsence
@@ -157,10 +126,9 @@ export function App(): ReactElement {
       setSidebarCollapsed, cmdkOpen, cmdkQuery, selectFile, switchToOpenTab, clearResourceSelection, clearResourcePreview,
       setParamRevealRowId, setStatus, searchWorkspaceResources
     });
-  const { query, setQuery, activeDomain, centerView, bnd4Forced, sidebarView, fmgRevealRequest, resourceMode,
-    indexedFiles, domainSummaries, domainLibraries, domainGroups, preferredParamContainer, preferredAnimationContainer,
-    physicalBrowseFiles, searchHits, cmdkNormalized, cmdkAllResourceMatches, domainCommands,
-    selectDomain, installWorkspaceNavigation, activateSearchResults, search, activateSidebarView, showSidebarView,
+  const { activeDomain, centerView, sidebarView, fmgRevealRequest, domainSummaries, domainLibraries,
+    cmdkNormalized, cmdkAllResourceMatches, domainCommands,
+    selectDomain, installWorkspaceNavigation, activateSearchResults, activateSidebarView, showSidebarView,
     openOperationsView, openBnd4ForSelection, jumpToResource, resetNavigationTextState,
     onResourceSelectionActivated, clearFmgRevealRequest } = navigation;
   const changeOperations = useChangeOperationsController({
@@ -169,14 +137,11 @@ export function App(): ReactElement {
     setStatus, pushToast, announceDesktopOnly, describeBridgeAbsence, onRollbackCommitted: reloadSelectedResourceAfterRollback
   });
   changeCommandsRef.current = changeOperations;
-  const { operationHistory, rollbackInFlight, changeState, pendingChangeCount, hasUncommittedChanges, draftChanges, lastOperation,
-    commitStagedChanges, rollbackOp, rollbackFileOp, resetChangeWorkspaceState,
-    approveChange, rejectChange, undoChangeToDraft, discardChange, clearTerminalChanges } = changeOperations;
+  const { pendingChangeCount, hasUncommittedChanges, resetChangeWorkspaceState } = changeOperations;
   const shellInteraction = useShellInteractionController({ sidebarCollapsed, setSidebarCollapsed, cmdkOpen, setCmdkOpen,
     cmdkQuery, setCmdkQuery, activeDomain, setAgentOpen, pendingChangeCount, hasUncommittedChanges, showSidebarView });
   shellCommandsRef.current = shellInteraction;
-  const { sidebarWidth, shellRef, workspaceSwitcherOpen, setWorkspaceSwitcherOpen, cmdkIndex, setCmdkIndex, toasts,
-    searchInputRef, cmdkInputRef, cmdkDialogRef, tabbarRef, openCmdk, closeCmdk, trapTabWithin, focusSearchPanel,
+  const { sidebarWidth, shellRef, cmdkIndex, toasts, tabbarRef, focusSearchPanel,
     startSidebarResize, startTabbarDrag, moveTabbarDrag, endTabbarDrag } = shellInteraction;
 
   // Workspace background analysis and document owners may retain an earlier render's callback.
@@ -549,72 +514,9 @@ export function App(): ReactElement {
             </div>
 
             {/* ── 欢迎页：真实工作区摘要 ── */}
-            <div className={`editor-welcome${showEditorWelcome ? '' : ' is-hidden'}`}>
-              <div className="welcome">
-                <div className="welcome__head">
-                  <img src={SOULFORGE_ICON_URL} width="26" height="26" className="welcome-mark" alt="" aria-hidden="true" />
-                  <h1>SoulForge</h1>
-                  <span className="welcome__ws">{workspace?.workspaceLabel ?? '未打开工作区'} · {sessionMeta?.game ?? 'sekiro'}</span>
-                </div>
-                <p className="welcome__stats">{welcomeStats}</p>
-
-                <section className="welcome__section" aria-label="待审查变更">
-                  <div className="welcome-quick__label">待审查变更</div>
-                  {draftChanges.length === 0 ? (
-                    <p className="empty-hint welcome-empty">没有待审查的变更。</p>
-                  ) : (
-                    draftChanges.map((item) => (
-                        <div className="review-row" key={item.id}>
-                          <span className="review-row__target" title={item.sourceUri}>{item.target}</span>
-                          <span className="review-row__delta">{item.summary}</span>
-                          <button
-                            type="button"
-                            className="btn btn--ghost btn--sm"
-                            onClick={() => {
-                              setSidebarCollapsed(false);
-                              showSidebarView('staging');
-                            }}
-                          >
-                            审查
-                          </button>
-                        </div>
-                      ))
-                  )}
-                </section>
-
-                <section className="welcome__section" aria-label="最近打开">
-                  <div className="welcome-quick__label">最近打开</div>
-                  {openTabs.length === 0 ? (
-                    <p className="empty-hint welcome-empty">暂无最近打开。从左侧资源树选择资源，或按 Ctrl K 搜索。</p>
-                  ) : (
-                    <div className="welcome-quick__grid">
-                      {openTabs.slice(-6).reverse().map((tab) => (
-                        <button type="button" key={tab.sourceUri} className="quick-item" onClick={() => void selectFile(tab)}>
-                          <span className="quick-item__body">
-                            <span className="quick-item__name">{tab.relativePath}</span>
-                            <span className="quick-item__desc">{tab.resourceKind} · {tab.formatLabel}</span>
-                          </span>
-                          <span className="quick-item__ext">{tab.formatLabel}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </section>
-
-                <div className="welcome-meta">
-                  <span>
-                    {lastOperation
-                      ? `最近写入 ${lastOperation.title} · ${lastOperation.committedAt ?? lastOperation.createdAt}`
-                      : '本工作区尚无写入记录'}
-                  </span>
-                  <div className="welcome-shortcuts">
-                    <span><kbd>Ctrl K</kbd> 命令面板</span>
-                    <span><kbd>Ctrl J</kbd> AI Agent</span>
-                    <span><kbd>Ctrl B</kbd> 侧栏</span>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <WorkspaceSummaryView workspace={workspaceController} operations={changeOperations} document={resourceDocument}
+              navigation={navigation} setSidebarCollapsed={setSidebarCollapsed} showEditorWelcome={showEditorWelcome}
+              welcomeStats={welcomeStats} iconUrl={SOULFORGE_ICON_URL} />
           </div>
           {citeSelecting && (
             <CiteSelectScrim
@@ -625,8 +527,7 @@ export function App(): ReactElement {
         </main>
 
         {/* ══════════ Agent 面板 ══════════ */}
-        {/* resize 已内聚到 AgentDockResizer（AgentSidebar 内部）；宽度状态仍由 App
-            持有，因为 overlay 判定与 workspace 持久化都要读它。 */}
+        {/* Agent owner holds width and persistence; the shell projects its layout width. */}
         <AgentDockView agent={agent} activeDomain={activeDomain} selectedFile={selectedFile}
           hasBridge={bridge !== null} fallbackTools={tools} style={agentStyle} />
       </div>

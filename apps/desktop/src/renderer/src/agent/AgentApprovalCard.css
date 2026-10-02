@@ -1,0 +1,52 @@
+
+/* Change Review 审批信息：保留危险度左线，不用卡片外框打断消息流。 */
+.agent-approval-card {
+  border: 0;
+  border-left-width: 3px;
+  border-left-style: solid;
+  border-radius: 0;
+  padding: 10px 0 10px 12px;
+  background: transparent;
+  box-shadow: none;
+  max-width: 100%;
+}
+.agent-approval-card.is-high { border-left-color: var(--danger); }
+.agent-approval-card.is-medium { border-left-color: var(--warn); }
+.agent-approval-card.is-low { border-left-color: var(--line); }
+.agent-approval-card__head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.agent-approval-card__level { font-size: 11px; color: var(--ink-3); }
+.agent-approval-card__step { margin: 4px 0 8px; font-size: 11px; color: var(--ink-2); }
+.agent-approval-card__review {
+  display: grid; gap: 4px; margin: 0 0 8px;
+  font-size: 11px; line-height: 1.6;
+}
+.agent-approval-card__row { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.agent-approval-card__row dt { color: var(--ink-3); flex: none; }
+.agent-approval-card__row dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.agent-approval-card__row dd code { word-break: break-all; }
+.agent-approval-card__unavailable { color: var(--ink-3); }
+.agent-approval-card__diff {
+  max-height: 240px;
+  overflow: auto;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+}
+.agent-approval-card__diff-body { margin: 0; padding: 0; font-size: 11px; line-height: 1.55; background: transparent; }
+.agent-approval-card__diff-body .diff-line { display: block; padding: 0 8px; border-left: 2px solid transparent; white-space: pre-wrap; word-break: break-all; }
+.agent-approval-card__diff-body .diff-line.is-add { background: color-mix(in srgb, var(--ok) 12%, transparent); border-left-color: var(--ok); }
+.agent-approval-card__diff-body .diff-line.is-remove { background: color-mix(in srgb, var(--danger) 12%, transparent); border-left-color: var(--danger); }
+.agent-approval-card__diff-body .diff-line.is-hunk { color: var(--ink-3); background: var(--forge-2); }
+.agent-approval-card__diff-body .diff-line.is-header { color: var(--ink-3); }
+.agent-approval-card__args { margin-top: 6px; }
+.agent-approval-card__args summary { font-size: 11px; color: var(--ink-3); cursor: pointer; }
+.agent-approval-card__actions { flex-wrap: wrap; margin-top: 8px; }
+.agent-approval-card__failure {
+  margin-top: 8px; padding: 6px 0;
+  border: 0;
+  background: transparent;
+  font-size: 11px; line-height: 1.6;
+}
+.agent-approval-card__failure strong { color: var(--danger-text); }
+.agent-approval-card__failure p { margin: 2px 0; }

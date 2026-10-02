@@ -1,0 +1,33 @@
+
+/* 失败态：有界诊断，绝不替换整个 dock（§12.9 禁止巨型错误卡；无侧边红条）。 */
+.agent-failure-card {
+  border: 0;
+  padding: 6px 0; background: transparent;
+  max-height: 160px; overflow: auto; font-size: 11px; line-height: 1.6;
+}
+.agent-failure-card strong { color: var(--danger-text); }
+.agent-failure-card p { margin: 2px 0; }
+
+/* 回到底部按钮：贴底隐藏，离开底部 48px 后浮现（§12.5）。 */
+.agent-scroll-to-bottom {
+  position: sticky; bottom: 8px; align-self: center;
+  display: none;
+  padding: 4px 12px;
+  border: 1px solid var(--line-strong); border-radius: 12px;
+  background: var(--forge-3); color: var(--ink-1);
+  font-size: 11px; cursor: pointer;
+  z-index: 2;
+}
+.agent-scroll-to-bottom.is-visible { display: inline-block; }
+.agent-scroll-to-bottom:hover { background: var(--forge-hover); }
+.agent-scroll-to-bottom:focus-visible { outline: 2px solid var(--ember-text); outline-offset: 1px; }
+
+/* 二级抽屉：复用旧 .agent-drawer 的对话框形态。 */
+.agent-secondary-drawer {
+  /* S26：抽屉打开时 AgentDockHeader 已卸掉，抽屉是 aside 里唯一的整列内容。
+     背景必须不透明（浅色主题 --forge-0 是 8% 白，会把底下字透出来叠字）。 */
+  position: absolute; inset: 0; z-index: 6;
+  display: flex; flex-direction: column;
+  background: var(--forge-1);
+}
+.agent-secondary-drawer.is-hidden { display: none; }

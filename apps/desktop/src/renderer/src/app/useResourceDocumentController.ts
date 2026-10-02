@@ -1,6 +1,7 @@
 import type { OperationHistoryRefreshOutcome } from './useChangeOperationsController.js';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Diagnostic } from '@soulforge/shared';
+import type { AiAgentRunRequest } from '../../../main/ipc.js';
 import type { RendererIndexedFile, RendererResourcePreview, RendererSaveResult } from '../../../main/rendererDto.js';
 import type { RendererRuntime } from '../runtime/rendererRuntime.js';
 import { extractMsgRows, nextMsgId, serializeMsgRowsToTsv, type EditableMsgRow } from '../format/msgRows.js';
@@ -48,6 +49,9 @@ export function useResourceDocumentController(options: ResourceDocumentOptions) 
   const [taeData, setTaeData] = useState<Record<string, unknown> | null>(null);
   const [esdData, setEsdData] = useState<Record<string, unknown> | null>(null);
   const [flverData, setFlverData] = useState<Record<string, unknown> | null>(null);
+  // Shared opening feedback is a resource-document projection, cleared by the
+  // existing unified document reset and consumed by MAP and Agent views.
+  const [lastOpenFailure, setLastOpenFailure] = useState<NonNullable<AiAgentRunRequest['openFailure']> | null>(null);
   const [, setResourceOwnerEpoch] = useState(0);
   const selectedRef = useRef<RendererIndexedFile | null>(null);
   const tabsRef = useRef<RendererIndexedFile[]>([]);
@@ -300,6 +304,7 @@ export function useResourceDocumentController(options: ResourceDocumentOptions) 
 
   const canEditText = preview?.previewKind === 'text' && preview.structuredPreview?.editable === true && !preview.truncated;
   return { selectedFile, preview, editText, lastSavedText, msgRows, saveDiagnostics, openTabs, taeData, esdData, flverData,
+    lastOpenFailure, setLastOpenFailure,
     canEditText, hasMsgTable: canEditText && msgRows.length > 0, editDirty: editText !== lastSavedText,
     selectFile, switchToOpenTab, closeTab, clearResourceSelection, clearResourcePreview, resetWorkspaceDocuments,
     resetTaeDocument, resetEsdDocument, resetFlverDocument, setEditText, updateMsgRow, addMsgRow, removeMsgRow,

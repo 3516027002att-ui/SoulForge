@@ -2332,7 +2332,14 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     render: () => {
       renderer.render(scene, camera);
       // A submitted frame is evidence of GPU submission, not display-present latency.
-      if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') window.dispatchEvent(new CustomEvent('sf-scene-frame-submitted', { detail: { canvas, submittedAtUnixMs: performance.timeOrigin + performance.now() } }));
+      try {
+        if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+          const submittedAtUnixMs = performance.timeOrigin + performance.now();
+          if (Number.isFinite(submittedAtUnixMs)) {
+            window.dispatchEvent(new CustomEvent('sf-scene-frame-submitted', { detail: { canvas, submittedAtUnixMs } }));
+          }
+        }
+      } catch { /* Observation must not change a successful render or frame cadence. */ }
     }
   });
   renderLoop.start();

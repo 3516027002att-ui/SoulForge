@@ -1,0 +1,13 @@
+
+/* ═══════════ Toast ═══════════ */
+.toast-root { position: fixed; right: 16px; bottom: 40px; z-index: 120; display: flex; flex-direction: column; gap: 8px; }
+.toast {
+  display: flex; align-items: center; gap: 8px; padding: 10px 16px; min-width: 240px; max-width: 380px;
+  font-size: 12.5px; background: var(--forge-3); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-l); box-shadow: var(--shadow-float);
+  animation: toast-in var(--dur-trans) var(--ease-standard);
+}
+.toast.is-leaving { animation: toast-out var(--dur-micro) var(--ease-standard) forwards; }
+.toast__icon { flex: none; width: 16px; height: 16px; display: grid; place-items: center; }
+.toast--ok .toast__icon { color: var(--ok); }
+.toast--warn .toast__icon { color: var(--warn); }
