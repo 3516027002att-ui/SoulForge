@@ -12,7 +12,16 @@ import {
   type ToolContext,
   validateToolInput
 } from '../ai/toolRegistry.js';
-import { createAgentToolBridge } from '../ai/agentToolBridge.js';
+import {
+  createAgentToolBridge,
+  MAX_BOUNDED_TOOL_RESULT_BYTES,
+  MAX_BOUNDED_TOOL_RESULT_CHARS
+} from '../ai/agentToolBridge.js';
+
+// Lock the existing contract independently of fixture sizing. Importing only
+// the constants would let an accidental production cap increase turn green.
+assert.equal(MAX_BOUNDED_TOOL_RESULT_BYTES, 65_536);
+assert.equal(MAX_BOUNDED_TOOL_RESULT_CHARS, 65_536);
 
 const registry = createDefaultToolRegistry();
 const bridge = createAgentToolBridge({
@@ -134,7 +143,7 @@ assert.equal(bridgedInvalidRead.ok, false);
 assert.equal(bridgedInvalidRead.code, 'INVALID_INPUT');
 assert.match(bridgedInvalidRead.content, /INVALID_INPUT/iu);
 
-// The bridge has an 8 KiB byte budget for discovery-shaped tools.  An event
+// The bridge has a 64 KiB byte budget for bounded tools. An event
 // read must not inherit the generic "first six array items" projection: an
 // actionable instruction can be at the end of the requested event window.
 const evidenceSession = {
@@ -230,13 +239,15 @@ assert.equal(boundedEventEnvelope.data?.record?.sourceHash, 'a'.repeat(64));
 assert.equal(boundedEventEnvelope.data?.record?.outerFileHash, 'b'.repeat(64));
 assert.equal(boundedEventEnvelope.data?.record?.sourceRevision, 1788456410220.5247);
 assert.equal(boundedEventEnvelope.pagination?.truncated, false);
-assert.ok(Buffer.byteLength(boundedEventResult.content, 'utf8') <= 8_192);
-assert.ok(boundedEventResult.content.length <= 8_192);
+assert.ok(Buffer.byteLength(boundedEventResult.content, 'utf8') > 8_192, 'exercise the previously rejected event range');
+assert.ok(Buffer.byteLength(boundedEventResult.content, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES);
+assert.ok(boundedEventResult.content.length <= MAX_BOUNDED_TOOL_RESULT_CHARS);
 
-// Regression for the final-envelope fast path: the raw `{ok,state,data,evidence}`
+// Regression for final-envelope budgeting: the raw `{ok,state,data,evidence}`
 // payload can fit while pagination/identifier/evidence envelope overhead pushes
-// the actual response over budget. The bounded event projection must retain all
-// requested instructions and drop only redundant raw argument bytes.
+// the actual response over budget. Size this at the fixed 64 KiB boundary; the
+// event projection must retain all instructions and the verbatim DarkScript,
+// dropping only redundant raw argument bytes.
 const edgeEnvelopeInstructions = Array.from({ length: 15 }, (_, index) => ({
   index,
   bank: 2003,
@@ -264,7 +275,7 @@ const edgeEnvelopeData = {
   truncated: false,
   darkScriptComplete: true,
   format: 'darkscript',
-  darkScript: '$Event(999, Restart, function() {\n' + '  X'.repeat(350) + '\n});',
+  darkScript: '$Event(999, Restart, function() {\n' + '  X'.repeat(19_400) + '\n});',
   instructions: edgeEnvelopeInstructions,
   game: 'sekiro',
   resourceKind: 'event',
@@ -290,7 +301,7 @@ const edgeEnvelopeResult = await edgeEnvelopeBridge.executeTool({
 });
 assert.equal(edgeEnvelopeResult.ok, true, edgeEnvelopeResult.content);
 const edgeEnvelope = JSON.parse(edgeEnvelopeResult.content) as {
-  data: { record: { instructions: Array<{ index?: number; argsBase64?: string }> } };
+  data: { record: { darkScript: string; instructions: Array<{ index?: number; argsBase64?: string }> } };
   evidence: unknown;
   pagination: { offset?: number; total?: number; returnedCount?: number; truncated?: boolean };
 };
@@ -304,21 +315,22 @@ const oldFastPathBytes = Buffer.byteLength(JSON.stringify({
   ...edgeEnvelope,
   data: { ...edgeEnvelope.data, record: edgeEnvelopeData }
 }), 'utf8');
-assert.ok(rawEdgeBytes <= 8_192, `raw edge fixture must fit: ${rawEdgeBytes}`);
-assert.ok(oldFastPathBytes > 8_192, `old fast path must overflow: ${oldFastPathBytes}`);
+assert.ok(rawEdgeBytes <= MAX_BOUNDED_TOOL_RESULT_BYTES, `raw edge fixture must fit: ${rawEdgeBytes}`);
+assert.ok(oldFastPathBytes > MAX_BOUNDED_TOOL_RESULT_BYTES, `old fast path must overflow: ${oldFastPathBytes}`);
 assert.equal(edgeEnvelope.data.record.instructions.length, 15);
 assert.deepEqual(edgeEnvelope.data.record.instructions.map((item) => item.index), Array.from({ length: 15 }, (_, index) => index));
 assert.equal(edgeEnvelope.data.record.instructions[0]?.argsBase64, undefined);
+assert.equal(edgeEnvelope.data.record.darkScript, edgeEnvelopeData.darkScript);
 assert.equal(edgeEnvelope.pagination.offset, 0);
 assert.equal(edgeEnvelope.pagination.total, 15);
 assert.equal(edgeEnvelope.pagination.returnedCount, 15);
 assert.equal(edgeEnvelope.pagination.truncated, false);
-assert.ok(Buffer.byteLength(edgeEnvelopeResult.content, 'utf8') <= 8_192);
-assert.ok(edgeEnvelopeResult.content.length <= 8_192);
+assert.ok(Buffer.byteLength(edgeEnvelopeResult.content, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES);
+assert.ok(edgeEnvelopeResult.content.length <= MAX_BOUNDED_TOOL_RESULT_CHARS);
 
 // Regression fixture copied from the real rollout step-14 shape: the native
 // page is only five instructions, but the complete typed result (DarkScript,
-// provenance and layout metadata) is larger than the 8 KiB bridge budget.
+// provenance and layout metadata) exceeded the former 8 KiB bridge budget.
 // Evidence claims must remain a bounded semantic summary instead of copying
 // the complete root JSON into claims[0].text; otherwise a usable page is
 // rejected before the Agent can inspect the DSL and instruction names.
@@ -452,7 +464,11 @@ const oversizedEventInstructions = Array.from({ length: 64 }, (_, index) => ({
   id: index,
   unknown: false,
   emedfName: `SyntheticInstruction-${index}-${'x'.repeat(420)}`,
-  typedArgs: [{ name: 'Value', type: 2, value: index }],
+  typedArgs: Array.from({ length: 3 }, (_, argument) => ({
+    name: `SemanticValue${argument}-${'x'.repeat(300)}`,
+    type: 2,
+    value: index * 3 + argument
+  })),
   diagnostics: []
 }));
 oversizedEventRegistry.register({
@@ -460,34 +476,44 @@ oversizedEventRegistry.register({
   description: 'synthetic oversized event read',
   permission: 'read',
   permissionLevel: 'read',
-  inputSchema: {},
-  run: async () => ({
-    ok: true as const,
-    data: {
-      ok: true,
-      sourceUri: 'file:///synthetic/oversized.emevd.dcx',
-      sourcePath: 'synthetic/oversized.emevd.dcx',
-      filePath: 'synthetic/oversized.emevd.dcx',
-      eventId: 222,
-      restBehavior: 1,
-      instructionCount: oversizedEventInstructions.length,
-      total: oversizedEventInstructions.length,
-      offset: 0,
-      limit: oversizedEventInstructions.length,
-      returned: oversizedEventInstructions.length,
-      truncated: false,
-      darkScriptComplete: true,
-      format: 'darkscript',
-      darkScript: '$Event(222, Restart, function() {})',
-      instructions: oversizedEventInstructions,
-      game: 'sekiro',
-      resourceKind: 'event',
-      sourceHash: 'a'.repeat(64),
-      outerFileHash: 'b'.repeat(64),
-      sourceRevision: 1788456410220.5247,
-      diagnostics: []
-    }
-  })
+  inputSchema: {
+    file: 'string', eventId: 'safe-integer', format: 'string?',
+    instructionOffset: 'safe-integer?', instructionLimit: 'safe-integer?'
+  },
+  run: async (input) => {
+    const request = input as { instructionOffset?: number; instructionLimit?: number };
+    const offset = request.instructionOffset ?? 0;
+    const limit = request.instructionLimit ?? oversizedEventInstructions.length;
+    const instructions = oversizedEventInstructions.slice(offset, offset + limit);
+    const truncated = offset + instructions.length < oversizedEventInstructions.length;
+    return {
+      ok: true as const,
+      data: {
+        ok: true,
+        sourceUri: 'file:///synthetic/oversized.emevd.dcx',
+        sourcePath: 'synthetic/oversized.emevd.dcx',
+        filePath: 'synthetic/oversized.emevd.dcx',
+        eventId: 222,
+        restBehavior: 1,
+        instructionCount: oversizedEventInstructions.length,
+        total: oversizedEventInstructions.length,
+        offset,
+        limit,
+        returned: instructions.length,
+        truncated,
+        darkScriptComplete: !truncated,
+        format: 'darkscript',
+        darkScript: '$Event(222, Restart, function() {})',
+        instructions,
+        game: 'sekiro',
+        resourceKind: 'event',
+        sourceHash: 'a'.repeat(64),
+        outerFileHash: 'b'.repeat(64),
+        sourceRevision: 1788456410220.5247,
+        diagnostics: []
+      }
+    };
+  }
 });
 const oversizedEventBridge = createAgentToolBridge({
   registry: oversizedEventRegistry,
@@ -555,10 +581,43 @@ assert.equal(oversizedEventEnvelope.error?.details?.retry?.file, 'event/syntheti
 assert.equal(oversizedEventEnvelope.error?.details?.retry?.eventId, 222);
 assert.equal(oversizedEventEnvelope.error?.details?.retry?.format, 'darkscript');
 assert.equal(oversizedEventEnvelope.error?.details?.retry?.instructionLimit, 32);
+assert.ok(Buffer.byteLength(oversizedEventResult.content, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES);
+assert.ok(oversizedEventResult.content.length <= MAX_BOUNDED_TOOL_RESULT_CHARS);
+
+// Execute the suggested smaller current window. A usable retry must deliver
+// every requested instruction and continue only after that delivered page.
+const oversizedEventRetry = await oversizedEventBridge.executeTool({
+  id: 'synthetic-oversized-event-retry',
+  name: 'read_emevd_event',
+  argumentsJson: JSON.stringify(oversizedEventEnvelope.error?.details?.retry)
+});
+assert.equal(oversizedEventRetry.ok, true, oversizedEventRetry.content);
+const retryEnvelope = JSON.parse(oversizedEventRetry.content);
+assert.deepEqual(retryEnvelope.data.record.instructions.map((item: { index: number }) => item.index),
+  Array.from({ length: 32 }, (_, index) => index));
+assert.deepEqual(retryEnvelope.data.record.instructions[31].typedArgs, oversizedEventInstructions[31]?.typedArgs);
+assert.equal(retryEnvelope.data.record.sourceHash, 'a'.repeat(64));
+assert.equal(retryEnvelope.data.record.outerFileHash, 'b'.repeat(64));
+assert.equal(retryEnvelope.data.record.sourceRevision, 1788456410220.5247);
+assert.equal(retryEnvelope.pagination.offset, 0);
+assert.equal(retryEnvelope.pagination.returnedCount, 32);
+assert.equal(retryEnvelope.pagination.total, 64);
+assert.equal(retryEnvelope.pagination.truncated, true);
+assert.equal(retryEnvelope.pagination.deliveryTruncated, false);
+assert.equal(retryEnvelope.pagination.continuationParams.instructionOffset, 32);
+assert.equal(retryEnvelope.pagination.continuationParams.instructionLimit, 32);
+assert.equal(retryEnvelope.completeness, 'windowed');
+assert.ok(Buffer.byteLength(oversizedEventRetry.content, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES);
+assert.ok(oversizedEventRetry.content.length <= MAX_BOUNDED_TOOL_RESULT_CHARS);
 
 // Even one DarkScript instruction can be too verbose. At limit=1 there is no
 // smaller native window; the diagnostic must say so and offer JSON once,
 // without creating an unbounded retry loop.
+// Multibyte text exceeds the byte cap while remaining under the character
+// cap, so a character-only budget check cannot satisfy this negative case.
+const minimumOversizedDarkScript = '$Event(333, Restart, function() {\n  ' + '界'.repeat(22_000) + '\n});';
+assert.ok(Buffer.byteLength(minimumOversizedDarkScript, 'utf8') > MAX_BOUNDED_TOOL_RESULT_BYTES);
+assert.ok(minimumOversizedDarkScript.length < MAX_BOUNDED_TOOL_RESULT_CHARS);
 const minimumOversizedEventRegistry = new ToolRegistry();
 minimumOversizedEventRegistry.register({
   name: 'read_emevd_event',
@@ -566,7 +625,7 @@ minimumOversizedEventRegistry.register({
   permission: 'read',
   permissionLevel: 'read',
   inputSchema: {},
-  run: async () => ({
+  run: async (input) => ({
     ok: true as const,
     data: {
       ok: true,
@@ -580,9 +639,9 @@ minimumOversizedEventRegistry.register({
       limit: 1,
       returned: 1,
       truncated: false,
-      darkScriptComplete: true,
-      format: 'darkscript',
-      darkScript: '$Event(333, Restart, function() {\n' + '  ' + 'X'.repeat(12_000) + '\n});',
+      darkScriptComplete: (input as { format?: string }).format !== 'json',
+      format: (input as { format?: string }).format ?? 'darkscript',
+      darkScript: (input as { format?: string }).format === 'json' ? undefined : minimumOversizedDarkScript,
       instructions: [{
         index: 0,
         bank: 2003,
@@ -624,7 +683,7 @@ const minimumOversizedEnvelope = JSON.parse(minimumOversizedEventResult.content)
       canReduceInstructionLimit?: boolean;
       retryFormat?: string;
       retryHint?: string;
-      retry?: { file?: string; eventId?: number; format?: string; instructionLimit?: number };
+      retry?: { file?: string; eventId?: number; format?: string; instructionOffset?: number; instructionLimit?: number };
     };
   };
 };
@@ -637,8 +696,21 @@ assert.equal(minimumOversizedEnvelope.error?.details?.retry?.file, 'event/minimu
 assert.equal(minimumOversizedEnvelope.error?.details?.retry?.eventId, 333);
 assert.equal(minimumOversizedEnvelope.error?.details?.retry?.format, 'json');
 assert.match(minimumOversizedEnvelope.error?.details?.retryHint ?? '', /无更小窗口/u);
-assert.ok(Buffer.byteLength(minimumOversizedEventResult.content, 'utf8') <= 8_192);
-assert.ok(minimumOversizedEventResult.content.length <= 8_192);
+assert.ok(Buffer.byteLength(minimumOversizedEventResult.content, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES);
+assert.ok(minimumOversizedEventResult.content.length <= MAX_BOUNDED_TOOL_RESULT_CHARS);
+const minimumJsonRetry = await minimumOversizedEventBridge.executeTool({
+  id: 'synthetic-minimum-json-retry',
+  name: 'read_emevd_event',
+  argumentsJson: JSON.stringify(minimumOversizedEnvelope.error?.details?.retry)
+});
+assert.equal(minimumJsonRetry.ok, true, minimumJsonRetry.content);
+const minimumJsonEnvelope = JSON.parse(minimumJsonRetry.content);
+assert.equal(minimumJsonEnvelope.data.record.format, 'json');
+assert.equal(minimumJsonEnvelope.data.record.instructions.length, 1);
+assert.equal(minimumJsonEnvelope.data.record.instructions[0].emedfName, 'SyntheticMinimum');
+assert.equal(minimumJsonEnvelope.data.record.darkScript, undefined);
+assert.ok(Buffer.byteLength(minimumJsonRetry.content, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES);
+assert.ok(minimumJsonRetry.content.length <= MAX_BOUNDED_TOOL_RESULT_CHARS);
 
 console.log(JSON.stringify({
   ok: true,

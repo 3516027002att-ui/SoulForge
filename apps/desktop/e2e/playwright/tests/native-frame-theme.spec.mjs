@@ -7,10 +7,11 @@ const entry = path.resolve(here, '../native-theme-main.mjs');
 const built = existsSync(path.resolve(here, '../../../out/renderer/index.html'));
 test.beforeEach(() => test.skip(!built, 'Production desktop build is required.'));
 async function launch() {
-  const app = await electron.launch({ args: [entry,
+  const app = await electron.launch({ chromiumSandbox: true, args: [entry,
     ...(process.platform === 'linux' && process.env.SF_E2E_HEADLESS === '1' ? ['--ozone-platform=headless'] : []),
     `--user-data-dir=${path.join(testWorkspace().root, 'profile')}`] });
   await testWorkspace().registerApp(app);
+  expect(app.process().spawnargs).not.toContain('--no-sandbox');
   const page = await app.firstWindow();
   await page.locator('.app-root').waitFor({ state: 'attached' });
   const preferences = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.getLastWebPreferences());
