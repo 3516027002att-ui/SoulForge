@@ -82,6 +82,83 @@ test('public MAP fixtures stay selectable while real resource probes require a n
   assert.equal(registry.get('test:map-streaming-contract')?.requirements.includes('native-env'), false);
   assert.ok(registry.get('test:map-streaming-contract')?.steps.some(step => step.args.some(arg => arg.endsWith('verify-map-streaming-fixtures.mjs'))));
 });
+
+test('required tiers execute their checks outside the ordinary tier, filter or explicit suite selection', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sf-check-required-tier-selection-'));
+  try {
+    mkdirSync(join(root, 'scripts'), {recursive:true});
+    writeFileSync(join(root, 'package.json'), JSON.stringify({scripts:{}}));
+    writeFileSync(join(root, 'scripts/check.fixture.mjs'),
+      'import test from "node:test";test("governance assertion",()=>{});');
+    writeFileSync(join(root, 'scripts/proof.test.mjs'),
+      'import test from "node:test";test("unit assertion",()=>{});');
+    const governanceName = 'file:scripts/check.fixture.mjs';
+    const unitName = 'file:scripts/proof.test.mjs';
+    for (const entry of [runner, compatibilityRunner]) for (const selection of [
+      ['--tier', 'governance'],
+      ['--tier', 'governance,unit', '--filter', governanceName],
+      ['--suite', governanceName]
+    ]) {
+      const result = spawnSync(process.execPath,
+        [entry, ...selection, '--require-tier', 'governance,unit'], {cwd:root, encoding:'utf8'});
+      const report = JSON.parse(result.stdout);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(report.results.find(row => row.scriptName === governanceName)?.status, 'passed');
+      assert.equal(report.results.find(row => row.scriptName === unitName)?.status, 'passed',
+        'A valid required tier cannot disappear behind the ordinary selection');
+      assert.equal(report.completionVerified, true);
+    }
+    const listed = spawnSync(process.execPath,
+      [runner, '--tier', 'governance', '--require-tier', 'unit', '--list'], {cwd:root, encoding:'utf8'});
+    assert.equal(listed.status, 0, listed.stderr);
+    const list = JSON.parse(listed.stdout);
+    assert.ok(list.suites.some(row => row.scriptName === unitName));
+    assert.equal(list.completionVerified, false);
+  } finally { rmSync(root, {recursive:true, force:true}); }
+});
+
+test('a skipped or explicitly excluded check in an otherwise unselected required tier still blocks', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sf-check-required-tier-blocking-'));
+  try {
+    mkdirSync(join(root, 'scripts'), {recursive:true});
+    writeFileSync(join(root, 'package.json'), JSON.stringify({scripts:{}}));
+    writeFileSync(join(root, 'scripts/check.fixture.mjs'),
+      'import test from "node:test";test("governance assertion",()=>{});');
+    writeFileSync(join(root, 'scripts/missing.test.mjs'),
+      'import test from "node:test";test("unavailable native fixture",{skip:"corpus absent"},()=>{});');
+    const name = 'file:scripts/missing.test.mjs';
+    for (const entry of [runner, compatibilityRunner]) for (const excluded of [false, true]) {
+      const result = spawnSync(process.execPath,
+        [entry, '--tier', 'governance', '--require-tier', 'governance,unit',
+          ...(excluded ? ['--exclude', name] : [])], {cwd:root, encoding:'utf8'});
+      const report = JSON.parse(result.stdout);
+      assert.equal(result.status, 1, 'Omitting or excluding a required check cannot make the run pass');
+      assert.equal(report.results.find(row => row.scriptName === name)?.status, excluded ? 'not_run' : 'unavailable');
+      assert.equal(report.ok, false);
+      assert.equal(report.completionVerified, false);
+    }
+  } finally { rmSync(root, {recursive:true, force:true}); }
+});
+
+test('a valid required tier without discoverable checks has an explicit blocking diagnostic', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sf-check-empty-required-tier-'));
+  try {
+    mkdirSync(join(root, 'scripts'), {recursive:true});
+    writeFileSync(join(root, 'package.json'), JSON.stringify({scripts:{}}));
+    writeFileSync(join(root, 'scripts/proof.test.mjs'),
+      'import test from "node:test";test("unit assertion",()=>{});');
+    for (const entry of [runner, compatibilityRunner]) for (const mode of [[], ['--list'], ['--audit']]) {
+      const result = spawnSync(process.execPath,
+        [entry, '--tier', 'unit', '--require-tier', 'unit,native', ...mode], {cwd:root, encoding:'utf8'});
+      const report = JSON.parse(result.stdout);
+      assert.equal(result.status, 1);
+      assert.ok(report.results.some(row => row.tier === 'native' && row.status === 'not_run'
+        && row.reason === 'required-tier-empty'));
+      assert.equal(report.ok, false);
+      assert.equal(report.completionVerified, false);
+    }
+  } finally { rmSync(root, {recursive:true, force:true}); }
+});
 test('public MAP fixture forwarding preserves help and unknown-argument refusal', () => {
   const entry = fileURLToPath(new URL('./verify-map-streaming-fixtures.mjs', import.meta.url));
   const invalid = spawnSync(process.execPath, [entry, '--bogus'], { encoding: 'utf8', timeout: 30_000 });

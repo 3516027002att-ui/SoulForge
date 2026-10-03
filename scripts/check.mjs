@@ -44,11 +44,16 @@ const registry = discoverChecks(repoRoot,workspaces);
 // independently discovered; root forwarding aliases confer no execution proof.
 const auditFindings = [];
 const selected = options.suites.length ? options.suites : [...registry.keys()].filter(name => options.tiers.includes(registry.get(name).tier) && (!options.filter || name.includes(options.filter)));
-// A required suite is an execution requirement, including when its phase is
-// outside the ordinary selection. Missing or explicitly excluded names remain
-// visible not_run results instead of silently disappearing from CI.
-const names = [...new Set([...selected,...options.requiredSuites])];
+// Requirements extend ordinary selection: neither --tier, --filter nor --suite
+// can hide required checks. Explicit exclusions stay visible as not_run.
+const requiredByTier = [...registry.keys()].filter(name => options.requiredTiers.includes(registry.get(name).tier));
+const names = [...new Set([...selected,...requiredByTier,...options.requiredSuites])];
 const results = [];
+for (const tier of new Set(options.requiredTiers)) {
+  if (!requiredByTier.some(name => registry.get(name).tier === tier)) {
+    results.push({scriptName:`tier:${tier}`,tier,status:'not_run',reason:'required-tier-empty',steps:[]});
+  }
+}
 const cache = new Map();
 const plan = [];
 for (const name of names) {
