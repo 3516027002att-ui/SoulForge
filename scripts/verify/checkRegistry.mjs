@@ -4,6 +4,13 @@ import { analyzeEntry } from './classify.mjs';
 import { resolveScriptEntries } from './scriptGraph.mjs';
 import { operationKey, planScript } from './commandPlan.mjs';
 
+// These desktop smokes already have source bundlers because desktop is noEmit.
+// Discovery must execute the same operation as their existing npm entry points.
+const desktopSmokeRunners = new Map([
+  ['apps/desktop/src/main/runMapMeshGeometrySmoke.ts', 'scripts/run-map-mesh-geometry-smoke.mjs'],
+  ['apps/desktop/src/renderer/src/scene/runThreeSceneFunctionalSmoke.ts', 'scripts/run-three-scene-functional-smoke.mjs']
+]);
+
 /** Labels describe actual execution inputs, never a required registration row. */
 export function selectCheckTier(name, sources, requirements) {
   const paths = sources.map(path => path.replaceAll('\\','/'));
@@ -71,6 +78,13 @@ export function discoverChecks(repoRoot, workspaces) {
     const path = relative(repoRoot,file).replaceAll('\\','/');
     const analysis = analyze(file);
     const name = `file:${path}`;
+    const smokeRunner = desktopSmokeRunners.get(path);
+    if (smokeRunner && existsSync(resolve(repoRoot, smokeRunner))) {
+      const operation = {cwd:repoRoot,command:'node',args:[smokeRunner],kind:'test',env:{},owner:name};
+      suites.set(name,{scriptName:name,tier:selectCheckTier(name,[file],analysis.requirements),
+        requirements:analysis.requirements,steps:[{...operation,key:operationKey(operation)}],origin:'file',source:path});
+      continue;
+    }
     // Desktop TypeScript is noEmit. Its source runner bundles every main and
     // renderer test (including TSX) and reports the actual assertions. Keep
     // each file selectable while reusing that identical completed operation.

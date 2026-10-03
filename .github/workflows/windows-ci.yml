@@ -70,7 +70,7 @@ jobs:
         run: |
           $required = @()
           if ($env:REQUIRE_E2E -eq 'true') { $required = @('--require-suite', 'test:renderer-e2e') }
-          node scripts/check.mjs --tier $env:VERIFY_TIERS --require-tier governance,unit @required --json-out output/verify-ci-public.json --timeout-ms 1200000
+          node scripts/check.mjs --tier $env:VERIFY_TIERS --require-tier governance,unit @required --json-out output/verify-ci-public.json --timeout-ms 2700000
       # Public runners have no private corpus. Keep the honest skip reports.
       - name: Native honest-skip contracts
         if: needs.changes.outputs.build == 'true'

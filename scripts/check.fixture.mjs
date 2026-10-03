@@ -12,6 +12,27 @@ import { planScript } from './verify/commandPlan.mjs';
 
 const runner = fileURLToPath(new URL('./check.mjs', import.meta.url));
 const compatibilityRunner = fileURLToPath(new URL('./verify.mjs', import.meta.url));
+test('discovered desktop noEmit smokes use their source runners and execute actual assertions', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const registry = discoverChecks(root, loadWorkspaces(root));
+  const smokes = [
+    ['apps/desktop/src/main/runMapMeshGeometrySmoke.ts', 'scripts/run-map-mesh-geometry-smoke.mjs'],
+    ['apps/desktop/src/renderer/src/scene/runThreeSceneFunctionalSmoke.ts', 'scripts/run-three-scene-functional-smoke.mjs']
+  ];
+  for (const [source, sourceRunner] of smokes) {
+    const entry = registry.get(`file:${source}`);
+    assert.ok(entry, source);
+    assert.equal(entry.buildInput, undefined, 'noEmit sources have no dist prerequisite');
+    assert.deepEqual(entry.steps[0].args, [sourceRunner]);
+  }
+  const result = spawnSync(process.execPath, [runner, '--suite', smokes.map(([source]) => `file:${source}`).join(','),
+    '--require-executed'], {cwd:root, encoding:'utf8', timeout:120000, maxBuffer:4 * 1024 * 1024});
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.completionVerified, true);
+  assert.equal(report.counts.passed, 2);
+  assert.ok(report.results.every(row => row.status === 'passed' && row.steps.some(step => step.execution !== 'not_run')));
+});
 test('unknown tiers reject direct and compatibility entries before any check executes', () => {
   const root = mkdtempSync(join(tmpdir(), 'sf-check-unknown-tier-'));
   try {
