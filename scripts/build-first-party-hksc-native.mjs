@@ -79,6 +79,22 @@ function findVisualStudioDevCmd() {
   throw new Error('FIRST_PARTY_HKS_NATIVE_TOOLCHAIN_MISSING: Visual Studio C++ Build Tools were not found.');
 }
 
+function createWindowsCompilerEnvironment(env = process.env) {
+  const child = { ...env };
+  const systemRoot = Object.entries(env).find(([key]) => key.toUpperCase() === 'SYSTEMROOT')?.[1]
+    ?? Object.entries(env).find(([key]) => key.toUpperCase() === 'WINDIR')?.[1];
+  if (!systemRoot) throw new Error('FIRST_PARTY_HKS_NATIVE_WINDOWS_ENV_MISSING: SystemRoot was not found.');
+  // VsDevCmd supplies the selected MSVC/SDK paths. Inheriting npm's and the
+  // caller's tool paths can exceed cmd's 8191-character expansion limit before
+  // cl even reads its response file. Change only this owned child's search path.
+  for (const key of Object.keys(child)) {
+    if (['PATH', '__VSCMD_PREINIT_PATH'].includes(key.toUpperCase())) delete child[key];
+  }
+  child.PATH = [join(systemRoot, 'System32'), systemRoot,
+    join(systemRoot, 'System32/Wbem'), join(systemRoot, 'System32/WindowsPowerShell/v1.0')].join(';');
+  return child;
+}
+
 async function main() {
   if (!['win32', 'linux'].includes(process.platform) || process.arch !== 'x64') {
     throw new Error('FIRST_PARTY_HKS_NATIVE_PLATFORM_UNSUPPORTED: HKS native build supports Windows/Linux x64.');
@@ -136,6 +152,7 @@ async function main() {
     await writeFile(commandFile, `@echo off\r\ncall "${devCmd}" -arch=x64\r\nif errorlevel 1 exit /b %errorlevel%\r\ncl @"${responseFile}"\r\n`, 'ascii');
     const result = await runProcess({ command: 'cmd.exe', args: ['/d', '/c', commandFile],
       cwd: temp,
+      env: createWindowsCompilerEnvironment(),
       owner: processOwner, signal: cancellation.signal,
       onStdout: chunk => process.stdout.write(chunk), onStderr: chunk => process.stderr.write(chunk)
     });

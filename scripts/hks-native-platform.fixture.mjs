@@ -26,6 +26,32 @@ test('first-party HKS native build produces an isolated Linux ELF library', { sk
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('Windows native build creates a fresh x64 DLL when the caller PATH nearly fills cmd capacity', { skip: process.platform !== 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sf-windows-hks-long-path-'));
+  const pathKey = Object.keys(process.env).find(key => key.toUpperCase() === 'PATH') ?? 'PATH';
+  const callerPath = process.env[pathKey] ?? '';
+  let longPath = callerPath;
+  for (let index = 0; longPath.length < 7_900; index += 1) {
+    longPath += ';' + join(root, `unused-caller-tool-${index}`);
+  }
+  const env = { ...process.env, [pathKey]: longPath };
+  try {
+    const output = join(root, 'SoulForge.Hksc.Native.dll');
+    await assert.rejects(readFile(output), { code: 'ENOENT' }, 'the build must start without a reusable DLL');
+    const result = spawnSync(process.execPath, [resolve('scripts/build-first-party-hksc-native.mjs'), '--output', root], {
+      env, encoding: 'utf8', timeout: 120_000
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const bytes = await readFile(output);
+    assert.equal(bytes.toString('ascii', 0, 2), 'MZ');
+    const pe = bytes.readUInt32LE(0x3c);
+    assert.equal(bytes.readUInt32LE(pe), 0x00004550, 'PE signature');
+    assert.equal(bytes.readUInt16LE(pe + 4), 0x8664, 'x64 target');
+    assert.ok(bytes.readUInt16LE(pe + 22) & 0x2000, 'DLL image');
+    assert.equal(process.env[pathKey], callerPath, 'the caller environment must remain unchanged');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('managed production ABI compiles both wire formats and rejects malformed source', { skip: !['linux', 'win32'].includes(process.platform) }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'sf-linux-hks-runtime-'));
   const dotnet = process.env.SOULFORGE_DOTNET || 'dotnet';
