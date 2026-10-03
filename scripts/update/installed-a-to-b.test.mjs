@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, symlink } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runSuite } from './run-suite.mjs';
@@ -141,4 +141,32 @@ test('closing the owned Electron application checks the captured child after dis
     assert.equal(disposed, true); assert.equal(child.exitCode, 0);
     assert.throws(() => application.process(), /_object/);
   } finally { if (child.exitCode === null && child.signalCode === null) child.kill(); }
+});
+
+test('owned profile binds logical identity to the physically resolved leaf under host redirection', async () => {
+  const logicalRoot = resolve('owned-logical-roaming'), productName = 'SoulForge Validation abcdef12';
+  const logical = join(logicalRoot, productName), physicalParent = resolve('owned-physical-roaming'), physical = join(physicalParent, productName);
+  const checked = [];
+  const files = { realpath: async path => path === logical ? physical : path,
+    assertUnlinkedDirectory: async path => { checked.push(path); } };
+  const profile = await installed.resolveOwnedProfile(logicalRoot, productName, logical, files);
+  assert.equal(profile.logical, logical); assert.equal(profile.physical, physical); assert.equal(profile.parent, physicalParent);
+  assert.deepEqual(checked, [logical, physicalParent]);
+  await assert.rejects(() => installed.resolveOwnedProfile(logicalRoot, productName, physical, files), /owned identity/);
+});
+
+test('owned profile rejects a junction leaf and a changed physical leaf without removing their data', async () => {
+  const base = join(repositoryRoot, 'node_modules/.cache/update-installed-tests'); await mkdir(base, { recursive: true });
+  const root = await mkdtemp(join(base, 'profile-')), productName = 'SoulForge Validation abcdef12';
+  const target = join(root, 'private'), logical = join(root, productName); await mkdir(target);
+  await writeFile(join(target, 'preserved.txt'), 'owned test data');
+  try {
+    await symlink(target, logical, process.platform === 'win32' ? 'junction' : 'dir');
+    await assert.rejects(() => installed.resolveOwnedProfile(root, productName, logical), /unlinked|profile/i);
+    await rm(logical, { recursive: true }); await mkdir(logical);
+    const profile = await installed.resolveOwnedProfile(root, productName, logical);
+    await assert.rejects(() => installed.removeOwnedProfile({ ...profile, physical: target }), /physical leaf/);
+    await installed.removeOwnedProfile(profile);
+    assert.equal(await import('node:fs/promises').then(fs => fs.readFile(join(target, 'preserved.txt'), 'utf8')), 'owned test data');
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

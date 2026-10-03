@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile, writeFile, mkdir, mkdtemp, lstat, realpath, rm, rmdir, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve, relative, isAbsolute } from 'node:path';
+import { join, resolve, relative, isAbsolute, basename, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import semver from 'semver';
@@ -159,6 +159,38 @@ export async function closeOwnedElectronApplication(application, child) {
   await waitUntil(() => child.exitCode !== null || child.signalCode !== null, 15000);
 }
 
+async function assertUnlinkedDirectory(path) {
+  const stat = await lstat(path);
+  assert.ok(stat.isDirectory() && !stat.isSymbolicLink(), 'owned profile leaf/parent must be an unlinked directory');
+  if (process.platform === 'win32') {
+    const isReparsePoint = await readPowerShellJson("([IO.File]::GetAttributes($request.path) -band [IO.FileAttributes]::ReparsePoint) -ne 0 | ConvertTo-Json -Compress", { path });
+    assert.equal(isReparsePoint, false, 'owned profile leaf/parent must not be a reparse point');
+  }
+}
+
+export async function resolveOwnedProfile(appDataRoot, productName, runtimeUserData,
+  files = { realpath, assertUnlinkedDirectory }) {
+  const logical = join(appDataRoot, productName);
+  assert.equal(resolve(runtimeUserData).toLowerCase(), resolve(logical).toLowerCase(), 'actual profile must match its owned identity');
+  await files.assertUnlinkedDirectory(logical);
+  const physical = await files.realpath(logical), parent = dirname(physical);
+  assert.equal((await files.realpath(runtimeUserData)).toLowerCase(), physical.toLowerCase(), 'actual profile must resolve to the observed owned leaf');
+  assert.equal(basename(physical).toLowerCase(), productName.toLowerCase());
+  await files.assertUnlinkedDirectory(parent);
+  assert.equal((await files.realpath(parent)).toLowerCase(), parent.toLowerCase());
+  return { root: appDataRoot, rootPhysical: await files.realpath(appDataRoot), logical, physical, parent };
+}
+
+export async function removeOwnedProfile(profile) {
+  assert.equal((await realpath(profile.root)).toLowerCase(), profile.rootPhysical.toLowerCase(), 'owned AppData root must remain unchanged');
+  await assertUnlinkedDirectory(profile.logical);
+  await assertUnlinkedDirectory(profile.parent);
+  assert.equal((await realpath(profile.logical)).toLowerCase(), profile.physical.toLowerCase(), 'owned physical leaf must remain unchanged');
+  assert.equal((await realpath(profile.parent)).toLowerCase(), profile.parent.toLowerCase(), 'owned physical parent must remain unchanged');
+  assert.ok(inside(profile.parent, profile.physical));
+  await rm(profile.physical, { recursive: true, force: true });
+}
+
 export async function runInstalledProbe(input) {
   const { repositoryRoot, evidenceRoot, runId, headSha, installedConfigPath } = input;
   await mkdir(evidenceRoot, { recursive: true });
@@ -171,7 +203,7 @@ export async function runInstalledProbe(input) {
   try { manifest = await validateInstalledManifest(JSON.parse(await readFile(installedConfigPath, 'utf8'))); }
   catch (error) { return blocked(error.message); }
   const commands = [], artifacts = [], receipts = [];
-  let scratch, scratchParent, installedOwned = false, userData, appDataRoot, shortcutPaths = [], baseline;
+  let scratch, scratchParent, installedOwned = false, userData, ownedProfile, appDataRoot, shortcutPaths = [], baseline;
   const evidence = async (name, value) => {
     const bytes = typeof value === 'string' ? Buffer.from(value) : Buffer.from(JSON.stringify(value, null, 2));
     await writeFile(join(evidenceRoot, name), bytes);
@@ -199,7 +231,7 @@ export async function runInstalledProbe(input) {
     assertInstallerProductNames(manifest, installerIdentities);
     await evidence('installer-preflight.json', { installerIdentities, buildReceiptPath: manifest.buildReceiptPath,
       buildReceiptSha256: manifest.buildReceiptSha256 });
-    appDataRoot = await realpath(await knownFolder('ApplicationData'));
+    appDataRoot = await knownFolder('ApplicationData');
     userData = join(appDataRoot, identity.productName);
     shortcutPaths = [join(await knownFolder('Desktop'), `${identity.shortcutName}.lnk`), join(await knownFolder('Programs'), `${identity.shortcutName}.lnk`)];
     const preOwned = await registrySnapshot(identity.productName);
@@ -236,7 +268,9 @@ export async function runInstalledProbe(input) {
         });
         assert.equal(receipt.version, artifact.version); assert.equal(receipt.name, identity.productName); assert.equal(receipt.isPackaged, true);
         assert.equal(resolve(receipt.executable).toLowerCase(), resolve(executable).toLowerCase());
-        assert.equal((await realpath(receipt.userData)).toLowerCase(), resolve(userData).toLowerCase());
+        const observedProfile = await resolveOwnedProfile(appDataRoot, identity.productName, receipt.userData);
+        if (ownedProfile) assert.deepEqual(observedProfile, ownedProfile, 'B must use the same owned physical profile as A');
+        ownedProfile = observedProfile;
         assert.equal(resolve(receipt.appPath).toLowerCase(), resolve(asarPath).toLowerCase());
         const window = await application.firstWindow({ timeout: 60000 });
         await window.waitForFunction(() => typeof window.soulforge === 'object', undefined, { timeout: 60000 });
@@ -270,16 +304,13 @@ export async function runInstalledProbe(input) {
     installedOwned = false;
     assert.deepEqual(await registrySnapshot('SoulForge'), baseline, 'official installation registry must remain unchanged');
     if (await exists(userData)) {
-      const stat = await lstat(userData);
-      assert.equal(stat.isSymbolicLink(), false, 'owned profile must not be replaced with a link');
-      assert.equal((await realpath(appDataRoot)).toLowerCase(), appDataRoot.toLowerCase());
-      assert.equal((await realpath(userData)).toLowerCase(), userData.toLowerCase());
-      assert.ok(inside(appDataRoot, userData));
-      await rm(userData, { recursive: true, force: true });
+      assert.ok(ownedProfile, 'only an actually observed owned profile can be cleaned');
+      await removeOwnedProfile(ownedProfile);
     }
     assert.equal(await exists(userData), false, 'only the fresh owned profile must be cleaned');
     await evidence('receipt.json', { runId, headSha, scope: manifest.scope, identity, a: manifest.a, b: manifest.b, receipts,
       installerIdentities, buildReceiptSha256: manifest.buildReceiptSha256, officialRegistryBefore: baseline, officialRegistryAfter: await registrySnapshot('SoulForge'),
+      ownedProfile,
       manualNsisUpgrade: true, automaticUpdateExecuted: false, cleanupVerified: true, officialRegistryUnchanged: true });
     completedReport = { ...binding, status: 'passed', commands, artifacts, blockers: [], untestedClaims: nonClaims,
       cases: [{ id: 'installer-a-to-b', status: 'passed', executed: true, evidenceLevel: 'installed-e2e',
