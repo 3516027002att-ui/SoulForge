@@ -44,7 +44,7 @@
  *
  * ── 分页 ──
  *
- * 首次加载用 pageSize=1000 拉全量（覆盖 c0000 939）；若 envelope 仍截断
+ * Initial and subsequent reads use the same bounded native animation page size.
  * （animationsTruncated），展示警示并提供「加载更多」分页按钮逐页追加。
  *
  * ── invalid time range ──
@@ -60,6 +60,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import {
   isTaeDocument,
+  TAE_ANIMATION_PAGE_SIZE,
   projectTaeDocumentPages,
   AnimationPlaybackClock,
   ActionContinuousSampler,
@@ -163,6 +164,7 @@ export interface TaeAnimationPaginationState {
   baseAnimationIds: readonly string[];
   animations: readonly TaeAnimationWire[];
   nextPage: number;
+  pageSize: number;
   hasMore: boolean;
 }
 
@@ -175,6 +177,7 @@ export function createTaeAnimationPaginationState(
     baseAnimationIds: document.animations.map((animation) => taeAnimationIdentityKey(animation)),
     animations: [],
     nextPage: 1,
+    pageSize: TAE_ANIMATION_PAGE_SIZE,
     hasMore: document.animationsTruncated === true
   };
 }
@@ -1038,7 +1041,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
       || !currentPagination.hasMore
       || paginationLoading
     ) return;
-    const pageSize = 1000;
+    const pageSize = currentPagination.pageSize;
     const nextPage = currentPagination.nextPage;
     const requestDocumentKey = documentKey;
     const requestId = ++paginationRequestRef.current;

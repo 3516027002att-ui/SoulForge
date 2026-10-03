@@ -67,3 +67,17 @@ test('the actual report entry writes archive evidence and the GitHub summary wit
     assert.match(await readFile(summary, 'utf8'), /unavailable: Real-provider Agent tasks/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test('the public Windows/Linux matrix runs for main pushes and main pull requests', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/desktop-platform-ci.yml', import.meta.url), 'utf8');
+  const lines = workflow.split(/\r?\n/);
+  for (const event of ['push', 'pull_request']) {
+    const index = lines.indexOf('  ' + event + ':');
+    assert.ok(index >= 0, event + ' must declare its target branches');
+    const match = lines[index + 1].trim().match(/^branches: \[([^\]]+)\]$/);
+    assert.ok(match, event + ' must declare its target branches');
+    const branches = match[1].split(',').map(branch => branch.trim());
+    assert.ok(branches.includes('main'), event + ' must verify the final main integration');
+    assert.ok(branches.includes('linux'), event + ' must retain Linux branch coverage');
+  }
+});

@@ -736,3 +736,20 @@ capability expression ran, so WebGL2 context and WebGPU adapter availability
 remain unknown; the owned test windows were closed normally. Current TSL
 secondary-diffuse source and the existing three CPU shader-construction tests
 are present and pass, but do not establish actual GPU image parity.
+
+
+### Native Windows whole-MAP observation (2026-10-03)
+
+The fresh m11 production GPU receipt described in `SCENE_VALIDATION.md` measures
+115,317 ms UI loading with zero failed models and scene errors, 20 classified
+unavailable resources, a 197 ms maximum long task, and verified foreground
+conditions. It passes the existing broad load/blocking regression guards;
+34 visible long frame gaps still fail the smooth-interaction criterion.
+
+Model request timelines cover 115,473.9 ms of wall time. Their summed spans are
+879,722.6 ms, with 764,248.7 ms of overlap. These concurrent and nested spans must
+not be added as a loading critical path. The report explicitly retains
+`criticalPathVerified=false`: cross-model scheduler dependencies and opening,
+render preparation and GPU milestones do not yet form a complete causal DAG.
+This single fresh run is whole-path observation, not a controlled proof that an
+individual CPU optimization reduced total loading or GPU first-frame latency.

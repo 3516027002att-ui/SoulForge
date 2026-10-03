@@ -22,7 +22,7 @@
     "test:update:all": "node scripts/update/run-suite.mjs all",
     "bridge:build": "node scripts/run-dotnet.mjs build bridge/SoulForge.Bridge/SoulForge.Bridge.csproj --nologo",
     "bridge:publish": "node scripts/run-dotnet.mjs publish bridge/SoulForge.Bridge/SoulForge.Bridge.csproj -c Release --nologo --self-contained true -r win-x64 && node scripts/dotnet-runtime-notices.mjs --runtime win-x64 && node scripts/bridge-production-build.mjs",
-    "launcher:build": "dotnet publish bridge/SoulForge.Doctor/SoulForge.Doctor.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o . && node -e \"import('node:fs').then(fs => { fs.copyFileSync('SoulForge.Doctor.exe', 'SoulForge.Launcher.exe'); })\"",
+    "launcher:build": "node scripts/run-dotnet.mjs publish bridge/SoulForge.Doctor/SoulForge.Doctor.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o bridge/SoulForge.Doctor/bin/Release/net10.0/win-x64/publish && node -e \"import('node:fs').then(fs => { const source='bridge/SoulForge.Doctor/bin/Release/net10.0/win-x64/publish/SoulForge.Doctor.exe'; fs.copyFileSync(source, 'SoulForge.Doctor.exe'); fs.copyFileSync(source, 'SoulForge.Launcher.exe'); })\"",
     "exe:build": "npm run bridge:publish && npm run launcher:build && npm run dev-launcher:build",
     "dev-launcher:build": "node scripts/build-dev-launcher.mjs",
     "bridge:verify:synthetic": "node scripts/verify-synthetic-core-fixtures.mjs",

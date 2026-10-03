@@ -41,14 +41,14 @@ const SOURCE_FILES = [
   'apps/desktop/electron.vite.config.ts'
 ];
 
+const NATIVE_RUNTIME_FILES = [
+  'apps/desktop/.native/better_sqlite3.node',
+  'apps/desktop/.native/better_sqlite3.json'
+];
 const OUTPUT_DIRECTORIES = [
   'apps/desktop/out/main',
   'apps/desktop/out/preload',
-  'apps/desktop/out/renderer',
-  // Electron's production main loads the ABI-matched SQLite binding from
-  // this directory at runtime; a snapshot without it fails during the first
-  // workspace.scan despite having a complete out/ tree.
-  'apps/desktop/.native'
+  'apps/desktop/out/renderer'
 ];
 
 /**
@@ -57,13 +57,13 @@ const OUTPUT_DIRECTORIES = [
  * main process resolves its Bridge project by walking up from cwd/moduleDir.
  */
 const SNAPSHOT_DIRECTORY_PATHS = [
-  'apps/desktop/.native',
   'apps/desktop/out/main',
   'apps/desktop/out/preload',
   'apps/desktop/out/renderer'
 ];
 
 const SNAPSHOT_FILE_PATHS = [
+  ...NATIVE_RUNTIME_FILES,
   AGENT_PRODUCTION_BUILD_MANIFEST,
   'apps/desktop/out/release-compliance.json',
   'apps/desktop/e2e/playwright/production-main.mjs',
@@ -154,7 +154,7 @@ async function expandInputs(repoRoot, directories, files = []) {
 export async function computeAgentProductionBuildFingerprint(repoRoot) {
   const [sourcePaths, outputPaths] = await Promise.all([
     expandInputs(repoRoot, SOURCE_DIRECTORIES, SOURCE_FILES),
-    expandInputs(repoRoot, OUTPUT_DIRECTORIES)
+    expandInputs(repoRoot, OUTPUT_DIRECTORIES, NATIVE_RUNTIME_FILES)
   ]);
   const [source, output] = await Promise.all([
     fingerprintFiles(repoRoot, sourcePaths.filter((file) => {
@@ -254,7 +254,8 @@ async function snapshotFileList(snapshotRoot) {
 
 async function computeSnapshotRuntimeRaceFingerprint(root, target) {
   const bridgePublish = target.publish;
-  const paths = await expandInputs(root, [bridgePublish, 'apps/desktop/.native'], [
+  const paths = await expandInputs(root, [bridgePublish], [
+    ...NATIVE_RUNTIME_FILES,
     'apps/desktop/e2e/playwright/production-main.mjs',
     'scripts/map-native-timing-aggregate.mjs',
     'scripts/character-native-timing-aggregate.mjs',
@@ -325,6 +326,8 @@ export async function createAgentProductionArtifactSnapshot(repoRoot, options = 
   const snapshotDirectories = [...SNAPSHOT_DIRECTORY_PATHS, target.publish];
   const fresh = await assertAgentProductionBuildFresh(root);
   const requiredSources = [
+    // Leaf lstat does not detect a junction at its parent runtime root.
+    'apps/desktop/.native',
     ...snapshotDirectories,
     ...SNAPSHOT_FILE_PATHS
   ];

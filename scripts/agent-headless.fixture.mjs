@@ -62,3 +62,40 @@ test('headless argument parser cannot default approve, accept unknown switches o
  assert.equal(args.prompt,'中文 tasks');assert.equal(args.kernel,'finite');assert.equal(args.maxSteps,4);
  assert.throws(()=>parseAgentExecArguments(['exec','--approve-all']),/Unknown/);
 });
+
+test('an explicit no-cost-limit run keeps positive step/time bounds and refuses conflicting cost settings', () => {
+  const common=['exec','--prompt','read fixture','--provider','test','--no-cost-limit'];
+  const bounded=[...common,'--max-steps','12','--timeout-ms','600000'];
+  const parsed=parseAgentExecArguments(bounded);
+  assert.equal(parsed.noCostLimit,true);
+  assert.equal(parsed.maxCost,undefined);
+  assert.equal(parsed.maxSteps,12);
+  assert.equal(parsed.timeoutMs,600000);
+  assert.throws(()=>parseAgentExecArguments(common),{code:'AGENT_PROVIDER_BUDGET_REQUIRED'});
+  assert.throws(()=>parseAgentExecArguments([...bounded,'--max-cost','1']),{code:'AGENT_ARGUMENT_INVALID'});
+  assert.throws(()=>parseAgentExecArguments([...common,'--max-steps','12','--timeout-ms','0']),{code:'AGENT_ARGUMENT_INVALID'});
+});
+
+test('the original encrypted provider can run with an explicit step/time policy without inventing prices', async () => {
+  const root=await mkdtemp(join(tmpdir(),'sf-step-time-provider-'));
+  const secret='synthetic-no-cost-secret';let disposed=false;
+  try {
+    await writeFile(join(root,'test'),encryptTestConfig({url:'https://synthetic-budget.invalid',api:secret,model:'synthetic-model'}));
+    const frames=[];
+    const core={
+      createConfiguredModelServiceAdapter:({apiKey})=>{assert.equal(apiKey,secret);return {ok:true,adapter:{}};},
+      openLocalCliSession:async()=>({bridge:{tools:[],executeTool:async()=>({ok:true,content:'{}'})},dispose:async()=>{disposed=true;}}),
+      createAgentRunAssembly:()=>({run:async params=>{
+        assert.equal(params.maxSteps,12);assert.equal(params.timeoutMs,600000);
+        assert.equal(params.kernelLimits.maxCost,undefined);assert.equal(params.pricing,undefined);
+        return {rolloutPath:'fixture',run:{finishReason:'stop',steps:1,diagnostics:[]},kernel:{state:'completed',transactions:[],unresolvedCalls:[]}};
+      }})
+    };
+    const report=await runHeadlessAgentCommand({workspace:root,mode:'plan',agentArgs:['exec','--prompt','read fixture','--provider','test','--test-config',join(root,'test'),'--no-cost-limit','--max-steps','12','--timeout-ms','600000','--sessions-dir',root]},core,process.cwd(),{emit:frame=>frames.push(frame)});
+    assert.equal(report.provider.budgetPolicy,'steps-and-time');
+    assert.equal(report.provider.pricing,undefined);
+    assert.equal(report.evaluation,'unverified');
+    assert.equal(JSON.stringify({report,frames}).includes(secret),false);
+    assert.equal(disposed,true);
+  } finally {await rm(root,{recursive:true,force:true});}
+});

@@ -29,6 +29,8 @@
     <BaseOutputPath>obj/.soulforge-build-runs/$(_SoulForgeBuildOutputToken)/bin/</BaseOutputPath>
     <IntermediateOutputPath>obj/.soulforge-build-runs/$(_SoulForgeBuildOutputToken)/intermediate/$(Configuration)/</IntermediateOutputPath>
     <UseSharedCompilation>false</UseSharedCompilation>
+    <_SoulForgeDefaultRunCommand Condition="'$(RunCommand)' == '' And '$(StartAction)' != 'Program'">true</_SoulForgeDefaultRunCommand>
+    <_SoulForgeDefaultRunArguments Condition="'$(RunArguments)' == ''">true</_SoulForgeDefaultRunArguments>
     <PublishDir Condition="'$(PublishDir)' == ''">$(_SoulForgeCanonicalOutput)publish/</PublishDir>
     <_SoulForgeOwnedNativeArgument>--owned-output-root &quot;$(_SoulForgeBuildRunRoot)&quot;</_SoulForgeOwnedNativeArgument>
   </PropertyGroup>
@@ -64,6 +66,14 @@
     <WriteLinesToFile File="$(_SoulForgeBuildOutputFileList)" Lines="@(FileWrites->'%(FullPath)')" Overwrite="true" />
     <Exec Command="node &quot;$(MSBuildProjectDirectory)/../../scripts/bridge-build-output-ownership.mjs&quot; promote --project &quot;$(MSBuildProjectFullPath)&quot; --token &quot;$(_SoulForgeBuildOutputToken)&quot; --run-root &quot;$(_SoulForgeBuildRunRoot)&quot; --canonical &quot;$(_SoulForgeCanonicalOutput).&quot; --output &quot;$(OutputPath).&quot; --file-list &quot;$(_SoulForgeBuildOutputFileList)&quot;" />
     <Delete Files="$(_SoulForgeBuildOutputFileList)" />
+  </Target>
+  <!-- dotnet run evaluates its launch command separately from Build. The owned
+       run is promoted and removed before launch; use its canonical output. -->
+  <Target Name="ResolvePromotedBridgeRunCommand" AfterTargets="ComputeRunArguments" Condition="'$(_SoulForgeIsolatedBuild)' == 'true' And '$(_SoulForgeDefaultRunCommand)' == 'true'">
+    <PropertyGroup>
+      <RunCommand Condition="'$(UseAppHost)' == 'true'">$(_SoulForgeCanonicalOutput)$(AssemblyName)$(_NativeExecutableExtension)</RunCommand>
+      <RunArguments Condition="'$(UseAppHost)' != 'true' And '$(_SoulForgeDefaultRunArguments)' == 'true'">exec &quot;$(_SoulForgeCanonicalOutput)$(TargetFileName)&quot; $(StartArguments)</RunArguments>
+    </PropertyGroup>
   </Target>
   <!-- End bridge build output ownership -->
 

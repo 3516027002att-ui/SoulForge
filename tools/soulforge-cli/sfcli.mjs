@@ -165,6 +165,7 @@ function printUsage() {
 命令:
   agent exec --task-file <UTF-8 file> --responses-file <fixture>  完整 Agent（JSON Lines）
   agent exec --task-file <file> --provider-config <file> --max-cost <limit>  有预算的模型任务
+  agent exec --provider test --task-file <file> --no-cost-limit --max-steps <n> --timeout-ms <ms>  明确只用步数/总时长限制的模型任务
   agent exec --task-file <file> --provider test --test-config <private-test>  原始加密配置（须显式预算及价格）
   agent exec ... --protocol-stdin  JSON Lines双向审批/取消（绑定当前精确请求）
   agent exec ... --resume-session <rollout.jsonl>  历史承接＋journal回查，不重放旧调用

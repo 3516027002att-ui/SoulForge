@@ -1,6 +1,7 @@
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createOwnedTemporaryDirectory } from './owned-temporary-directory.mjs';
 import {
   createProcessCancellation,
   readTimeoutMs,
@@ -14,21 +15,16 @@ const electronVersion = JSON.parse(
 const nativeRoot = process.env.SOULFORGE_TEST_BUILD_ROOT
   ? join(resolve(process.env.SOULFORGE_TEST_BUILD_ROOT), '.native')
   : join(root, 'apps', 'desktop', '.native');
-const buildRoot = join(nativeRoot, 'electron-rebuild');
-const isolatedModules = join(buildRoot, 'node_modules');
 const sourceModule = join(root, 'node_modules', 'better-sqlite3');
 const betterSqlite3Package = JSON.parse(
   await readFile(join(sourceModule, 'package.json'), 'utf8')
 );
-const isolatedModule = join(isolatedModules, 'better-sqlite3');
-const isolatedBinding = join(isolatedModule, 'build', 'Release', 'better_sqlite3.node');
 const targetBinding = join(nativeRoot, 'better_sqlite3.node');
 const metadataPath = join(nativeRoot, 'better_sqlite3.json');
 
 await run();
 
 async function run() {
-  assertInside(nativeRoot, buildRoot);
 
   // Idempotency: reuse the previously built binding when the Electron and
   // better-sqlite3 versions are unchanged, so a dev start no longer forces a
@@ -43,86 +39,100 @@ async function run() {
     return;
   }
 
-  await rmWithRetry(buildRoot);
-  await mkdir(isolatedModules, { recursive: true });
-  await writeFile(join(buildRoot, 'package.json'), `${JSON.stringify({
-    name: 'soulforge-electron-native-build',
-    private: true,
-    dependencies: {
-      'better-sqlite3': betterSqlite3Package.version
+  // MSVC still enforces MAX_PATH in generated tlogs. Publish the binding into
+  // its output owner after compiling in a shorter, separately owned scratch.
+  const scratch = process.platform === 'win32'
+    ? await createOwnedTemporaryDirectory('sqlite') : null;
+  const buildRoot = scratch?.root ?? join(nativeRoot, 'electron-rebuild');
+  const isolatedModules = join(buildRoot, 'node_modules');
+  const isolatedModule = join(isolatedModules, 'better-sqlite3');
+  const isolatedBinding = join(isolatedModule, 'build', 'Release', 'better_sqlite3.node');
+  try {
+    if (!scratch) {
+      assertInside(nativeRoot, buildRoot);
+      await rmWithRetry(buildRoot);
     }
-  }, null, 2)}\n`, 'utf8');
-  // Keep electron-rebuild's dependency walk inside the isolated copy instead of
-  // discovering the repository-level node_modules through the workspace lockfile.
-  await writeFile(join(buildRoot, 'package-lock.json'), '{}\n', 'utf8');
-  await cp(sourceModule, isolatedModule, { recursive: true });
+    await mkdir(isolatedModules, { recursive: true });
+    await writeFile(join(buildRoot, 'package.json'), `${JSON.stringify({
+      name: 'soulforge-electron-native-build',
+      private: true,
+      dependencies: {
+        'better-sqlite3': betterSqlite3Package.version
+      }
+    }, null, 2)}\n`, 'utf8');
+    // Keep electron-rebuild's dependency walk inside the isolated copy instead of
+    // discovering the repository-level node_modules through the workspace lockfile.
+    await writeFile(join(buildRoot, 'package-lock.json'), '{}\n', 'utf8');
+    await cp(sourceModule, isolatedModule, { recursive: true });
 
-  const command = process.execPath;
-  const args = [
-    join(root, 'node_modules', '@electron', 'rebuild', 'lib', 'cli.js'),
-    '--force',
-    '--version', electronVersion,
-    '--module-dir', buildRoot,
-    '--which-module', 'better-sqlite3',
-    '--sequential'
-  ];
-  const buildEnv = {
-    ...process.env,
-    // @electron/rebuild resolves its header cache from os.homedir(). Keep
-    // compiler/download caches local to this task, even on a restricted host.
-    ...(process.platform === 'win32'
-      ? { USERPROFILE: resolve(buildRoot, 'home') }
-      : { HOME: resolve(buildRoot, 'home') }),
-    npm_config_cache: resolve(buildRoot, 'cache/npm'),
-    electron_config_cache: resolve(buildRoot, 'cache/electron'),
-    ...(process.platform === 'win32' ? {
-      CL: appendFlag(process.env.CL, '/Brepro'),
-      LINK: appendFlag(process.env.LINK, '/Brepro')
-    } : {})
-  };
-  await mkdir(resolve(buildRoot, 'home'), { recursive: true });
-  const rebuildTimeoutMs = readTimeoutMs(
-    'SOULFORGE_SQLITE_REBUILD_TIMEOUT_MS',
-    15 * 60 * 1000
-  );
-  const cancellation = createProcessCancellation();
-  const rebuilt = await runProcess({
-    command,
-    args,
-    cwd: buildRoot,
-    env: buildEnv,
-    timeoutMs: rebuildTimeoutMs,
-    signal: cancellation.signal,
-    onStdout: (chunk) => process.stdout.write(chunk),
-    onStderr: (chunk) => process.stderr.write(chunk)
-  });
-  cancellation.dispose();
-  if (rebuilt.timedOut) {
-    throw new Error(`Electron better-sqlite3 rebuild timed out after ${rebuilt.timeoutMs}ms; child process tree terminated.`);
-  }
-  if (rebuilt.cancelled) {
-    throw new Error('Electron better-sqlite3 rebuild cancelled; child process tree terminated.');
-  }
-  if (rebuilt.code !== 0) {
-    throw new Error(`Electron better-sqlite3 rebuild exited with ${rebuilt.code}.`);
-  }
+    const command = process.execPath;
+    const args = [
+      join(root, 'node_modules', '@electron', 'rebuild', 'lib', 'cli.js'),
+      '--force',
+      '--version', electronVersion,
+      '--module-dir', buildRoot,
+      '--which-module', 'better-sqlite3',
+      '--sequential'
+    ];
+    const buildEnv = {
+      ...process.env,
+      // @electron/rebuild resolves its header cache from os.homedir(). Keep
+      // compiler/download caches local to this task, even on a restricted host.
+      ...(process.platform === 'win32'
+        ? { USERPROFILE: resolve(buildRoot, 'home') }
+        : { HOME: resolve(buildRoot, 'home') }),
+      npm_config_cache: resolve(buildRoot, 'cache/npm'),
+      electron_config_cache: resolve(buildRoot, 'cache/electron'),
+      ...(process.platform === 'win32' ? {
+        CL: appendFlag(process.env.CL, '/Brepro'),
+        LINK: appendFlag(process.env.LINK, '/Brepro')
+      } : {})
+    };
+    await mkdir(resolve(buildRoot, 'home'), { recursive: true });
+    const rebuildTimeoutMs = readTimeoutMs(
+      'SOULFORGE_SQLITE_REBUILD_TIMEOUT_MS',
+      15 * 60 * 1000
+    );
+    const cancellation = createProcessCancellation();
+    const rebuilt = await runProcess({
+      command,
+      args,
+      owner: scratch ?? undefined,
+      cwd: buildRoot,
+      env: buildEnv,
+      timeoutMs: rebuildTimeoutMs,
+      signal: cancellation.signal,
+      onStdout: (chunk) => process.stdout.write(chunk),
+      onStderr: (chunk) => process.stderr.write(chunk)
+    });
+    cancellation.dispose();
+    if (rebuilt.timedOut) {
+      throw new Error(`Electron better-sqlite3 rebuild timed out after ${rebuilt.timeoutMs}ms; child process tree terminated.`);
+    }
+    if (rebuilt.cancelled) {
+      throw new Error('Electron better-sqlite3 rebuild cancelled; child process tree terminated.');
+    }
+    if (rebuilt.code !== 0) {
+      throw new Error(`Electron better-sqlite3 rebuild exited with ${rebuilt.code}.`);
+    }
 
-  const electronBinding = await readFile(isolatedBinding);
-  await mkdir(nativeRoot, { recursive: true });
-  await writeFile(targetBinding, electronBinding);
-  await writeFile(metadataPath, `${JSON.stringify({
-    electronVersion,
-    platform: process.platform,
-    arch: process.arch,
-    betterSqlite3Version: betterSqlite3Package.version
-  }, null, 2)}\n`, 'utf8');
+    const electronBinding = await readFile(isolatedBinding);
+    await mkdir(nativeRoot, { recursive: true });
+    await writeFile(targetBinding, electronBinding);
+    await writeFile(metadataPath, `${JSON.stringify({
+      electronVersion,
+      platform: process.platform,
+      arch: process.arch,
+      betterSqlite3Version: betterSqlite3Package.version
+    }, null, 2)}\n`, 'utf8');
 
-  process.stdout.write(`${JSON.stringify({
-    ok: true,
-    electronVersion,
-    targetBinding,
-    isolatedBuild: true
-  }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({
+      ok: true,
+      electronVersion,
+      targetBinding,
+      isolatedBuild: true
+    }, null, 2)}\n`);
+  } finally { await scratch?.dispose(); }
 }
 
 async function reusableBinding() {

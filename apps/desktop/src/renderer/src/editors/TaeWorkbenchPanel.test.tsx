@@ -280,6 +280,23 @@ describe('animationIdLabel / isLegalHkxStem / secondsToFrame（动画标签与�
 });
 
 describe('TAE 动画分页（服务端 hasMore authority）', () => {
+  it('keeps the initial 64-animation native page size so later pages cannot skip actions', () => {
+    const all = Array.from({ length: 131 }, (_, animId) => ({ ...makeDocument().animations[0], animId }));
+    const initial = makeDocument({ animationCount: all.length, animations: all.slice(0, 64), animationsTruncated: true });
+    let state = createTaeAnimationPaginationState('fixture://bounded-native-page', initial);
+    assert.equal(state.pageSize, 64);
+    for (let count = 0; state.hasMore && count < 4; count += 1) {
+      const pageNumber = state.nextPage;
+      const start = pageNumber * state.pageSize;
+      const page = makeDocument({ animationCount: all.length, animations: all.slice(start, start + state.pageSize), animationsTruncated: start + state.pageSize < all.length });
+      state = appendTaeAnimationPage(state, page, pageNumber);
+    }
+    assert.equal(state.hasMore, false);
+    assert.deepEqual([...initial.animations, ...state.animations].map((animation) => animation.animId), all.map((animation) => animation.animId));
+    const source = readFileSync(join(process.cwd(), 'apps/desktop/src/renderer/src/editors/TaeWorkbenchPanel.tsx'), 'utf8');
+    assert.match(source, /const pageSize = currentPagination\.pageSize;/);
+  });
+
   it('page 1 → page 2 → page 3 只在服务端 EOF 时结束，追加稳定且不重复', () => {
     const page0 = makeDocument({
       animationCount: 5,

@@ -170,6 +170,9 @@ export function isSafeMotionAnimId(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
+/** Bounded animation page shared by Desktop and Agent native reads. */
+export const TAE_ANIMATION_PAGE_SIZE = 64;
+
 /** read-tae-document 的完整 envelope。 */
 export interface TaeDocument {
   format: 'TAE';

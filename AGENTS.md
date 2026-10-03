@@ -26,6 +26,6 @@ Use a separate worktree with its own dependencies, mutable native bindings, buil
 
 ## Agent work
 
-Use `createAgentRunAssembly` for desktop, CLI and evaluator sessions. The independent finite kernel is in `packages/agent`; domain authority remains in core. See `docs/AGENT_RUNTIME.md` for utility hosting, protocol, budgets, unresolved-operation handling and comparison limits. Real-provider experiments need a selected provider and configured cost budget. Never put credentials in events, reports or repository files.
+Use `createAgentRunAssembly` for desktop, CLI and evaluator sessions. The independent finite kernel is in `packages/agent`; domain authority remains in core. See `docs/AGENT_RUNTIME.md` for utility hosting, protocol, budgets, unresolved-operation handling and comparison limits. Real-provider runs need a selected provider and explicit execution limits. Monetary ceilings remain the default; an operator may explicitly choose `--no-cost-limit` with bounded steps and total time. Never put credentials in events, reports or repository files.
 
 There are no AGENTS line-count budgets or blanket bans on adding an effective regression check. Add a negative test for the concrete failure, preserve existing valid boundaries, and report what was actually verified. Do not infer publication, merge, deployment or issue-closure authority from permission to implement code.

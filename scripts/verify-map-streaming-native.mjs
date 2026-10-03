@@ -5186,6 +5186,7 @@ async function main() {
   let normalTelemetryPoll = null;
   let mapWindowObserverFinished = false;
   const consoleEvents = [];
+  const meshDiagnosticEvents = [];
   const pageErrors = [];
   const processDiagnostics = { pid: null, exitCode: null, signal: null, stdoutTail: '', stderrTail: [] };
   const mainTelemetryCollector = createMainMapTelemetryCollector();
@@ -5571,6 +5572,9 @@ async function main() {
     page.on('console', (message) => {
       const text = message.text();
       unavailableModelTelemetryCollector.ingest(text);
+      if (text.includes('MAP mesh diagnostic') && meshDiagnosticEvents.length < 1000) {
+        meshDiagnosticEvents.push({ atMs: Date.now() - startedAt, type: message.type(), text: text.slice(0, 4000) });
+      }
       if (text.includes('MAP') || text.includes('MsbScenePanel') || /nativeAbortObserved/i.test(text)) {
         consoleEvents.push({ atMs: Date.now() - startedAt, type: message.type(), text: text.slice(0, 4000) });
         if (consoleEvents.length > 5000) consoleEvents.shift();
@@ -6005,6 +6009,7 @@ async function main() {
         ? 'MAP_UI_TELEMETRY_PENDING_DEADLINE'
         : null,
       renderPlanEvents: extractLoaderEvent(consoleEvents, 'MAP mesh render plan'),
+      meshDiagnosticEvents,
       mapConsoleEventCount: consoleEvents.length
     };
     if (report.mapTelemetry && report.mapTelemetry.total?.available !== true) {

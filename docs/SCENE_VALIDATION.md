@@ -276,3 +276,41 @@ These checks are bounded implementation evidence. They do not complete #30,
 - #55: repeated cursors, incomplete terminal pages and stuck/cancelled loaders
   now terminate with diagnostics. The original large-map halfway stall still
   needs a matching asset/build reproduction before it can be called fixed
+
+
+## Native Windows follow-up (2026-10-03)
+
+A fresh owned production build ran on an RTX 4060 Laptop GPU through ANGLE
+WebGL2. This receipt supersedes the restored-environment GPU availability limit
+above for this machine and backend; it does not establish WebGPU image parity.
+The m11_00_00_00 normal-load report is under
+`output/playwright/map-streaming-native-m11_00_00_00-normal-2026-10-03T09-40-52-202Z/report.json`,
+artifact ID `cb8928c2aa36ba0edf0675e7fe122446237c34a0abf37c0cecb285344928405f`.
+
+The terminal UI reports 753 loaded, zero failed, 20 classified unavailable and
+zero scene errors. UI loading took 115,317 ms; the 260 s load and 400 ms
+blocking guards passed, with a maximum observed long task of 197 ms. The window
+remained visible and unminimized. There were 34 visible long frame gaps, so
+`smoothInteractionPass` remains false. These regression limits do not establish
+comfortable interaction or mature visual acceptance. The recorder observed
+2,050,064 cumulative WebGL draws, including 2,048,602 instanced draws.
+
+The actual controller had classified READY geometry in an instanced batch as a
+proxy, incorrectly raising a scene error for each loaded model. It now retains
+the mesh state. A separate gizmo-finish branch also replaced batched mesh bounds
+with unit proxy bounds; the regression performs the real TransformControls
+lifecycle and verifies picking of a large moved instance away from its origin.
+Repeated READY and new-draw-list resets remain covered. Later mesh diagnostics
+are recorded even when the panel has already shown an earlier texture warning.
+
+An earlier complete run recorded one failed model, and its report is retained at
+`output/playwright/map-streaming-native-m11_00_00_00-normal-2026-10-03T09-28-29-932Z/report.json`.
+The subsequent zero-failure receipt does not establish the intermittent failure's
+cause; bounded mesh diagnostic collection now preserves later failures.
+
+A separate real switch-away run observed correlated native cancellation terminal
+receipts, with no unmatched, duplicate or contradictory terminal groups:
+`output/playwright/map-streaming-native-m11_00_00_00-cancel-2026-10-03T10-07-35-955Z/report.json`,
+artifact ID `350ddce57f6384fa3d3877a9ab8612df0d9bb5dbf1289431cb4208af8cfa6d28`.
+This cancellation run intentionally ends before normal full-load responsiveness
+measurement and cannot substitute for that measurement.

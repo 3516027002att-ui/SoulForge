@@ -682,6 +682,15 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
         sceneErrorCount += 1;
         setMeshStatus((current) => current ? { ...current, sceneErrors: sceneErrorCount } : current);
       }
+      const log = severity === 'error' ? console.error : severity === 'warning' ? console.warn : console.debug;
+      log('[MsbScenePanel] MAP mesh diagnostic', {
+        modelName,
+        stage,
+        severity,
+        code,
+        message,
+        errorStack: detail instanceof Error ? detail.stack : undefined
+      });
       if (firstMeshDiagnostic) return;
       const lowerCode = code.toLowerCase();
       const lowerMessage = message.toLowerCase();
@@ -696,15 +705,6 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
             ? '部分模型加载失败，已保留占位；其余模型仍可继续加载。'
             : '部分模型资源未完成加载，已保留占位。';
       firstMeshDiagnostic = firstDiagnosticMessage;
-      const log = severity === 'error' ? console.error : severity === 'warning' ? console.warn : console.debug;
-      log('[MsbScenePanel] MAP mesh first diagnostic', {
-        modelName,
-        stage,
-        severity,
-        code,
-        message,
-        errorStack: detail instanceof Error ? detail.stack : undefined
-      });
       setMeshStatus((current) => ({
         loaded: current?.loaded ?? 0,
         missing: current?.missing ?? 0,

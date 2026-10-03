@@ -35,6 +35,18 @@ async function fixture(body) {
 async function put(path, bytes = 'writer output') { await mkdir(resolve(path, '..'), { recursive: true }); await writeFile(path, bytes); }
 async function exists(path) { try { await readFile(path); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } }
 
+async function fileSymlink(t, target, path) {
+  let available = false;
+  await t.test('file symlink support', async leg => {
+    try { await symlink(target, path, 'file'); available = true; }
+    catch (error) {
+      if (process.platform !== 'win32' || !['EPERM', 'EACCES'].includes(error.code)) throw error;
+      leg.skip('WINDOWS_FILE_SYMLINK_PRIVILEGE_UNAVAILABLE: this leg requires Windows file-link permission');
+    }
+  });
+  return available;
+}
+
 test('stale cleanup deletes only unchanged recorded writer files, then only empty directories', async () => {
   assert.equal(typeof helper.beginBridgeBuild, 'function');
   assert.equal(typeof helper.completeBridgeBuild, 'function');
@@ -111,7 +123,7 @@ test('FileWrites does not adopt unchanged pre-existing files on an incremental b
   });
 });
 
-test('renamed and incremental builds retain unchanged ownership omitted from their latest FileWrites', async () => {
+test('renamed and incremental builds retain unchanged ownership omitted from their latest FileWrites', async t => {
   await fixture(async f => {
     const initial = await f.begin('net8.0');
     const oldName = join(f.output('net8.0'), 'OldName.dll');
@@ -121,7 +133,7 @@ test('renamed and incremental builds retain unchanged ownership omitted from the
     await helper.completeBridgeBuild({ project: f.project, token: initial.token, fileWrites: [oldName, changed, linked] });
     await writeFile(changed, 'user changed this');
     const outside = join(f.root, 'outside.dll'); await put(outside, 'outside');
-    await rm(linked); await symlink(outside, linked);
+    await rm(linked); const hasFileLink = await fileSymlink(t, outside, linked);
     const unknown = join(f.output('net8.0'), 'Unowned.dll'); await put(unknown, 'unknown');
 
     const renamed = await f.begin('net8.0');
@@ -135,7 +147,7 @@ test('renamed and incremental builds retain unchanged ownership omitted from the
     assert.equal(await exists(oldName), false, 'the still-present old assembly remains writer-owned');
     assert.equal(await exists(newName), false, 'an incremental build does not lose ownership');
     assert.equal(await readFile(changed, 'utf8'), 'user changed this');
-    assert.equal(await readFile(linked, 'utf8'), 'outside');
+    if (hasFileLink) assert.equal(await readFile(linked, 'utf8'), 'outside');
     assert.equal(await readFile(outside, 'utf8'), 'outside');
     assert.equal(await readFile(unknown, 'utf8'), 'unknown');
     await helper.completeBridgeBuild({ project: f.project, token: current.token, fileWrites: [] });
@@ -222,21 +234,25 @@ test('an unknown observer preserves its lease without waiting on a coincident lo
   });
 });
 
-test('symlinks at the file, output directory, bin root, and ownership store preserve their targets', async () => {
+test('symlinks at the file, output directory, bin root, and ownership store preserve their targets', async t => {
   assert.equal(typeof helper.beginBridgeBuild, 'function');
   await fixture(async f => {
     const outside = join(f.root, 'outside'); await mkdir(outside);
     const sentinel = join(outside, 'sentinel.dll'); await put(sentinel, 'outside');
     const lease = await f.begin('net8.0');
     const replaced = join(f.output('net8.0'), 'replaced.dll'); await put(replaced);
-    const linked = join(f.output('net8.0'), 'linked.dll'); await symlink(sentinel, linked);
+    const linked = join(f.output('net8.0'), 'linked.dll'); if (!await fileSymlink(t, sentinel, linked)) return;
     await helper.completeBridgeBuild({ project: f.project, token: lease.token, fileWrites: [replaced, linked] });
     await rm(replaced); await symlink(sentinel, replaced);
     await f.declare('net10.0');
     const current = await f.begin('net10.0');
     assert.equal(await readFile(replaced, 'utf8'), 'outside'); assert.equal(await readFile(linked, 'utf8'), 'outside');
     await helper.completeBridgeBuild({ project: f.project, token: current.token, fileWrites: [] });
-    await rm(join(f.bin, 'Debug'), { recursive: true });
+  });
+  await fixture(async f => {
+    const outside = join(f.root, 'outside'); await mkdir(outside);
+    const sentinel = join(outside, 'sentinel.dll'); await put(sentinel, 'outside');
+    await mkdir(f.bin); await f.declare('net10.0');
     await symlink(outside, join(f.bin, 'Debug'), process.platform === 'win32' ? 'junction' : 'dir');
     const parentLinked = await f.begin('net10.0');
     await helper.completeBridgeBuild({ project: f.project, token: parentLinked.token, fileWrites: [sentinel] });
@@ -636,5 +652,17 @@ test('Release PE, portable PDB and apphost omit private run paths while resource
     }
     const execution = spawnSync(dotnet, [join(canonical, 'publish', 'Bridge.dll')], { cwd: f.root, env: f.env, encoding: 'utf8', timeout: 10000 });
     assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
+  });
+});
+
+
+test('dotnet run launches promoted canonical output for apphost and DLL modes', { skip: sdkSkip }, async () => {
+  await sdkFixture(async f => {
+    for (const useAppHost of [true, false]) {
+      const result = spawnSync(dotnet, ['run', '--project', f.project,
+        '-p:UseAppHost=' + useAppHost, '-p:RestoreConfigFile=' + join(f.root, 'NuGet.Config')],
+        { cwd: f.root, env: f.env, encoding: 'utf8', timeout: 120000 });
+      assert.equal(result.status, 0, 'apphost=' + useAppHost + ': ' + result.stdout + '\n' + result.stderr);
+    }
   });
 });

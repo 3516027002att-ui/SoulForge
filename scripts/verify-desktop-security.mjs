@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 const files = {
   main: await readFile(new URL('../apps/desktop/src/main/index.ts', import.meta.url), 'utf8'),
   ipc: await readFile(new URL('../apps/desktop/src/main/ipc.ts', import.meta.url), 'utf8'),
+  workspace: await readFile(new URL('../apps/desktop/src/main/ipc/workspace.ts', import.meta.url), 'utf8'),
   agent: await readFile(new URL('../apps/desktop/src/main/ipc/agent.ts', import.meta.url), 'utf8'),
   agentSession: await readFile(new URL('../apps/desktop/src/main/services/agentSessionService.ts', import.meta.url), 'utf8'),
   rendererApp: await readFile(new URL('../apps/desktop/src/renderer/src/App.tsx', import.meta.url), 'utf8'),
@@ -35,7 +36,11 @@ const checks = [
   ['IPC 统一校验发送方', files.ipc.includes('assertTrustedSender(event, channel)')],
   ['IPC 校验主文档地址', files.ipc.includes('trustedRendererDocuments')
     && files.ipc.includes('actualDocument !== expectedDocument')],
-  ['目录选择使用一次性凭据', files.ipc.includes('consumeDirectorySelection')],
+  ['目录选择使用一次性凭据', files.ipc.includes('registerWorkspaceIpcHandlers(')
+    && files.workspace.includes('consumeDirectorySelection(event, options.overlaySelectionId')
+    && files.workspace.includes('directorySelections.delete(selectionId)')
+    && files.workspace.includes('selection.ownerWebContentsId !== event.sender.id')
+    && files.workspace.includes('selection.expiresAt < Date.now()')],
   ['渲染进程不能创建确认凭据', !files.preload.includes('createConfirmation')],
   ['渲染进程不能传入确认凭据', !files.preload.includes('ConfirmationReceipt')],
   ['渲染进程不能传入工作区绝对路径', !files.preload.includes('workspaceRoot')],

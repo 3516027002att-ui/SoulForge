@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { lstat, readdir } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative as relativePath, resolve, sep } from 'node:path';
 import { ingestBridgeResult, ActionMotionIdentityCache, runBridge, type BinderMembershipMatch, type BinderMembershipCandidate, type WorkspaceIndex, type WorkspaceSession } from '@soulforge/core';
-import type { Diagnostic, IndexedFile } from '@soulforge/shared';
+import { TAE_ANIMATION_PAGE_SIZE, type Diagnostic, type IndexedFile } from '@soulforge/shared';
 import { sanitizeRendererValue } from '../rendererDto.js';
 import { getTaeTemplateCatalog } from '../taeTemplateCatalog.js';
 import { canonicalCharacterStemForActionPath } from '../ipc/actionPreviewCompatibility.js';
@@ -1091,7 +1091,7 @@ options?: { animationPage?: number; animationPageSize?: number }) => {
     // TAE 字段、事件名称和长度变体均由 Bridge 内置 first-party schema 处理。
     // 这里只传分页参数；生产链不读取编辑器安装目录或外部模板。
     // c0000 has thousands of actions; render one bounded native page initially.
-    const paginationOptions: Record<string, unknown> = { animationPage: 0, animationPageSize: 64 };
+    const paginationOptions: Record<string, unknown> = { animationPage: 0, animationPageSize: TAE_ANIMATION_PAGE_SIZE };
     if (typeof options?.animationPage === 'number' && Number.isFinite(options.animationPage) && options.animationPage >= 0) {
       paginationOptions.animationPage = Math.floor(options.animationPage);
     }

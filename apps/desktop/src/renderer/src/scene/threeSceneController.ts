@@ -1638,6 +1638,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     // diagnostic proxy tint that was attached while the model was loading.
     batch.mesh.instanceColor = null;
     for (const id of batch.ids) {
+      renderStates.set(id, 'mesh');
       const binding = instanceBindings.get(id);
       if (binding) {
         updateBindingBounds(binding);
@@ -1844,7 +1845,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
             binding.mesh.computeBoundingSphere();
             binding.mesh.frustumCulled = true;
           }
-          if (itemId && renderStates.get(itemId) === 'mesh') {
+          if (bindings.length === 0 && itemId && renderStates.get(itemId) === 'mesh') {
             const target = meshes.get(itemId);
             if (target) updateObjectBounds(itemId, target);
           }

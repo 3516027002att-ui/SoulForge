@@ -14,6 +14,7 @@ export function parseAgentExecArguments(argv) {
     const fields = { '--prompt': 'prompt', '--task-file': 'taskFile', '--provider-config': 'providerConfig', '--provider': 'provider', '--test-config': 'testConfig', '--input-price-per-million': 'inputPricePerMillion', '--output-price-per-million': 'outputPricePerMillion', '--responses-file': 'responsesFile', '--sessions-dir': 'sessionsDir', '--kernel': 'kernel', '--max-steps': 'maxSteps', '--timeout-ms': 'timeoutMs', '--max-output-tokens': 'maxOutputTokens', '--max-cost': 'maxCost', '--resume-session':'resumeSession','--approval-timeout-ms':'approvalTimeoutMs' };
     for (let i = 1; i < argv.length; i++) {
         if(argv[i]==='--protocol-stdin'){options.protocolStdin=true;continue;}
+        if(argv[i]==='--no-cost-limit'){options.noCostLimit=true;continue;}
         const key = fields[argv[i]];
         if (!key)
             throw failure('AGENT_ARGUMENT_INVALID', `Unknown agent exec option: ${argv[i]}`);
@@ -30,6 +31,10 @@ export function parseAgentExecArguments(argv) {
     if(options.approvalTimeoutMs!==undefined&&(!Number.isSafeInteger(options.approvalTimeoutMs)||options.approvalTimeoutMs<=0||options.approvalTimeoutMs>600000))throw failure('AGENT_ARGUMENT_INVALID','Approval timeout must be a positive integer no greater than 600000ms.');
     if (options.maxCost !== undefined && (!Number.isFinite(options.maxCost) || options.maxCost < 0))
         throw failure('AGENT_ARGUMENT_INVALID', 'Invalid cost budget.');
+    if (options.noCostLimit && options.maxCost !== undefined)
+        throw failure('AGENT_ARGUMENT_INVALID', 'Choose --max-cost or --no-cost-limit, not both.');
+    if (options.noCostLimit && (!argv.includes('--max-steps') || !argv.includes('--timeout-ms')))
+        throw failure('AGENT_PROVIDER_BUDGET_REQUIRED', '--no-cost-limit requires explicit positive --max-steps and --timeout-ms.');
     if (Boolean(options.prompt) === Boolean(options.taskFile))
         throw failure('AGENT_INPUT_REQUIRED', 'Provide exactly one --prompt or UTF-8 --task-file.');
     if (options.provider !== undefined && options.provider !== 'test')
@@ -39,9 +44,9 @@ export function parseAgentExecArguments(argv) {
     if (options.provider !== 'test' && [options.testConfig, options.inputPricePerMillion, options.outputPricePerMillion].some(value => value !== undefined))
         throw failure('AGENT_ARGUMENT_INVALID', 'Test config and CLI prices require --provider test.');
     if (options.provider === 'test') {
-        if (!Number.isFinite(options.maxCost) || options.maxCost <= 0)
+        if (!options.noCostLimit && (!Number.isFinite(options.maxCost) || options.maxCost <= 0))
             throw failure('AGENT_PROVIDER_BUDGET_REQUIRED', 'Encrypted provider execution requires a positive --max-cost.');
-        if (![options.inputPricePerMillion, options.outputPricePerMillion].every(value => Number.isFinite(value) && value >= 0))
+        if ((!options.noCostLimit || options.inputPricePerMillion !== undefined || options.outputPricePerMillion !== undefined) && ![options.inputPricePerMillion, options.outputPricePerMillion].every(value => Number.isFinite(value) && value >= 0))
             throw failure('AGENT_PROVIDER_PRICING_REQUIRED', 'Provide explicit input/output prices per million tokens.');
     }
     return options;
@@ -115,17 +120,17 @@ export async function runHeadlessAgentCommand(options, core, repoRoot, io = {}) 
         privateProviderValues = [loaded.config.baseUrl, loaded.config.model];
         const { apiKey: _privateKey, ...selected } = loaded.config;
         config = { ...selected, hasCredential: true, createdAt: '', updatedAt: '' };
-        providerPricing = { inputPerMillion: args.inputPricePerMillion, outputPerMillion: args.outputPricePerMillion };
-        provider = { kind: 'encrypted-test', configSha256: createHash('sha256').update(JSON.stringify(loaded.config)).digest('hex'), identityScope: 'selected-original-test-configuration', maxCost: args.maxCost, pricing: providerPricing };
+        providerPricing = args.inputPricePerMillion === undefined ? undefined : { inputPerMillion: args.inputPricePerMillion, outputPerMillion: args.outputPricePerMillion };
+        provider = { kind: 'encrypted-test', configSha256: createHash('sha256').update(JSON.stringify(loaded.config)).digest('hex'), identityScope: 'selected-original-test-configuration', budgetPolicy: args.noCostLimit ? 'steps-and-time' : 'cost-limited', maxCost: args.maxCost, pricing: providerPricing };
         const created = core.createConfiguredModelServiceAdapter({ config, apiKey });
         if (!created.ok) throw failure('AGENT_PROVIDER_INVALID', 'The original encrypted provider configuration is invalid.');
         adapter = created.adapter;
     }
     else {
         const raw = JSON.parse(decodeTaskInput(await readFile(resolve(args.providerConfig))));
-        if (args.maxCost === undefined)
+        if (args.maxCost === undefined && !args.noCostLimit)
             throw failure('AGENT_PROVIDER_BUDGET_REQUIRED', 'Real provider execution requires --max-cost and configured per-million token prices.');
-        if (!raw.pricing || !['inputPerMillion', 'outputPerMillion'].every(key => Number.isFinite(raw.pricing[key]) && raw.pricing[key] >= 0))
+        if ((!args.noCostLimit || raw.pricing !== undefined) && (!raw.pricing || !['inputPerMillion', 'outputPerMillion'].every(key => Number.isFinite(raw.pricing[key]) && raw.pricing[key] >= 0)))
             throw failure('AGENT_PROVIDER_PRICING_REQUIRED', 'Provider config must include current inputPerMillion/outputPerMillion prices.');
         config = { id: raw.id ?? 'headless', displayName: raw.displayName ?? 'headless', protocol: raw.protocol, baseUrl: raw.baseUrl, model: raw.model, hasCredential: true, createdAt: '', updatedAt: '' };
         apiKey = process.env.SOULFORGE_AGENT_API_KEY;
@@ -135,8 +140,8 @@ export async function runHeadlessAgentCommand(options, core, repoRoot, io = {}) 
         if (!created.ok)
             throw failure('AGENT_PROVIDER_INVALID', created.diagnostics[0]?.message ?? 'Invalid provider.');
         adapter = created.adapter;
-        providerPricing = {inputPerMillion:raw.pricing.inputPerMillion,outputPerMillion:raw.pricing.outputPerMillion};
-        provider = { kind: 'configured', ...bindProviderConfiguration(config), maxCost: args.maxCost, pricing: { inputPerMillion: raw.pricing.inputPerMillion, outputPerMillion: raw.pricing.outputPerMillion } };
+        providerPricing = raw.pricing ? {inputPerMillion:raw.pricing.inputPerMillion,outputPerMillion:raw.pricing.outputPerMillion} : undefined;
+        provider = { kind: 'configured', ...bindProviderConfiguration(config), budgetPolicy: args.noCostLimit ? 'steps-and-time' : 'cost-limited', maxCost: args.maxCost, pricing: providerPricing };
     }
     const provenance = await captureAgentRunProvenance(repoRoot, { task, goals: [], taskContract: null });
     const build = await buildIdentity(repoRoot);

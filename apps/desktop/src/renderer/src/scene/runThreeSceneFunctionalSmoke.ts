@@ -721,9 +721,13 @@ async function testProxyScene(record: (name: string) => void): Promise<void> {
 async function testProxyModelReplacement(record: (name: string) => void): Promise<void> {
   const audits: Array<{ phase: string; items: Array<{ id: string; state: string }> }> = [];
   const rendererState: { renderer: FakeRenderer | null } = { renderer: null };
+  let mountedCamera: three.PerspectiveCamera | null = null;
+  const drawList = buildModelReplacementDrawList();
+  drawList.items[1]!.position = [2000, 0, 0];
   const handle = await mountThreeProxyScene({
     container: new FakeElement() as unknown as HTMLElement,
-    drawList: buildModelReplacementDrawList(),
+    drawList,
+    cameraAudit: (camera) => { mountedCamera = camera; },
     rendererFactory: () => {
       const renderer = new FakeRenderer();
       rendererState.renderer = renderer;
@@ -752,8 +756,8 @@ async function testProxyModelReplacement(record: (name: string) => void): Promis
 
   const positionsBase64 = Buffer.from(new Float32Array([
     0, 0, 0,
-    1, 0, 0,
-    0, 1, 0
+    256, 0, 0,
+    0, 256, 0
   ]).buffer).toString('base64');
   const indicesBase64 = Buffer.from(new Uint16Array([0, 1, 2]).buffer).toString('base64');
   const replaced = handle.updateModelGeometry?.('map/m000010.FLVER', {
@@ -782,7 +786,45 @@ async function testProxyModelReplacement(record: (name: string) => void): Promis
   assertEqual(handle.selectedId, 'part-001', '几何热替换保留当前选中 placement');
   const ready = audits.filter((entry) => entry.phase === 'mesh-ready').at(-1);
   assert(ready !== undefined, 'model geometry replacement 发出 mesh-ready audit');
-  assert(ready.items.every((item) => item.state === 'proxy'), 'replacement 后 placement 仍由 proxy binding 管理');
+  assert(ready.items.every((item) => item.state === 'mesh'), '真实几何 READY 后所有 placement 的 audit 必须标记 mesh，实例化表示不改变已加载状态');
+  // Exercise the real TransformControls lifecycle and the spatial picking path.
+  await import('three/examples/jsm/controls/TransformControls.js');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  pumpFrames(4);
+  const controls = rendererState.renderer?.lastScene?.children.map((child) => (child as unknown as { controls?: {
+    object?: three.Object3D; dragging: boolean; dispatchEvent(event: { type: string }): void;
+  } }).controls).filter((control) => control?.object);
+  const control = controls?.[0];
+  assert(control?.object !== undefined, '真实 TransformControls 已附着实例 placement');
+  assert(mountedCamera !== null && lastCreatedCanvas !== null, '实例 picking 使用真实 camera 与输入路径');
+  const camera = mountedCamera as three.PerspectiveCamera;
+  const canvas = lastCreatedCanvas;
+  const pickFarFromOrigin = (phase: string): void => {
+    replacementBatch.updateMatrixWorld(true);
+    const placement = new three.Matrix4();
+    replacementBatch.getMatrixAt(1, placement);
+    const hit = new three.Vector3(100, 100, 0).applyMatrix4(placement).applyMatrix4(replacementBatch.matrixWorld);
+    camera.position.copy(hit).add(new three.Vector3(0, 0, 500));
+    camera.lookAt(hit);
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld(true);
+    canvas.dispatch('click', { clientX: 400, clientY: 300 });
+    assertEqual(handle.selectedId, 'part-001', phase + ': 真实大网格远离原点仍能通过 spatial index 选中');
+  };
+  handle.setSelected(null);
+  pickFarFromOrigin('before dragging');
+  control.dragging = true;
+  control.object.position.x += 128;
+  control.dispatchEvent({ type: 'objectChange' });
+  control.dragging = false;
+  await new Promise<void>((resolve) => setTimeout(resolve, 90));
+  handle.setSelected(null);
+  pickFarFromOrigin('after dragging');
+  const repeated = handle.updateModelGeometry?.('m000010', { positionsBase64, indicesBase64, indexSize: 16, vertexCount: 3 });
+  assertEqual(repeated, 2, '重复 READY 仍更新共享批次的两个 placement');
+  assert(audits.at(-1)?.items.every((item) => item.state === 'mesh'), '重复 READY 保持真实网格状态');
+  handle.setDrawList(buildModelReplacementDrawList());
+  assert(audits.at(-1)?.items.every((item) => item.state === 'proxy'), '新 draw list 恢复未加载代理状态');
 
   handle.dispose();
   record('proxy-model-batch-replacement');

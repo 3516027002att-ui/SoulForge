@@ -1,13 +1,13 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { createOpaqueCursor, defaultReadSessionManager, parseOpaqueCursor } from '@soulforge/shared';
+import { createOpaqueCursor, defaultReadSessionManager, parseOpaqueCursor, TAE_ANIMATION_PAGE_SIZE } from '@soulforge/shared';
 import type { Diagnostic, NativeReadSession, TaeEntryWire } from '@soulforge/shared';
 import { makeFileResourceUri, makeWorkspaceRelativePath } from '../workspace/resourceUri.js';
 import type { NativeEditSession } from './nativeEditSession.js';
 import type { TaeActionSnapshot, TaeEditFailure, TaeEventSnapshot } from './taeEdit.js';
 
 /** Match the existing Desktop native animation page, not a new event quota. */
-export const TAE_BROWSE_ANIMATION_PAGE_SIZE = 64;
+export const TAE_BROWSE_ANIMATION_PAGE_SIZE = TAE_ANIMATION_PAGE_SIZE;
 
 export interface TaeBrowseNativePage {
   ok: true;
