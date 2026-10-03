@@ -27,6 +27,10 @@ const UNC_OR_DEVICE_PATH = /\\\\(?:[?.]\\)?[^\\/\s]+[\\/][^\s'"()（）\[\]「�
 /** Match a whole URI before looking for slash paths within it. */
 const URI = /[A-Za-z][A-Za-z0-9+.-]*:\/\/(?:[^\s'"()（）\[\]「」『』，。、；！？]|\[[A-Za-z0-9_.:%-]+\])*/;
 const POSIX_PATH = /(?<![A-Za-z0-9_./:%\\-])\/[^\s'"()（）\[\]「」『』，。、；：！？]+/;
+/** URI metadata and container children must remain relative selectors. */
+const PHYSICAL_URI_SELECTOR = new RegExp(
+  [WINDOWS_DRIVE_PATH.source, POSIX_PATH.source, '//', '(?:^|[=&])/'].join('|')
+);
 const URI_OR_PATH = new RegExp(
   [URI.source, WINDOWS_DRIVE_PATH.source, UNC_OR_DEVICE_PATH.source, POSIX_PATH.source].join('|'), 'g'
 );
@@ -60,6 +64,11 @@ function isLogicalFileUri(value: string): boolean {
   const decoded = decodeUriComponent(value);
   if (!decoded || decoded.includes('\\') || /[\u0000-\u001f\u007f]/.test(decoded)
     || decoded.split(/[/?#]/).some(segment => segment === '.' || segment === '..')) return false;
+
+  // A logical authority does not grant query/fragment data filesystem authority.
+  // Inspect fully decoded selectors separately from the logical URI's own /path.
+  const selectors = [...decoded.split(/[?#]/).slice(1), ...decoded.split('!/').slice(1)];
+  if (selectors.some(selector => PHYSICAL_URI_SELECTOR.test(selector))) return false;
 
   const match = /^file:\/\/([^/?#]*)(.*)$/i.exec(value);
   if (!match) return false;

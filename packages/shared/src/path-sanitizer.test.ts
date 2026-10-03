@@ -64,6 +64,40 @@ it('logical authority does not permit encoded path escapes or physical separator
   ]) assert.equal(maskPathFragments(uri), MASKED_PATH_PLACEHOLDER, uri);
 });
 
+it('logical file URI query and fragment cannot carry embedded physical paths', () => {
+  for (const uri of [
+    'file://regulation.bin?path=C:/private/demo.fmg',
+    'file://chr/foo.flver#source=/home/private/demo.fmg',
+    'file:///workspace/a.fmg?source=/home/private/demo.fmg',
+    'file://pack.bnd#bnd/child/C:/private/demo.fmg',
+    'file://pack.bnd?path=C%3A%2Fprivate%2Fdemo.fmg',
+    'file://pack.bnd?path=C%253A%252Fprivate%252Fdemo.fmg',
+    'file://chr/foo.flver#source=%2Fhome%2Fprivate%2Fdemo.fmg',
+    'file://chr/foo.flver#source=%252Fhome%252Fprivate%252Fdemo.fmg',
+    'file://chr/foo.flver%23source%3D%252Fhome%252Fprivate%252Fdemo.fmg',
+    'file://regulation.bin?source=file%3A%2F%2F%2Fhome%2Fprivate%2Fdemo.fmg',
+    'file://chr/foo.flver#source=file%253A%252F%252Fprod-server%252Fprivate%252Fdemo.fmg',
+    'file://pack.bnd#bnd/child/%2Fhome/private/demo.fmg',
+    'file://pack.bnd!/%252Fhome/private/demo.fmg'
+  ]) {
+    assert.equal(maskPathFragments(uri), MASKED_PATH_PLACEHOLDER, uri);
+    assert.equal(maskPathFragments(`Read failed: ${uri} (retry later)`),
+      `Read failed: ${MASKED_PATH_PLACEHOLDER} (retry later)`, uri);
+  }
+});
+
+it('relative query labels and encoded container selectors keep their logical identity', () => {
+  for (const uri of [
+    'file://regulation.bin?version=1',
+    'file://chr/foo.flver#source=chr/relative.flver',
+    'file://pack.bnd#bnd/entry',
+    'file://pack.bnd#bnd/child/dir%2Fentry.fmg',
+    'file://pack.bnd#bnd/child/dir%252Fentry.fmg',
+    'file://pack.bnd!/dir%2Fentry.fmg',
+    'file://chr/pack.bnd!/dir%252Fentry.fmg'
+  ]) assert.equal(maskPathFragments(uri), uri, uri);
+});
+
 it('masks POSIX paths and physical file URLs while preserving surrounding text', () => {
   for (const value of ['/home/user/mod/file', '/tmp/soulforge/a.fmg', '/workspace/relative/file', 'file:///home/user/a.fmg', 'file://localhost/home/user/a.fmg', 'file://D:/Users/user/a.fmg']) {
     assert.equal(maskPathFragments(value), MASKED_PATH_PLACEHOLDER);
