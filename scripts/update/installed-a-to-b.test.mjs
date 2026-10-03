@@ -7,6 +7,8 @@ import { runSuite } from './run-suite.mjs';
 import { validateInstalledManifest } from './installed-a-to-b.mjs';
 import * as installed from './installed-a-to-b.mjs';
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 
 const repositoryRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 test('installed suite without actual A/B artifacts is explicitly blocked and never passes', async () => {
@@ -124,4 +126,19 @@ test('pre-execution PE guard rejects a formal or unverified installer even with 
       assert.ok(registry.every(row => /^HKEY_/.test(row.key) && installed.registryDisplayMatches(row.displayName, 'SoulForge') && row.values));
     }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('closing the owned Electron application checks the captured child after dispatcher disposal', async () => {
+  const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] });
+  let disposed = false;
+  const application = {
+    process() { if (disposed) throw new TypeError("Cannot read properties of undefined (reading '_object')"); return child; },
+    async close() { disposed = true; const exited = once(child, 'exit'); child.stdin.end(); await exited; }
+  };
+  try {
+    const captured = application.process();
+    await installed.closeOwnedElectronApplication(application, captured);
+    assert.equal(disposed, true); assert.equal(child.exitCode, 0);
+    assert.throws(() => application.process(), /_object/);
+  } finally { if (child.exitCode === null && child.signalCode === null) child.kill(); }
 });

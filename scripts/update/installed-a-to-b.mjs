@@ -153,6 +153,12 @@ async function waitUntil(check, timeoutMs = 120000) {
   throw fail('UPDATE_INSTALLED_CLEAN_TIMEOUT', 'Owned installer state did not settle within its timeout.');
 }
 
+export async function closeOwnedElectronApplication(application, child) {
+  assert.ok(child?.pid, 'capture the owned child before closing its Playwright dispatcher');
+  await application.close();
+  await waitUntil(() => child.exitCode !== null || child.signalCode !== null, 15000);
+}
+
 export async function runInstalledProbe(input) {
   const { repositoryRoot, evidenceRoot, runId, headSha, installedConfigPath } = input;
   await mkdir(evidenceRoot, { recursive: true });
@@ -218,6 +224,10 @@ export async function runInstalledProbe(input) {
       const executable = join(target, `${identity.executableName}.exe`);
       assert.ok(inside(scratch, await realpath(executable)), 'installed executable must stay in the owned target');
       const application = await _electron.launch({ executablePath: executable, timeout: 60000 });
+      const child = application.process();
+      let stdout = '', stderr = '', launchFailure;
+      child.stdout?.on('data', chunk => { stdout = (stdout + String(chunk)).slice(-32768); });
+      child.stderr?.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-32768); });
       try {
         const receipt = await application.evaluate(({ app, BrowserWindow }) => {
           for (const window of BrowserWindow.getAllWindows()) window.hide();
@@ -234,9 +244,16 @@ export async function runInstalledProbe(input) {
         receipts.push({ label, ...receipt });
         await evidence(`${label}.launch.json`, receipt);
         commands.push({ argv: [executable, '(Playwright-owned real application launch)'], exitCode: 0, status: 'executed' });
-      } finally {
-        await application.close(); // only the application process launched by this probe
-        assert.notEqual(application.process().exitCode, null, 'owned application must exit before replacement');
+      } catch (error) { launchFailure = error; throw error; }
+      finally {
+        try { await closeOwnedElectronApplication(application, child); }
+        catch (error) {
+          await evidence(`${label}.close-failure.json`, { message: error.message, stack: error.stack, pid: child.pid });
+          if (!launchFailure) throw error; // preserve the original startup/assertion failure
+        } finally {
+          await evidence(`${label}.application.stdout.txt`, stdout);
+          await evidence(`${label}.application.stderr.txt`, stderr);
+        }
       }
     };
     await execute('install-a', manifest.a.path, ['/S', '/currentuser', `/D=${target}`], 300000);
@@ -269,7 +286,10 @@ export async function runInstalledProbe(input) {
         assertions: ['actual approved NSIS A installed and launched', 'actual approved newer B replaced A and launched from the same owned target',
           'real main-process version/profile/package receipts', 'owned uninstall/registry/shortcuts/target cleaned; official registry unchanged'],
         evidenceFiles: ['a.launch.json', 'b.launch.json', 'receipt.json'] }] };
-  } catch (error) { failure = error; }
+  } catch (error) {
+    failure = error;
+    await evidence('failure.json', { message: error.message, stack: error.stack, ownedRecoveryTarget: scratch ?? null });
+  }
   finally {
     // Never erase a failed installation in place of uninstalling it. Preserve
     // failed targets for recovery; remove only empty, successfully cleaned roots.
