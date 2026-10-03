@@ -58,23 +58,31 @@ test('compatibility defaults and request envelopes preserve their special wire b
 
 test('the four existing result projections strip nested authority and preserve binary identity', async () => {
   const { api, setResponse } = observeFacade();
+  const { MASKED_PATH_PLACEHOLDER } = loadSource('packages/shared/src/path-sanitizer.ts');
+  const logicalSourceUri = 'file://param/gameparam/gameparam.parambnd.dcx';
+  const physicalSourceUris = ['file://relative', 'file://prod-server/share/mod/a.fmg'];
   const bytes = new Uint8Array([3, 5]);
   const buffer = new ArrayBuffer(2);
   const forbiddenKeys = ['containerPath', 'rootPath', 'absolutePath', 'sourcePath', 'targetPath', 'backupPath'];
   const privateFields = Object.fromEntries(forbiddenKeys.map((key) => [key, 'private']));
-  const payload = { ...privateFields, label: 'failed at C:\\game\\secret.bin', children: [{ ...privateFields, sourceUri: 'file://relative' }], bytes, buffer };
+  const payload = { ...privateFields, label: 'failed at C:\\game\\secret.bin', children: [
+    { ...privateFields, sourceUri: logicalSourceUri },
+    ...physicalSourceUris.map(sourceUri => ({ ...privateFields, sourceUri }))
+  ], bytes, buffer };
   setResponse(payload);
   for (const name of baseline.transforms) {
     const result = await api[name]('file://relative', 1, 20);
     for (const key of forbiddenKeys) {
       assert.equal(key in result, false, `${name} ${key}`);
-      assert.equal(key in result.children[0], false, `${name} nested ${key}`);
+      for (const child of result.children) assert.equal(key in child, false, `${name} nested ${key}`);
     }
-    assert.equal(result.children[0].sourceUri, 'file://relative');
-    assert.equal(result.label, 'failed at [本机路径已隐藏]');
+    assert.equal(result.children[0].sourceUri, logicalSourceUri);
+    for (const child of result.children.slice(1)) assert.equal(child.sourceUri, MASKED_PATH_PLACEHOLDER, name);
+    assert.equal(result.label, `failed at ${MASKED_PATH_PLACEHOLDER}`);
     assert.equal(result.bytes, bytes);
     assert.equal(result.buffer, buffer);
     assert.equal(payload.rootPath, 'private');
+    assert.deepEqual(payload.children.map(child => child.sourceUri), [logicalSourceUri, ...physicalSourceUris]);
   }
   assert.equal(await api.readRawMetadata('file://relative'), payload);
 });
