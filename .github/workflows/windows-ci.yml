@@ -41,7 +41,8 @@ jobs:
 
   verify:
     needs: changes
-    runs-on: windows-latest
+    # Keep native Electron builds on the same verified MSVC baseline as desktop CI.
+    runs-on: windows-2022
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -93,7 +94,8 @@ jobs:
   installer:
     needs: [changes, verify]
     if: needs.changes.outputs.installer == 'true'
-    runs-on: windows-latest
+    # Keep native Electron builds on the same verified MSVC baseline as desktop CI.
+    runs-on: windows-2022
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

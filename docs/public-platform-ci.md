@@ -11,3 +11,5 @@ Successful jobs upload unsigned unpacked desktop directories as `SoulForge-linux
 Public runners receive no private game corpus, mature-tool oracle artifacts, licensed KRAK unpacker/SDK, provider credentials or provider cost budget. Reports always mark those acceptance checks unavailable. Skipped, cancelled or absent public steps remain `not_run`; they never count as passed. Installed-app, clean-machine and installer acceptance are also outside this workflow.
 
 Workflow configuration and local fixture results do not prove hosted Windows or Linux execution. Only the actual matrix run and its attached reports establish those results.
+
+The separate `windows-ci.yml` public-check and installer jobs also select `windows-2022`. The 2026-10-03 `windows-latest` image found its Visual Studio 18 C++ installation, then failed in MSBuild's CL file-tracking task with `IndexOutOfRangeException` while rebuilding Electron SQLite. The same product source builds on the explicit desktop baseline. The public-check plan and installer lifecycle assertions remain enabled; Visual Studio 18 SQLite build compatibility is not claimed by this baseline selection.
