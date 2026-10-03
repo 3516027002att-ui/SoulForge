@@ -1,0 +1,127 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { resolve, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { runSuite } from './run-suite.mjs';
+import { validateInstalledManifest } from './installed-a-to-b.mjs';
+import * as installed from './installed-a-to-b.mjs';
+import { createHash } from 'node:crypto';
+
+const repositoryRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
+test('installed suite without actual A/B artifacts is explicitly blocked and never passes', async () => {
+  const base = join(repositoryRoot, 'node_modules/.cache/update-installed-tests');
+  await mkdir(base, { recursive: true });
+  const outputRoot = await mkdtemp(join(base, 'run-'));
+  try {
+    const report = await runSuite('installed', { repositoryRoot, outputRoot, installedConfigPath: '' });
+    assert.equal(report.status, 'blocked_environment');
+    assert.equal(report.cases[0].status, 'blocked');
+    assert.equal(report.cases[0].executed, false);
+    assert.match(report.blockers.join(' '), /actual.*A\/B|Windows/i);
+    assert.match(report.untestedClaims.join(' '), /automatic|自动/i);
+  } finally { await rm(outputRoot, { recursive: true, force: true }); }
+});
+
+async function manifestFixture() {
+  const base = join(repositoryRoot, 'node_modules/.cache/update-installed-tests'); await mkdir(base, { recursive: true });
+  const root = await mkdtemp(join(base, 'manifest-'));
+  const a = Buffer.alloc(64, 1), b = Buffer.alloc(64, 2); a.write('MZ'); b.write('MZ');
+  await writeFile(join(root, 'a.exe'), a); await writeFile(join(root, 'b.exe'), b);
+  const manifest = { schemaVersion: 1, execute: true, scope: 'unsigned-owned-identity-manual-nsis-a-to-b-same-source',
+    identity: { appId: 'com.soulforge.validation.0123456789abcdef', productName: 'SoulForge Validation 01234567', shortcutName: 'SoulForge Validation 01234567',
+      executableName: 'SoulForgeValidation-01234567', packageName: 'soulforge-validation-01234567' },
+    a: { path: join(root, 'a.exe'), version: '0.9.2-validation.1', sha256: createHash('sha256').update(a).digest('hex') },
+    b: { path: join(root, 'b.exe'), version: '0.9.2-validation.2', sha256: createHash('sha256').update(b).digest('hex') } };
+  const configs = {};
+  for (const label of ['a', 'b']) {
+    const config = { appId: manifest.identity.appId, productName: manifest.identity.productName, executableName: manifest.identity.executableName,
+      nsis: { shortcutName: manifest.identity.shortcutName, uninstallDisplayName: manifest.identity.productName },
+      extraMetadata: { name: manifest.identity.packageName, productName: manifest.identity.productName, version: manifest[label].version } };
+    const bytes = Buffer.from(JSON.stringify(config));
+    const path = join(root, `${label}.config.json`); await writeFile(path, bytes);
+    configs[label] = { path, sha256: createHash('sha256').update(bytes).digest('hex') };
+  }
+  const receipt = Buffer.from(JSON.stringify({ schemaVersion: 1, builderVersion: '26.16.1', sourceHead: 'a'.repeat(40), identity: manifest.identity, a: manifest.a, b: manifest.b, configs }));
+  manifest.buildReceiptPath = join(root, 'build-receipt.json'); manifest.buildReceiptSha256 = createHash('sha256').update(receipt).digest('hex');
+  await writeFile(manifest.buildReceiptPath, receipt);
+  return { root, manifest };
+}
+
+test('manifest refuses official identities, mismatched package identity and absent execution consent', async () => {
+  const { root, manifest } = await manifestFixture();
+  try {
+    assert.equal(await validateInstalledManifest(manifest), manifest); // validates input only; these are not NSIS artifacts and are never executed
+    for (const identity of [{ ...manifest.identity, appId: 'com.soulforge.app' }, { ...manifest.identity, productName: 'SoulForge' },
+      { ...manifest.identity, packageName: 'soulforge-validation-abcdef00' }]) {
+      await assert.rejects(() => validateInstalledManifest({ ...manifest, identity }), /IDENTITY_UNSAFE/);
+    }
+    await assert.rejects(() => validateInstalledManifest({ ...manifest, execute: false }), /APPROVAL_REQUIRED/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('manifest refuses unchanged/downgrade versions and changed or reused installer bytes', async () => {
+  const { root, manifest } = await manifestFixture();
+  try {
+    for (const version of [manifest.a.version, '0.9.1', 'bogus']) await assert.rejects(() => validateInstalledManifest({ ...manifest, b: { ...manifest.b, version } }), /VERSION_INVALID/);
+    await assert.rejects(() => validateInstalledManifest({ ...manifest, b: { ...manifest.b, sha256: '0'.repeat(64) } }), /ARTIFACT_INVALID/);
+    await assert.rejects(() => validateInstalledManifest({ ...manifest, b: { ...manifest.a, version: manifest.b.version } }), /same installer/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('explicit ASAR tool must have the approved hash before any installer can execute', async () => {
+  const { root, manifest } = await manifestFixture();
+  try {
+    await assert.rejects(() => validateInstalledManifest({ ...manifest, asarModulePath: import.meta.filename }), /TOOL_INVALID/);
+    await assert.rejects(() => validateInstalledManifest({ ...manifest, asarModulePath: import.meta.filename, asarModuleSha256: '0'.repeat(64) }), /TOOL_INVALID/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('approved artifact manifest must bind an actual builder receipt and matching config bytes', async () => {
+  const { root, manifest } = await manifestFixture();
+  try {
+    await assert.rejects(() => validateInstalledManifest({ ...manifest, buildReceiptPath: undefined }), /BUILD_RECEIPT/);
+    await writeFile(join(root, 'a.config.json'), '{}');
+    await assert.rejects(() => validateInstalledManifest(manifest), /BUILD_RECEIPT/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('registry matching includes versioned official names without including validation installations', () => {
+  assert.equal(typeof installed.registryDisplayMatches, 'function');
+  assert.equal(installed.registryDisplayMatches('SoulForge 0.9.2', 'SoulForge'), true);
+  assert.equal(installed.registryDisplayMatches('SoulForge', 'SoulForge'), true);
+  assert.equal(installed.registryDisplayMatches('SoulForge Validation 01234567', 'SoulForge'), false);
+  assert.equal(installed.registryDisplayMatches('SoulForge Validation 01234567 0.9.2-validation.1', 'SoulForge Validation 01234567'), true);
+});
+
+test('the actual finally cleanup removes only its empty owned scratch and refuses a different parent', async () => {
+  assert.equal(typeof installed.removeOwnedEmptyScratch, 'function');
+  const base = join(repositoryRoot, 'node_modules/.cache/update-installed-tests'); await mkdir(base, { recursive: true });
+  const parent = await mkdtemp(join(base, 'cleanup-')), scratch = await mkdtemp(join(parent, 'owned-'));
+  try {
+    await assert.rejects(() => installed.removeOwnedEmptyScratch(scratch, join(parent, 'other')), /parent|owned|outside/i);
+    await installed.removeOwnedEmptyScratch(scratch, parent);
+    await assert.rejects(() => import('node:fs/promises').then(fs => fs.lstat(scratch)), { code: 'ENOENT' });
+  } finally { await rm(parent, { recursive: true, force: true }); }
+});
+
+test('pre-execution PE guard rejects a formal or unverified installer even with owned manifest claims', async () => {
+  const { root, manifest } = await manifestFixture();
+  try {
+    const owned = ['a', 'b'].map(label => ({ path: manifest[label].path, productName: manifest.identity.productName }));
+    installed.assertInstallerProductNames(manifest, owned);
+    for (const productName of ['SoulForge', '', undefined]) {
+      assert.throws(() => installed.assertInstallerProductNames(manifest, [{ ...owned[0], productName }, owned[1]]), /BINARY_IDENTITY_UNSAFE/);
+    }
+    assert.throws(() => installed.assertInstallerProductNames(manifest, [owned[0]]), /BINARY_IDENTITY_UNSAFE/);
+    if (process.platform === 'win32') {
+      // Real read-only Windows PE metadata, never an installer execution.
+      const actual = await installed.readInstallerVersionInfo([process.execPath, process.execPath]);
+      assert.equal(actual.length, 2); assert.ok(actual[0].productName);
+      assert.throws(() => installed.assertInstallerProductNames({ ...manifest, a: { path: process.execPath }, b: { path: process.execPath } }, actual), /BINARY_IDENTITY_UNSAFE/);
+      const registry = await installed.registrySnapshot('SoulForge');
+      assert.ok(Array.isArray(registry));
+      assert.ok(registry.every(row => /^HKEY_/.test(row.key) && installed.registryDisplayMatches(row.displayName, 'SoulForge') && row.values));
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
