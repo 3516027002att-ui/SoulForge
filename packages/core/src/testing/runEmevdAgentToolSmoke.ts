@@ -565,7 +565,9 @@ const oversizedEventEnvelope = JSON.parse(oversizedEventResult.content) as {
 assert.equal(oversizedEventEnvelope.ok, false);
 assert.equal(oversizedEventEnvelope.data, undefined);
 assert.equal(oversizedEventEnvelope.error?.code, 'RESULT_EVENT_WINDOW_TOO_LARGE');
-assert.equal(oversizedEventEnvelope.error?.details?.sourceUri, 'file:///synthetic/oversized.emevd.dcx');
+assert.equal(oversizedEventEnvelope.error?.details?.sourceUri, '[本机路径已隐藏]');
+assert.equal(oversizedEventResult.content.includes('file:///synthetic/'), false,
+  'Physical file URIs must stay masked even in bounded-window error details; logical retry identity remains below.');
 assert.equal(oversizedEventEnvelope.error?.details?.sourcePath, 'synthetic/oversized.emevd.dcx');
 assert.equal(oversizedEventEnvelope.error?.details?.file, 'event/synthetic.emevd.dcx');
 assert.equal(oversizedEventEnvelope.error?.details?.sourceHash, 'a'.repeat(64));
