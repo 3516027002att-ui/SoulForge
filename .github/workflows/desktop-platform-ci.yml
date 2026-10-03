@@ -1,0 +1,178 @@
+name: desktop-platform-ci
+
+on:
+  push:
+    branches: [main, linux]
+  pull_request:
+    branches: [main, linux]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    name: Desktop ${{ matrix.runtime }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Electron43's supported build baseline; no namespace policy or SUID changes.
+          # This hosted image retires on2027-04-17 and needs replacement before then.
+          - os: ubuntu-22.04
+            runtime: linux-x64
+            bridge-script: bridge:publish:linux
+            bridge-executable: SoulForge.Bridge
+            builder-platform: linux
+            package-directory: linux-unpacked
+            headless: '1'
+          - os: windows-2022
+            runtime: win-x64
+            bridge-script: bridge:publish
+            bridge-executable: SoulForge.Bridge.exe
+            builder-platform: win
+            package-directory: win-unpacked
+            headless: '0'
+    defaults:
+      run:
+        shell: bash
+    env:
+      CI: 'true'
+      DOTNET_NOLOGO: 'true'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
+      SF_E2E_HEADLESS: ${{ matrix.headless }}
+      SOULFORGE_BUILD_TIMEOUT_MS: '900000'
+      SOULFORGE_SMOKE_TIMEOUT_MS: '120000'
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.22.0'
+          cache: npm
+      # Runner paths exist after scheduling; GITHUB_ENV makes them available to later actions.
+      - name: Configure job-owned SDK and workspace directories
+        run: |
+          printf 'DOTNET_INSTALL_DIR=%s/soulforge-dotnet\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'SF_E2E_WORKSPACE_STORAGE_ROOT=%s/soulforge-workspaces\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: '10.0.100'
+      - name: Install locked dependencies
+        id: install
+        run: npm ci
+      - name: Verify pinned runtime versions
+        id: tools
+        run: |
+          node --input-type=module -e 'import assert from "node:assert/strict"; import { readFileSync } from "node:fs"; assert.equal(process.versions.node, "22.22.0"); assert.equal(JSON.parse(readFileSync("node_modules/electron/package.json", "utf8")).version, "43.0.0");'
+          test "$(dotnet --version)" = "10.0.100"
+      - name: Check Bridge command projections
+        id: commands
+        run: |
+          npm run bridge:commands:check
+          npm run ipc:public:check
+      - name: Typecheck shared/core/desktop
+        id: typecheck
+        run: npm run typecheck
+      - name: Select preinstalled Linux C++ toolchain for Electron headers
+        if: runner.os == 'Linux'
+        run: |
+          clang-15 --version
+          clang++-15 --version
+          printf 'CC=clang-15\nCXX=clang++-15\n' >> "$GITHUB_ENV"
+      # Build only production bundles, avoiding legacy release/governance aggregates.
+      - name: Build production bundles and Electron native binding
+        id: build
+        run: |
+          npm run build -w @soulforge/shared
+          npm run build -w @soulforge/core
+          npm run build -w @soulforge/desktop
+      - name: Verify fresh Linux source launch before Bridge outputs exist
+        if: runner.os == 'Linux'
+        run: |
+          node --test packages/core/dist/bridge/bridgeSourceBuild.test.js packages/core/dist/bridge/runBridgeLaunch.test.js
+          node packages/core/dist/testing/verifyFreshBridgeSourceLaunch.js
+      - name: Run real C# Bridge tests
+        id: csharp
+        run: npm run test:bridge-csharp
+      - name: Publish matching-host self-contained Bridge
+        id: publish
+        run: |
+          npm run ${{ matrix.bridge-script }}
+          if [ "${{ matrix.runtime }}" = "win-x64" ]; then npm run launcher:build; fi
+      - name: Run deterministic Agent kernel and host fixtures
+        id: agent
+        run: |
+          npm test -w @soulforge/agent
+          node --test scripts/agent-shared-entry.fixture.mjs scripts/agent-headless.fixture.mjs scripts/agent-utility.fixture.mjs scripts/agent-kernel-comparison.fixture.mjs scripts/real-agent-evaluator.fixture.mjs
+          node --test scripts/agent-call-chain.fixture.mjs scripts/real-agent-harness.fixture.mjs scripts/agent-host-composition.fixture.mjs scripts/agent-cli-protocol.fixture.mjs scripts/agent-domain-service.fixture.mjs
+          node --test packages/core/dist/cli/localCliSession.storage.test.js packages/core/dist/storage/localApplicationData.test.js packages/core/dist/ai/tools/search_resources.test.js packages/core/dist/model-services/contextBroker.test.js
+          node packages/core/dist/testing/runEmevdAgentToolSmoke.js
+          node packages/core/dist/testing/runToolResultBudgetSmoke.js
+          node --test scripts/param-fixture-module-resolution.fixture.mjs scripts/param-source-binding.fixture.mjs scripts/container-child-inverse-source.fixture.mjs
+          # Only this source-bound comparison needs its declared public control; no full history gate.
+          git fetch --no-tags --depth=1 origin c4a8b158f935c35624f132850b068a8e02921f68
+          node --test scripts/agent-provider-experiment.fixture.mjs scripts/agent-owned-comparison-control.fixture.mjs
+      - name: Run native runtime and synthetic Bridge fixtures
+        id: native
+        env:
+          SOULFORGE_BRIDGE_PATH: ${{ github.workspace }}/bridge/SoulForge.Bridge/bin/Release/net10.0/${{ matrix.runtime }}/publish/${{ matrix.bridge-executable }}
+          SOULFORGE_BRIDGE_EXE: ${{ github.workspace }}/bridge/SoulForge.Bridge/bin/Release/net10.0/${{ matrix.runtime }}/publish/${{ matrix.bridge-executable }}
+        run: |
+          node --test scripts/tae-identity.fixture.mjs scripts/hks-native-platform.fixture.mjs scripts/bridge-linux-production.fixture.mjs scripts/native-build-environment.fixture.mjs
+          node --test scripts/owned-temporary-directory.test.mjs scripts/owned-process.test.mjs scripts/bridge-build-output-ownership.test.mjs scripts/doctor-publish.fixture.mjs
+          node scripts/verify-bridge-write-boundary-gate.mjs
+          node scripts/check.mjs --suite file:scripts/scene/map-warm-source-hash.fixture.mjs,file:scripts/scene/map-captured-source.fixture.mjs,file:scripts/scene/bnd-path-freshness.fixture.mjs,file:scripts/scene/map-uv-count.fixture.mjs,file:scripts/scene/map-json-byte-count.fixture.mjs --require-executed
+      - name: Run sandbox-preserving Electron database utility smoke
+        id: database
+        run: |
+          node --test scripts/desktop-test-build.test.mjs
+          node scripts/run-database-utility-smoke.mjs --production-binding
+      - name: Run renderer and sandbox-preserving native theme frame checks
+        id: theme
+        run: |
+          node --input-type=module -e 'import assert from "node:assert/strict"; import { statSync } from "node:fs"; for (const file of ["apps/desktop/out/main/index.js", "apps/desktop/out/preload/index.cjs", "apps/desktop/out/renderer/index.html"]) { const info = statSync(file); assert.ok(info.isFile() && info.size > 0, "Theme runtime artifact missing: " + file); }'
+          npm run test:renderer-unit
+          npm run test:three-scene-functional
+          node --test scripts/editor-loaded-comparison.fixture.mjs scripts/editor-diff-budget.fixture.mjs scripts/editor-save-observation.fixture.mjs scripts/script-native-refresh.fixture.mjs scripts/param-scalar-validation.fixture.mjs scripts/param-domain-service.fixture.mjs scripts/map-domain-service.fixture.mjs scripts/public-ipc-contract.fixture.mjs scripts/bridge-pool-routing.fixture.mjs scripts/scene/map-read-observation.test.mjs scripts/scene/map-request-timeline.test.mjs scripts/scene/map-post-return-observation.test.mjs scripts/scene/msb-diagnostic-pass-through.test.mjs scripts/action-domain-service.fixture.mjs scripts/asset-domain-service.fixture.mjs scripts/resource-domain-service.fixture.mjs scripts/text-domain-service.fixture.mjs scripts/raw-domain-service.fixture.mjs scripts/event-domain-service.fixture.mjs scripts/workspace-utility-lifecycle.fixture.mjs scripts/semantic-refresh-service.fixture.mjs scripts/workspace-domain-service.fixture.mjs scripts/scene/renderer-sanitizer.test.mjs scripts/scene/frame-submission-observation.test.mjs scripts/scene/scene-path-guard.test.mjs scripts/operation-domain-service.fixture.mjs scripts/operation-owner-receipts.fixture.mjs scripts/root-domain-composition.fixture.mjs scripts/character-resource-resolution.fixture.mjs scripts/workspace-fingerprint-projection.fixture.mjs
+          node --test scripts/spectral-themes.test.mjs scripts/spectral-field-runtime.test.mjs scripts/ci-public-report.test.mjs packages/shared/dist/path-sanitizer.test.js scripts/document-domain-service.fixture.mjs
+          node node_modules/@playwright/test/cli.js test -c apps/desktop/e2e/playwright/playwright.config.mjs native-frame-theme.spec.mjs editor-loaded-comparison.spec.mjs
+      - name: Build unsigned desktop package directory
+        id: package
+        if: ${{ !cancelled() && steps.commands.outcome == 'success' && steps.typecheck.outcome == 'success' && steps.build.outcome == 'success' && steps.publish.outcome == 'success' }}
+        working-directory: apps/desktop
+        run: npx --yes electron-builder@26.16.1 --${{ matrix.builder-platform }} --x64 --dir --publish never
+      # tar preserves executable modes inside the Linux artifact.
+      - name: Archive package directory
+        id: archive
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        run: |
+          mkdir -p output
+          tar -czf output/SoulForge-${{ matrix.runtime }}.tar.gz -C apps/desktop/release ${{ matrix.package-directory }}
+      - name: Report actual public outcomes and unavailable acceptance
+        if: always()
+        env:
+          CI_RUNTIME: ${{ matrix.runtime }}
+          CI_STEP_OUTCOMES: ${{ toJSON(steps) }}
+          CI_PACKAGE_ARCHIVE: output/SoulForge-${{ matrix.runtime }}.tar.gz
+          CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node scripts/ci-public-report.mjs
+      - name: Upload package and public verification report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: SoulForge-${{ matrix.runtime }}-${{ github.sha }}
+          path: |
+            output/SoulForge-${{ matrix.runtime }}.tar.gz
+            output/ci-public-${{ matrix.runtime }}.json
+          if-no-files-found: error
+          retention-days: 14

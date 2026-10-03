@@ -34,6 +34,7 @@ import type {
   ResourceJumpResult
 } from '../emevd/eventSourceNavigate.js';
 import type { EmevdEditorDocument } from '@soulforge/shared';
+import { readOrderedStyleSource } from '../styleSource.testSupport.js';
 
 // node 环境没有 window；组件 SSR 不读 window（CM 不在服务端挂载），但置空对象
 // 保持与 FmgWorkbenchPanel 测试一致的隔离姿态。
@@ -513,11 +514,16 @@ describe('S35 增量源（event-common-load.md §3.2：首帧前缀 + 按视口�
       join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'App.tsx'),
       'utf8'
     );
-    const css = readFileSync(
-      join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'styles.css'),
+    const loadedViewsSource = readFileSync(
+      join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'LoadedDocumentViews.tsx'),
       'utf8'
     );
-    assert.match(appSource, /className="event-source-host"/);
+    const css = readOrderedStyleSource(
+      join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'styles.css')
+    );
+    assert.match(appSource, /import\s*\{[^}]*EventEditorView[^}]*\}\s*from '\.\/app\/LoadedDocumentViews\.js'/);
+    assert.match(appSource, /<EventEditorView active=\{showEventWorkbench\} document=\{eventDocument\} onJumpResource=\{jumpToResource\} \/>/);
+    assert.match(loadedViewsSource, /className="event-source-host"/);
     assert.match(css, /\.viewer-content:has\(\.event-source-host:not\(\[hidden\]\)\)/);
     const hostRule = css.slice(
       css.indexOf('.event-source-host:not([hidden])'),

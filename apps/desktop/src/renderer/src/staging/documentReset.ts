@@ -61,13 +61,17 @@ export const DOCUMENT_STATE_SETTERS: Readonly<Record<DocumentFamily, readonly st
     // 请求，随 fmg 族清空避免残留到别的文本文件面板上误触发定位（App 在
     // switchToOpenTab 之后才下发，先清后设不冲突）。
     fmg: Object.freeze([
-      'setFmgEntries',
-      'setFmgSourceHash',
+      'setFmgEntriesState',
+      'setFmgResetEpoch',
+      'setFmgSourceHashState',
       'setFmgLive',
       'setTextCatalog',
       'setFmgRevealRequest'
     ]),
     param: Object.freeze([
+      // Domain callback ownership advances on reset, including an already-empty
+      // document. Old retained submission callbacks must not start a new write.
+      'setParamResetEpoch',
       'setParamRows',
       'setParamTypeName',
       'setParamSourceHash',
@@ -99,7 +103,7 @@ export const DOCUMENT_STATE_SETTERS: Readonly<Record<DocumentFamily, readonly st
     // EVENT-30B：EMEVD 编辑态收敛为单个 pendingTab（工作台内部自持 tabs/dirty/
     // draft/per-tab EditorState）。复位即清空 pendingTab；工作台收到 null 后回到
     // 空态，不会把上一个事件的源码残留到新资源旁边。
-    emevd: Object.freeze(['setEventPendingTab', 'setEventOpening', 'setEventSourcePreview']),
+    emevd: Object.freeze(['setEventPendingTab', 'setEventOpening', 'setEventSourcePreview', 'setEventResetEpoch']),
     msb: Object.freeze([
       'setMsbParts',
       'setMsbModels',
@@ -108,7 +112,8 @@ export const DOCUMENT_STATE_SETTERS: Readonly<Record<DocumentFamily, readonly st
       'setMsbRoutes',
       'setMsbSourceCounts',
       'setMsbLive',
-      'setMsbSourceHash',
+      'setMsbSourceHashState',
+      'setMsbResetEpoch',
       // S15/S19 失败面：跨资源族的「最近一次资源打开失败」记录。挂在 msb 族下
       // 只是登记槽位，复位动作会把它一并清空——切换工作区/文件后，旧资源的
       // 失败不得再进工作台显示或 Agent 元数据。
@@ -174,12 +179,16 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   setSessionMeta: '会话元数据，同上',
   setBaseRootChoice: '目录选择，跨工作区保留是有意的',
   setOperationHistory: '写入历史，按工作区刷新而非清空',
+  setChangeResetEpoch: '暂存/历史命令的工作区归属代次，由 workspace 安装废弃旧未开始请求，不是资源文档内容',
   setRollbackInFlight: '回滚请求锁由回滚函数的 finally 清理，不属于资源文档态',
   setAnalysis: '索引摘要，openWorkspace 自己赋值',
+  setAnalysisRequest: '工作区安装后的后台分析请求；由 mountWorkspace 替换，mount generation、bridge lifetime、session identity 和 effect cleanup 拒绝旧任务，切换资源选择无需复位',
   setTools: 'AI 工具清单，与资源无关',
   setSelectedFile: '选中文件本身，不是文档态',
   setPreview: '通用预览，非资源族专属',
   setEditText: '文本编辑器内容，纯文本路径',
+  setEditTextState: 'Resource owner 的私有文本状态，公开编辑入口仍由当前文档生命周期限定',
+  setResourceOwnerEpoch: 'Resource 命令生命周期代次，由资源reset/选择同步推进，不是可保存文档内容',
   setLastSavedText: '同上',
   setMsgRows: 'FMG 文本表行，由 extractMsgRows 从 preview 派生',
   setSaveDiagnostics: '保存诊断，随保存动作更新',

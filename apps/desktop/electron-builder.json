@@ -1,6 +1,7 @@
 {
   "appId": "com.soulforge.app",
   "productName": "SoulForge",
+  "npmRebuild": false,
   "copyright": "Copyright (c) SoulForge contributors",
   "directories": {
     "output": "release",
@@ -83,20 +84,6 @@
       ]
     },
     {
-      "from": "../../bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Bridge.exe",
-      "to": "bridge/SoulForge.Bridge.exe",
-      "filter": [
-        "SoulForge.Bridge.exe"
-      ]
-    },
-    {
-      "from": "../../bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Hksc.Native.dll",
-      "to": "bridge/SoulForge.Hksc.Native.dll",
-      "filter": [
-        "SoulForge.Hksc.Native.dll"
-      ]
-    },
-    {
       "from": "../../LICENSE",
       "to": "LICENSE",
       "filter": [
@@ -122,10 +109,37 @@
     "target": [
       {
         "target": "nsis",
-        "arch": ["x64"]
+        "arch": [
+          "x64"
+        ]
       }
     ],
-    "artifactName": "${productName}-${version}-${arch}.${ext}"
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "extraResources": [
+      {
+        "from": "../../bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Bridge.exe",
+        "to": "bridge/SoulForge.Bridge.exe",
+        "filter": [
+          "SoulForge.Bridge.exe"
+        ]
+      },
+      {
+        "from": "../../bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Hksc.Native.dll",
+        "to": "bridge/SoulForge.Hksc.Native.dll",
+        "filter": [
+          "SoulForge.Hksc.Native.dll"
+        ]
+      },
+      {
+        "from": "../../bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/runtime-notices",
+        "to": "bridge/runtime-notices",
+        "filter": [
+          "LICENSE.txt",
+          "THIRD-PARTY-NOTICES.txt",
+          "runtime-notices.json"
+        ]
+      }
+    ]
   },
   "nsis": {
     "oneClick": false,
@@ -135,5 +149,42 @@
     "shortcutName": "SoulForge"
   },
   "asar": true,
-  "compression": "normal"
+  "compression": "normal",
+  "linux": {
+    "target": [
+      {
+        "target": "dir",
+        "arch": [
+          "x64"
+        ]
+      }
+    ],
+    "category": "Game",
+    "executableName": "soulforge",
+    "extraResources": [
+      {
+        "from": "../../bridge/SoulForge.Bridge/bin/Release/net10.0/linux-x64/publish/SoulForge.Bridge",
+        "to": "bridge/SoulForge.Bridge",
+        "filter": [
+          "SoulForge.Bridge"
+        ]
+      },
+      {
+        "from": "../../bridge/SoulForge.Bridge/bin/Release/net10.0/linux-x64/publish/libSoulForge.Hksc.Native.so",
+        "to": "bridge/libSoulForge.Hksc.Native.so",
+        "filter": [
+          "libSoulForge.Hksc.Native.so"
+        ]
+      },
+      {
+        "from": "../../bridge/SoulForge.Bridge/bin/Release/net10.0/linux-x64/publish/runtime-notices",
+        "to": "bridge/runtime-notices",
+        "filter": [
+          "LICENSE.txt",
+          "THIRD-PARTY-NOTICES.txt",
+          "runtime-notices.json"
+        ]
+      }
+    ]
+  }
 }

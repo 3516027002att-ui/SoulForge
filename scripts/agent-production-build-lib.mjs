@@ -3,6 +3,12 @@ import { execFile } from 'node:child_process';
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { dirname, join, relative, resolve } from 'node:path';
+import { bridgeBuildTarget } from './bridge-production-build.mjs';
+
+export function agentArtifactBridgeTarget(options = {}) {
+  return bridgeBuildTarget({ runtimeIdentifier: options.runtimeIdentifier
+    ?? (process.platform === 'linux' && process.arch === 'x64' ? 'linux-x64' : 'win-x64') });
+}
 
 export const AGENT_PRODUCTION_BUILD_SCHEMA_VERSION = 1;
 export const AGENT_PRODUCTION_BUILD_MANIFEST = 'apps/desktop/out/agent-production-build.json';
@@ -15,6 +21,7 @@ const execFileAsync = promisify(execFile);
 const SOURCE_DIRECTORIES = [
   'packages/shared/src',
   'packages/core/src',
+  'packages/agent/src',
   'apps/desktop/src'
 ];
 
@@ -28,19 +35,20 @@ const SOURCE_FILES = [
   'packages/shared/tsconfig.json',
   'packages/core/package.json',
   'packages/core/tsconfig.json',
+  'packages/agent/package.json',
   'apps/desktop/package.json',
   'apps/desktop/tsconfig.json',
   'apps/desktop/electron.vite.config.ts'
 ];
 
+const NATIVE_RUNTIME_FILES = [
+  'apps/desktop/.native/better_sqlite3.node',
+  'apps/desktop/.native/better_sqlite3.json'
+];
 const OUTPUT_DIRECTORIES = [
   'apps/desktop/out/main',
   'apps/desktop/out/preload',
-  'apps/desktop/out/renderer',
-  // Electron's production main loads the ABI-matched SQLite binding from
-  // this directory at runtime; a snapshot without it fails during the first
-  // workspace.scan despite having a complete out/ tree.
-  'apps/desktop/.native'
+  'apps/desktop/out/renderer'
 ];
 
 /**
@@ -49,14 +57,13 @@ const OUTPUT_DIRECTORIES = [
  * main process resolves its Bridge project by walking up from cwd/moduleDir.
  */
 const SNAPSHOT_DIRECTORY_PATHS = [
-  'apps/desktop/.native',
   'apps/desktop/out/main',
   'apps/desktop/out/preload',
-  'apps/desktop/out/renderer',
-  'bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish'
+  'apps/desktop/out/renderer'
 ];
 
 const SNAPSHOT_FILE_PATHS = [
+  ...NATIVE_RUNTIME_FILES,
   AGENT_PRODUCTION_BUILD_MANIFEST,
   'apps/desktop/out/release-compliance.json',
   'apps/desktop/e2e/playwright/production-main.mjs',
@@ -147,10 +154,13 @@ async function expandInputs(repoRoot, directories, files = []) {
 export async function computeAgentProductionBuildFingerprint(repoRoot) {
   const [sourcePaths, outputPaths] = await Promise.all([
     expandInputs(repoRoot, SOURCE_DIRECTORIES, SOURCE_FILES),
-    expandInputs(repoRoot, OUTPUT_DIRECTORIES)
+    expandInputs(repoRoot, OUTPUT_DIRECTORIES, NATIVE_RUNTIME_FILES)
   ]);
   const [source, output] = await Promise.all([
-    fingerprintFiles(repoRoot, sourcePaths),
+    fingerprintFiles(repoRoot, sourcePaths.filter((file) => {
+      const path = portablePath(relative(repoRoot, file));
+      return !path.startsWith('packages/agent/src/') || !/\.(test|spec)\.mjs$/.test(path);
+    })),
     fingerprintFiles(repoRoot, outputPaths)
   ]);
   return { source, output };
@@ -242,9 +252,10 @@ async function snapshotFileList(snapshotRoot) {
     .sort((left, right) => left.localeCompare(right, 'en'));
 }
 
-async function computeSnapshotRuntimeRaceFingerprint(root) {
-  const bridgePublish = 'bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish';
-  const paths = await expandInputs(root, [bridgePublish, 'apps/desktop/.native'], [
+async function computeSnapshotRuntimeRaceFingerprint(root, target) {
+  const bridgePublish = target.publish;
+  const paths = await expandInputs(root, [bridgePublish], [
+    ...NATIVE_RUNTIME_FILES,
     'apps/desktop/e2e/playwright/production-main.mjs',
     'scripts/map-native-timing-aggregate.mjs',
     'scripts/character-native-timing-aggregate.mjs',
@@ -311,9 +322,13 @@ export async function assertAgentProductionBuildFresh(repoRoot) {
  */
 export async function createAgentProductionArtifactSnapshot(repoRoot, options = {}) {
   const root = resolve(repoRoot);
+  const target = agentArtifactBridgeTarget(options);
+  const snapshotDirectories = [...SNAPSHOT_DIRECTORY_PATHS, target.publish];
   const fresh = await assertAgentProductionBuildFresh(root);
   const requiredSources = [
-    ...SNAPSHOT_DIRECTORY_PATHS,
+    // Leaf lstat does not detect a junction at its parent runtime root.
+    'apps/desktop/.native',
+    ...snapshotDirectories,
     ...SNAPSHOT_FILE_PATHS
   ];
   for (const path of requiredSources) {
@@ -321,7 +336,7 @@ export async function createAgentProductionArtifactSnapshot(repoRoot, options = 
     const metadata = await lstat(absolute);
     if (metadata.isSymbolicLink()) throw new Error(`production artifact source 是符号链接：${path}`);
   }
-  const runtimeBefore = await computeSnapshotRuntimeRaceFingerprint(root);
+  const runtimeBefore = await computeSnapshotRuntimeRaceFingerprint(root, target);
 
   const parent = resolve(root, options.parent ?? AGENT_PRODUCTION_ARTIFACT_SNAPSHOT_PARENT);
   await mkdir(parent, { recursive: true });
@@ -330,7 +345,7 @@ export async function createAgentProductionArtifactSnapshot(repoRoot, options = 
   const stagingRoot = await mkdtemp(join(parent, `${label}-${stamp}-`));
 
   try {
-    for (const source of SNAPSHOT_DIRECTORY_PATHS) {
+    for (const source of snapshotDirectories) {
       await copySnapshotPath(root, stagingRoot, { source, target: source });
     }
     for (const source of SNAPSHOT_FILE_PATHS) {
@@ -359,7 +374,7 @@ export async function createAgentProductionArtifactSnapshot(repoRoot, options = 
         }
       );
     }
-    const runtimeAfter = await computeSnapshotRuntimeRaceFingerprint(root);
+    const runtimeAfter = await computeSnapshotRuntimeRaceFingerprint(root, target);
     if (runtimeAfter.sha256 !== runtimeBefore.sha256) {
       throw staleBuildError(
         'production artifact snapshot 捕获期间 production harness 或 Bridge publish 发生变化；已拒绝混版快照。',
@@ -396,7 +411,8 @@ export async function createAgentProductionArtifactSnapshot(repoRoot, options = 
         outRoot: 'apps/desktop/out',
         productionMain: 'apps/desktop/e2e/playwright/production-main.mjs',
         bridgeProject: 'bridge/SoulForge.Bridge/SoulForge.Bridge.csproj',
-        bridgeExecutable: 'bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Bridge.exe',
+        bridgeExecutable: target.executable,
+        bridgeRuntimeIdentifier: target.runtimeIdentifier,
         systemPrompt: 'prompt/system.md',
         mutter: hasMutter ? OPTIONAL_SNAPSHOT_FILE_PATHS[0] : null
       },

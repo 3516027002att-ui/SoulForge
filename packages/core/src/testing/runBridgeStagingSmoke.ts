@@ -1,4 +1,5 @@
-import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { stageBridgeOutput } from '../editing/bridgeStaging.js';

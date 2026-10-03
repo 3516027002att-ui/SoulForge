@@ -426,6 +426,7 @@ async function mainInWorkspace(root: string): Promise<void> {
     entryUri: childUri,
     store,
     session,
+    backupBaseDir: join(root,'backups'),
     confirmation: createConfirmationReceipt({
       subjects: [`ROLLBACK_RESOURCE_ENTRY:${success.opId!}:${childUri}`],
       riskLevel: 'high',
@@ -433,6 +434,7 @@ async function mainInWorkspace(root: string): Promise<void> {
     })
   });
   assert(rb.ok, `rollback must work: ${rb.diagnostics.map((d) => d.code).join(',')}`);
+  assert(rb.record?.backupRoot?.startsWith(join(root,'backups')), 'rollback backup must remain under the test-owned temporary workspace');
   assert((await readFile(nestedPath)).equals(nestedDcx.bytes!), 'rollback restores container bytes');
   assert(rb.record?.rollbackScope === 'resource_entry', 'resource entry rollback scope');
   assert(rb.record?.rollbackTargetUri === childUri, 'resource entry rollback target');

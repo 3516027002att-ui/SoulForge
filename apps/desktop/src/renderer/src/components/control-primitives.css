@@ -1,0 +1,58 @@
+
+/* ── 通用小部件 ── */
+.pill {
+  font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+  color: var(--ink-1); background: var(--forge-2); white-space: nowrap;
+}
+.pill--ok { color: var(--ok); background: var(--ok-soft); }
+.pill--warn { color: var(--warn); background: var(--warn-soft); }
+.pill--danger { color: var(--danger-text); background: var(--danger-soft); }
+.pill--accent { color: var(--ember-text); background: var(--ember-soft); }
+
+.btn {
+  padding: 8px 16px; font-size: 12.5px; font-weight: 550; border-radius: var(--radius-m);
+  border: 1px solid transparent;
+  transition: background var(--dur-micro), border-color var(--dur-micro), color var(--dur-micro), filter var(--dur-micro);
+}
+.btn--primary { color: var(--on-primary); background: var(--primary-fill); }
+.btn--primary:hover { background: var(--primary-fill-hover); }
+.btn--ghost { color: var(--ink-1); border-color: var(--line-strong); }
+.btn--ghost:hover { background: var(--forge-hover); color: var(--ink-0); }
+.btn--danger { color: var(--danger-text); border-color: var(--danger); }
+.btn--danger:hover { background: var(--danger-soft); }
+.btn--sm { padding: 4px 12px; font-size: 12px; }
+.btn:disabled { opacity: .45; pointer-events: none; }
+
+.empty-hint { color: var(--ink-3); font-size: 12px; padding: 16px 8px; text-align: center; }
+
+/* 无 class 按钮的统一基线（编辑器面板内的功能按钮） */
+button:not([class]),
+button[class=""] {
+  padding: 4px 12px; font-size: 12px; font-weight: 550;
+  color: var(--ink-1); background: var(--forge-2);
+  border: 1px solid var(--line); border-radius: var(--radius-m);
+  transition: background var(--dur-micro), border-color var(--dur-micro), color var(--dur-micro);
+}
+button:not([class]):hover,
+button[class=""]:hover { background: var(--forge-3); border-color: var(--line-strong); color: var(--ink-0); }
+button:not([class]):disabled,
+button[class=""]:disabled { opacity: .45; pointer-events: none; }
+/* 面板内 tab 切换按钮的选中态（WorkbenchOps / FLVER 等） */
+.viewer-content button.active {
+  color: var(--ember-text); background: var(--ember-soft);
+  border-color: color-mix(in oklch, var(--ember), transparent 55%);
+}
+
+/* 输入控件基线 */
+input, textarea, select {
+  background: var(--forge-0); border: 1px solid var(--line); border-radius: var(--radius-m);
+  color: var(--ink-0); outline: none;
+  transition: border-color var(--dur-micro), box-shadow var(--dur-micro);
+}
+input:focus, textarea:focus, select:focus {
+  border-color: var(--ember); box-shadow: 0 0 0 3px var(--ember-soft);
+}
+select { padding: 5px 8px; font-size: 12px; }
+select:disabled { opacity: .6; }
+textarea { user-select: text; }
+input::placeholder, textarea::placeholder { color: var(--ink-3); }

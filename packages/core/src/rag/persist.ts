@@ -1,6 +1,6 @@
 import type { RagChunk, RagCorpus, ReferenceEdge } from '@soulforge/shared';
 import type { WorkspaceDataRepository } from '../storage/workspaceDataRepository.js';
-import { createRagCorpus } from './chunkBuilder.js';
+import { createRagCorpus, ragPersistenceChunks } from './chunkBuilder.js';
 import { invalidateRetrievalCache } from './retrievalScope.js';
 
 export interface RagChunkDelta {
@@ -16,7 +16,7 @@ const PERSIST_BATCH_SIZE = 512;
  * this to send only changed rows instead of the complete workspace corpus.
  */
 export function diffRagCorpusBySource(previous: RagCorpus | null | undefined, next: RagCorpus): RagChunkDelta[] {
-  const oldChunks = previous?.chunks ?? [];
+  const oldChunks = previous ? ragPersistenceChunks(previous) : [];
   const oldById = new Map(oldChunks.map((chunk) => [chunk.chunkId, chunk] as const));
   const nextById = new Map(next.chunks.map((chunk) => [chunk.chunkId, chunk] as const));
   const oldBySource = groupChunksBySource(oldChunks);
@@ -52,7 +52,9 @@ function groupChunksBySource(chunks: readonly RagChunk[]): Map<string, RagChunk[
 
 export function persistRagCorpus(repository: WorkspaceDataRepository, corpus: RagCorpus): void {
   const previous = loadRagCorpus(repository, corpus.workspaceId);
-  const deltas = diffRagCorpusBySource(previous, corpus);
+  // Corpus hydration hides stale parser identities; the delta still needs
+  // their durable rows so a refreshed source removes old SQLite/FTS entries.
+  const deltas = diffRagCorpusBySource({ ...previous, chunks: repository.loadRagChunks() }, corpus);
   for (const delta of deltas) {
     for (let dStart = 0; dStart < delta.deletedChunkIds.length; dStart += PERSIST_BATCH_SIZE) {
       repository.mergeRagChunkDelta({

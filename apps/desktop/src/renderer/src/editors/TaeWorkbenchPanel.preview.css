@@ -1,0 +1,66 @@
+
+
+/* S17：动作预览右栏的 3D 视口宿主（FlverViewer 撑满列宽）。
+   问题4-A：预览区（.tae-preview-body）吃满栏高——FlverViewer 高度跟栏走，不写死
+   300px；完整模型（全部网格）拼进同一个 viewer，叠加字不裁切。 */
+.workbench__column-body:has(> .tae-preview-body) {
+  display: flex; flex-direction: column; overflow: hidden; min-width: 0; min-height: 0;
+}
+.tae-preview-body {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.tae-preview__viewport {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 120px;
+  position: relative;
+  overflow: hidden;
+}
+.tae-preview__viewport > div { position: absolute; inset: 0; min-width: 0; min-height: 0; }
+.flver-viewer__skeleton-toggle {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  padding: 3px 8px;
+  border: 1px solid rgba(159, 208, 255, 0.45);
+  border-radius: var(--radius-s, 3px);
+  background: rgba(8, 12, 18, 0.72);
+  color: #c7e2ff;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.flver-viewer__skeleton-toggle:hover { background: rgba(24, 42, 62, 0.9); }
+.flver-viewer__skeleton-toggle[aria-pressed='true'] {
+  border-color: rgba(255, 204, 102, 0.8);
+  color: #ffdc91;
+}
+
+.wb-row.is-triggering:not([aria-selected='true']) {
+  background: var(--ember-soft);
+  border-left-color: var(--ember);
+}
+
+/* 问题4-C：词条详情收在 Events 栏下半（可关抽屉），不占整条 workbench footer。
+   起始帧/结束帧只留一套（主单位帧，旁边小字 ≈ 秒）。 */
+.tae-event-detail {
+  margin: 8px 8px 4px; padding: 8px;
+  border: 1px solid var(--line); border-radius: var(--radius-m);
+  background: var(--forge-1);
+}
+.tae-event-detail__header {
+  display: flex; align-items: center; gap: 8px;
+}
+.tae-event-detail__close {
+  flex: none; margin-left: auto; padding: 1px 8px;
+  border: 1px solid var(--line); border-radius: var(--radius-s, 3px);
+  background: transparent; color: var(--ink-2); font-size: 14px; line-height: 1;
+  cursor: pointer;
+}
+.tae-event-detail__close:hover { color: var(--ink-0); border-color: var(--ember); }

@@ -1,0 +1,8 @@
+
+/* browser-preview 表面降级提示 */
+.runtime-notice {
+  flex: none; margin-bottom: 8px; padding: 7px 10px;
+  font-size: 11.5px; line-height: 1.5; color: var(--warn);
+  background: var(--warn-soft); border: 1px solid color-mix(in oklch, var(--warn), transparent 60%);
+  border-radius: var(--radius-m);
+}

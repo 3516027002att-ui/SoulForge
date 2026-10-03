@@ -15,7 +15,10 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { delimiter, dirname, resolve } from 'node:path';
-import { SILENT_ON_SUCCESS } from './tiers.mjs';
+import { existsSync, realpathSync } from 'node:fs';
+// TypeScript's successful checker is intentionally silent. Test entries must
+// still provide execution evidence; there is no per-suite registration table.
+const SILENT_ON_SUCCESS = Object.freeze({typecheck:true});
 
 /**
  * 超时时杀掉整棵进程树，而不只是直接子进程。
@@ -191,6 +194,63 @@ export function detectSkipSignals(stdout, stderr = '') {
   const skippedLegs = [];
   let wholeSkipped = false;
 
+  // Node's TAP and spec reporters use stable terminal counts rather than JSON.
+  // Require a complete summary block so ordinary prose mentioning a skip or
+  // a fixture's quoted '# tests' text cannot masquerade as execution evidence.
+  const nodeSummaries=[];
+  for(const source of [stdout,stderr]){
+    let summary=null;
+    for(const line of (source??'').replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu,'').split(/\r?\n/u)){
+      const match=/^(?:#\s*|ℹ\s+)(tests|pass|fail|cancelled|skipped|todo)\s+(\d+)\s*$/u.exec(line);
+      if(!match)continue;
+      if(match[1]==='tests')summary={tests:Number(match[2])};
+      else if(summary)summary[match[1]]=Number(match[2]);
+      if(summary&&['tests','pass','fail','cancelled','skipped','todo'].every(key=>Number.isSafeInteger(summary[key]))){nodeSummaries.push(summary);summary=null;}
+    }
+  }
+  if(nodeSummaries.length){
+    const executed=nodeSummaries.reduce((sum,item)=>sum+item.pass+item.fail+item.cancelled,0);
+    const skipped=nodeSummaries.reduce((sum,item)=>sum+item.skipped+item.todo,0);
+    if(executed===0){wholeSkipped=true;skippedLegs.push('node-test:no-executed-tests');}
+    else if(skipped>0)skippedLegs.push(`node-test:${skipped}-unverified-tests`);
+  }
+
+  // Playwright's list reporter emits counts rather than JSON. Bind terminal
+  // counts to its announced test total; isolated skip prose is not evidence.
+  const playwrightSummaries = [];
+  let incompletePlaywright = false;
+  for (const source of [stdout, stderr]) {
+    let summary = null;
+    const finishSummary = () => {
+      if (!summary) return;
+      const counted = Object.values(summary.counts).reduce((sum, value) => sum + value, 0);
+      if (!summary.invalid && Number.isSafeInteger(summary.total) && counted === summary.total) playwrightSummaries.push(summary.counts);
+      else incompletePlaywright = true;
+      summary = null;
+    };
+    for (const line of (source ?? '').replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '').split(/\r?\n/u)) {
+      const start = /^Running (\d+) tests? using \d+ workers?(?:, shard \d+ of \d+)?$/u.exec(line);
+      if (start) {
+        finishSummary();
+        summary = {total:Number(start[1]), counts:{}};
+        continue;
+      }
+      const count = /^  (\d+) (passed|skipped|did not run|failed|flaky|interrupted)(?: \([^\r\n]+\))?\s*$/u.exec(line);
+      if (!summary || !count) continue;
+      if (Object.hasOwn(summary.counts, count[2]) || !Number.isSafeInteger(Number(count[1]))) summary.invalid = true;
+      else summary.counts[count[2]] = Number(count[1]);
+    }
+    finishSummary();
+  }
+  if (playwrightSummaries.length || incompletePlaywright) {
+    const executed = playwrightSummaries.reduce((sum, counts) => sum + (counts.passed ?? 0)
+      + (counts.failed ?? 0) + (counts.flaky ?? 0) + (counts.interrupted ?? 0), 0);
+    const skipped = playwrightSummaries.reduce((sum, counts) => sum + (counts.skipped ?? 0) + (counts['did not run'] ?? 0), 0);
+    if (executed === 0) { wholeSkipped = true; skippedLegs.push('playwright:no-executed-tests'); }
+    else if (skipped > 0) skippedLegs.push(`playwright:${skipped}-unverified-tests`);
+    if (incompletePlaywright) skippedLegs.push('playwright:incomplete-summary');
+  }
+
   for (const source of [stdout, stderr]) {
     if (typeof source !== 'string' || source.length === 0) continue;
     for (const candidate of extractTopLevelJsonValues(source)) {
@@ -277,8 +337,18 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, op
     const npmArgs = ['run', scriptName, '--silent', ...(extraArgs.length ? ['--', ...extraArgs] : [])];
     // 始终用 process.execPath 执行 JS 入口，不依赖 shell 解析 `npm`：
     // Windows 下 npm 是 .cmd，spawn 不带 shell 时无法直接执行。
-    const npmCli = process.env.npm_execpath?.trim()
-      || resolve(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
+    const nodeDir = dirname(process.execPath);
+    const npmCandidates = [process.env.npm_execpath?.trim(),
+      resolve(nodeDir,'node_modules/npm/bin/npm-cli.js'),
+      resolve(nodeDir,'../lib/node_modules/npm/bin/npm-cli.js')];
+    for (const directory of (process.env.PATH ?? '').split(delimiter)) {
+      const shim = resolve(directory,process.platform === 'win32' ? 'npm.cmd':'npm');
+      if (existsSync(shim) && process.platform !== 'win32') {
+        try {npmCandidates.push(realpathSync(shim));} catch {}
+      }
+    }
+    const npmCli = npmCandidates.find(path => path && existsSync(path))
+      ?? resolve(nodeDir,'node_modules/npm/bin/npm-cli.js');
     const directArgs = !operation ? [npmCli, ...npmArgs]
       : operation.command === 'npm' ? [npmCli, ...operation.args]
         : operation.command === 'tsc'
@@ -289,6 +359,9 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, op
       : directArgs;
     const cwd = operation?.cwd ?? repoRoot;
     const childEnv = { ...process.env, ...env, ...operation?.env };
+    // Independent checks must not inherit node:test's private child reporter
+    // channel; that would suppress the summary used as execution evidence.
+    delete childEnv.NODE_TEST_CONTEXT;
     // npm normally supplies local binaries on PATH. Expanded node commands may
     // invoke them too, so retain that workspace/root lookup without using a shell.
     const pathKey = Object.keys(childEnv).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
@@ -333,7 +406,9 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, op
       clearTimeout(timer);
       const { outcome, skippedLegs } = timedOut
         ? { outcome: OUTCOME.FAILED, skippedLegs: [] }
-        : classifyOutcome(exitCode, stdout, stderr, operation?.command === 'tsc' ? 'typecheck' : scriptName);
+        : operation?.validation === false
+          ? { outcome: exitCode === 0 ? OUTCOME.PASSED : OUTCOME.FAILED, skippedLegs: [] }
+          : classifyOutcome(exitCode, stdout, stderr, operation?.command === 'tsc' ? 'typecheck' : scriptName);
       resolvePromise({
         scriptName,
         outcome,
@@ -367,14 +442,15 @@ export async function runPlannedSuite({ repoRoot, entry, timeoutMs, cache, injec
     }
     steps.push({ key: operation.key, command: operation.command, args: operation.args, cwd: operation.cwd,
       outcome: result.outcome, execution: cached ? 'reused' : 'executed',
+      validation: operation.validation ?? (operation.kind !== 'prepare'),
       durationMs: cached ? 0 : result.durationMs, ...(cached ? { reusedFrom: cached.reusedFrom } : {}) });
     outputs.push(result);
     if (result.exitCode !== 0 || result.timedOut) break;
   }
   const failed = outputs.find((r) => r.outcome === OUTCOME.FAILED);
-  const skipped = outputs.filter((r) => r.outcome === OUTCOME.SKIPPED);
-  const partial = outputs.some((r) => r.outcome === OUTCOME.PARTIAL);
-  const testOutputs = outputs.filter((_, i) => entry.steps[i].kind !== 'prepare');
+  const testOutputs = outputs.filter((_, i) => entry.steps[i].validation ?? (entry.steps[i].kind !== 'prepare'));
+  const skipped = testOutputs.filter((r) => r.outcome === OUTCOME.SKIPPED);
+  const partial = testOutputs.some((r) => r.outcome === OUTCOME.PARTIAL);
   const allSkipped = testOutputs.length > 0 && testOutputs.every((r) => r.outcome === OUTCOME.SKIPPED);
   return {
     scriptName: entry.scriptName,
@@ -382,7 +458,7 @@ export async function runPlannedSuite({ repoRoot, entry, timeoutMs, cache, injec
       : skipped.length || partial ? OUTCOME.PARTIAL : OUTCOME.PASSED,
     exitCode: failed ? failed.exitCode : 0,
     durationMs: Date.now() - startedAt,
-    skippedLegs: outputs.flatMap((r, i) => r.outcome === OUTCOME.SKIPPED || r.outcome === OUTCOME.PARTIAL
+    skippedLegs: outputs.flatMap((r, i) => steps[i].validation && (r.outcome === OUTCOME.SKIPPED || r.outcome === OUTCOME.PARTIAL)
       ? [`${steps[i].key}:${r.skippedLegs.join(',') || r.outcome}`] : []),
     ...(failed?.timedOut ? { timedOut: true } : {}),
     ...(failed?.spawnError ? { spawnError: failed.spawnError } : {}),

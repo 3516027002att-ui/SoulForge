@@ -95,7 +95,15 @@ const REQUIRED_SECURITY_CHANNELS = Object.freeze([
 ]);
 
 const main = await observeMainSurface();
-const preload = await observePreloadSurface();
+const PRELOAD_PATH_PROBE = {
+  sourceUri: 'file://chr/c0000.anibnd.dcx',
+  relativePath: 'chr/c0000.anibnd.dcx',
+  documentation: 'https://example.com/resources/chr',
+  rootPath: '/home/user/mod/file',
+  diagnostics: [{ code: 'FIXTURE_PATH_DIAGNOSTIC', message: 'failed /home/user/mod/file and /tmp/sf/a.fmg and file:///home/user/a',
+    details: { nested: { hint: '/tmp/sf/a.fmg', physicalUri: 'file:///home/user/a' } } }]
+};
+const preload = await observePreloadSurface({ invokeResult: PRELOAD_PATH_PROBE });
 const assert = createAssertions(LABEL);
 
 /* ---- 1. BrowserWindow 的 webPreferences：断言真实收到的对象 ---------------
@@ -182,7 +190,9 @@ try {
 }
 
 const SENSITIVE_PROBE = {
-  sourceUri: 'file:///workspace/a.fmg',
+  sourceUri: 'file://chr/c0000.anibnd.dcx',
+  relativePath: 'chr/c0000.anibnd.dcx',
+  documentation: 'https://example.com/resources/chr',
   absolutePath: 'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro\\a.fmg',
   sourcePath: 'D:\\workspace\\mod\\a.fmg',
   workspaceRoot: 'D:\\workspace\\mod',
@@ -194,6 +204,7 @@ const SENSITIVE_PROBE = {
   dslTemplate: '$Event(50, Default, function() {\n    // 内容里的 N:\\mod\\shape 形状是源码不是泄漏\n});',
   text: '条目正文：某目录 D:\\game\\text 说明',
   nested: {
+    diagnostics: PRELOAD_PATH_PROBE.diagnostics,
     backupRoot: 'D:\\workspace\\.soulforge\\backup',
     message: '写入失败：D:\\workspace\\mod\\a.fmg 被占用（\\\\?\\UNC\\host\\share\\b.fmg）'
   }
@@ -210,12 +221,16 @@ if (typeof sanitizeRendererValue === 'function') {
     'sk-should-never-cross-the-bridge',
     'bearer-should-never-cross',
     'D:\\\\mystream',
-    'D:\\\\workspace'
+    'D:\\\\workspace',
+    '/home/user/mod/file',
+    '/tmp/sf/a.fmg',
+    'file:///home/user/a'
   ].filter((needle) => serialized.includes(needle));
   assert.check(leakedValues.length === 0, 'sanitizeRendererValue 未脱敏敏感值/绝对路径', { leakedValues, serialized });
 
   assert.check(
-    JSON.stringify(sanitized).includes('file:///workspace/a.fmg'),
+    ['file://chr/c0000.anibnd.dcx', 'chr/c0000.anibnd.dcx', 'https://example.com/resources/chr']
+      .every((value) => serialized.includes(value)),
     'sanitizeRendererValue 不得连带删除非敏感字段（否则脱敏会退化为清空一切）',
     { serialized }
   );
@@ -236,6 +251,17 @@ if (typeof sanitizeRendererValue === 'function') {
 }
 
 /* ---- 4. preload 不得把路径形状的数据交给 renderer ------------------------ */
+const preloadResult = await preload.api.inspectContainerTree('file://chr/c0000.anibnd.dcx');
+const preloadSerialized = JSON.stringify(preloadResult);
+const preloadLeaks = ['/home/user/mod/file', '/tmp/sf/a.fmg', 'file:///home/user/a', '"rootPath"']
+  .filter((value) => preloadSerialized.includes(value));
+assert.check(preloadLeaks.length === 0, 'preload actual inspectContainerTree result leaked physical path authority', { preloadLeaks, preloadSerialized });
+assert.check(
+  ['file://chr/c0000.anibnd.dcx', 'chr/c0000.anibnd.dcx', 'https://example.com/resources/chr']
+    .every((value) => preloadSerialized.includes(value)),
+  'preload result must preserve logical resource identity, relative labels and documentation URLs',
+  { preloadSerialized }
+);
 const pathShaped = [];
 for (const method of preload.methods) {
   if (/path$|root$|dir$|directory$/i.test(method)) pathShaped.push(method);

@@ -44,7 +44,7 @@
  *
  * ── 分页 ──
  *
- * 首次加载用 pageSize=1000 拉全量（覆盖 c0000 939）；若 envelope 仍截断
+ * Initial and subsequent reads use the same bounded native animation page size.
  * （animationsTruncated），展示警示并提供「加载更多」分页按钮逐页追加。
  *
  * ── invalid time range ──
@@ -60,6 +60,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import {
   isTaeDocument,
+  TAE_ANIMATION_PAGE_SIZE,
   projectTaeDocumentPages,
   AnimationPlaybackClock,
   ActionContinuousSampler,
@@ -163,6 +164,7 @@ export interface TaeAnimationPaginationState {
   baseAnimationIds: readonly string[];
   animations: readonly TaeAnimationWire[];
   nextPage: number;
+  pageSize: number;
   hasMore: boolean;
 }
 
@@ -175,6 +177,7 @@ export function createTaeAnimationPaginationState(
     baseAnimationIds: document.animations.map((animation) => taeAnimationIdentityKey(animation)),
     animations: [],
     nextPage: 1,
+    pageSize: TAE_ANIMATION_PAGE_SIZE,
     hasMore: document.animationsTruncated === true
   };
 }
@@ -210,7 +213,7 @@ export function appendTaeAnimationPage(
 
 export interface TaeWorkbenchPanelProps {
   resourceUri: string;
-  data: TaeDocument | null;
+  data: TaeDocument | { format: 'TAE_READ_FAILED'; diagnostics: Diagnostic[] } | null;
   /** 可选初始选中（测试/深链用）；不传等价于只读初始态。 */
   initialSelection?: TaeSelection;
 }
@@ -707,6 +710,8 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     bundle: CharacterPreviewBundle | null;
   }>({ loading: true, error: null, bundle: null });
 
+  const readFailure = props.data?.format === 'TAE_READ_FAILED' ? props.data : null;
+
   const document = useMemo(() => {
     const source = refreshedDocument ?? props.data;
     return source && isTaeDocument(source) ? source : null;
@@ -1036,7 +1041,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
       || !currentPagination.hasMore
       || paginationLoading
     ) return;
-    const pageSize = 1000;
+    const pageSize = currentPagination.pageSize;
     const nextPage = currentPagination.nextPage;
     const requestDocumentKey = documentKey;
     const requestId = ++paginationRequestRef.current;
@@ -1423,11 +1428,18 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
         {
           id: 'animations',
            title: '动画',
-           hint: `${pages?.animations.animationCount ?? 0} 个动画`,
+           hint: readFailure ? '读取失败' : pages ? `${pages.animations.animationCount} 个动画` : '等待数据',
           initialFlex: 0.22,
           minWidth: 220,
           children: (
-            mergedDocument === null ? (
+            readFailure ? (
+              <div className="wb-list" role="alert">
+                <strong>动作读取失败</strong>
+                {readFailure.diagnostics.map((diagnostic, index) => (
+                  <p key={`${diagnostic.code}:${index}`} style={{ overflowWrap: 'anywhere' }}>{diagnostic.code}: {diagnostic.message}</p>
+                ))}
+              </div>
+            ) : mergedDocument === null ? (
               <div className="wb-list">
                 <p className="wb-empty">选择 .tae / .anibnd.dcx 文件以查看动画事件数据。</p>
               </div>

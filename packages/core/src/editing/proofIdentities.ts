@@ -213,6 +213,10 @@ export function taeObjectKey(
   return `tae|${outerKey}|${chrId}|${sectionKey}|${String(animId)}|${String(eventIndex)}`;
 }
 
+export function taeActionKey(outerKey: string, chrId: string, animId: number, section?: TaeSectionIdentity): string {
+  return `${taeObjectKey(outerKey, chrId, animId, 0, section).slice(0, -2)}|action`;
+}
+
 /** 从动作地址 `c1050#A0200.e0` 解析身份；拼写非法返回 null。 */
 export function parseTaeAddress(address: string): {
   chrId: string;
@@ -237,6 +241,7 @@ export function parseTaeAddress(address: string): {
 }
 
 export interface TaeReadEvent {
+  eventTypeId?: number;
   chrId?: string;
   animId: number;
   eventIndex: number;
@@ -259,7 +264,7 @@ export function taeDeliveredReads(input: {
 }): HostDeliveredNativeRead[] {
   return input.events
     .filter((event) => Number.isSafeInteger(event.animId) && Number.isSafeInteger(event.eventIndex))
-    .map((event) => ({
+    .flatMap((event): HostDeliveredNativeRead[] => [{
       principal: input.principal,
       workspaceId: input.workspaceId,
       objectKey: taeObjectKey(
@@ -272,13 +277,16 @@ export function taeDeliveredReads(input: {
       outerSourceKey: input.outerKey,
       version: {},
       deliveredFields: [
+        ...(typeof event.eventTypeId === 'number' ? ['eventTypeId' as const] : []),
         ...(typeof event.startFrame === 'number' ? ['startFrame' as const] : []),
         ...(typeof event.endFrame === 'number' ? ['endFrame' as const] : []),
         ...(event.fieldNames ?? []),
         ...(event.fieldIndices ?? []).map((index) => `fieldIndex:${index}`)
       ],
       readShape: 'fields' as const
-    }));
+    }, { principal: input.principal, workspaceId: input.workspaceId,
+      objectKey: taeActionKey(input.outerKey, event.chrId ?? input.chrId, event.animId, event),
+      outerSourceKey: input.outerKey, version: {}, deliveredFields: ['actionIdentity'], readShape: 'fields' }]);
 }
 
 export function msbObjectKey(outerKey: string, nativeOffset: number): string {

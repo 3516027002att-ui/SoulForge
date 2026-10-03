@@ -1,0 +1,36 @@
+
+/* ── 动作工作台 分区与过滤栏 ── */
+.tae-filter-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.tae-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.tae-filter-label {
+  flex: none;
+  color: var(--ink-2);
+}
+.tae-filter-select,
+.tae-filter-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 6px;
+  background: var(--forge-1);
+  color: var(--ink-1);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+.tae-filter-select:focus,
+.tae-filter-input:focus {
+  outline: 2px solid var(--ember);
+  outline-offset: -1px;
+}

@@ -1,6 +1,5 @@
-import { test, expect, _electron as electron } from '@playwright/test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { test, expect, electron, testWorkspace } from '../owned-test.mjs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -28,16 +27,18 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
   test.setTimeout(240_000);
 
   async function launchProduction() {
-    const userDataDir = mkdtempSync(join(tmpdir(), 'sf-e2e-real-assets-'));
+    const userDataDir = join(testWorkspace().root, 'profile');
     const app = await electron.launch({
       args: [productionMain, `--user-data-dir=${userDataDir}`],
       env: {
         ...process.env,
         NODE_ENV: 'production',
         SF_E2E_OVERLAY_ROOT: overlayRoot,
-        SF_E2E_BASE_ROOT: gameRoot
+        SF_E2E_BASE_ROOT: gameRoot,
+        SF_E2E_WORKSPACE_STORAGE_ROOT: join(testWorkspace().root, 'workspace-storage')
       }
     });
+    await testWorkspace().registerApp(app);
     const window = await app.firstWindow();
     const pageErrors = [];
     const consoleErrors = [];
@@ -46,42 +47,7 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
       if (message.type() === 'error') consoleErrors.push(message.text());
     });
     await window.waitForLoadState('domcontentloaded');
-    const cleanup = async () => {
-      // Playwright disposes the ElectronApplication process handle during
-      // app.close(); capture it before closing so cleanup stays compatible
-      // with both the current and older Electron adapters.
-      let child;
-      try {
-        child = app.process();
-      } catch {
-        child = undefined;
-      }
-      await app.close().catch(() => undefined);
-      // Electron/Bridge 子进程在 app.close() 返回后可能还持有 Chromium
-      // user-data 文件句柄。先等待宿主进程退出，再对明确的临时目录做
-      // 有界重试；清理失败只能留下本次临时目录，不能把真实资源断言判成失败。
-      if (child && child.exitCode === null) {
-        const deadline = Date.now() + 5_000;
-        while (child.exitCode === null && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-      }
-      let cleanupError;
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        try {
-          rmSync(userDataDir, { recursive: true, force: true, maxRetries: 2, retryDelay: 250 });
-          cleanupError = undefined;
-          break;
-        } catch (error) {
-          cleanupError = error;
-          if (!['EBUSY', 'ENOTEMPTY', 'EPERM'].includes(error?.code) || attempt === 19) break;
-          await new Promise((resolve) => setTimeout(resolve, 250));
-        }
-      }
-      if (cleanupError) {
-        console.warn(`真实资源 E2E 临时目录清理延迟：${userDataDir} (${cleanupError.code ?? 'unknown'})`);
-      }
-    };
+    const cleanup = async () => { await app.close().catch(() => undefined); };
     return { app, window, pageErrors, consoleErrors, cleanup };
   }
 
@@ -92,6 +58,9 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
 
   async function openWorkspace(window) {
     await window.waitForFunction(() => 'soulforge' in globalThis, { timeout: 30_000 });
+    const start = window.getByRole('region', { name: '开始' });
+    await start.getByTestId('choose-base-directory').click();
+    await expect(start.getByTestId('choose-base-directory')).toContainText('更换原版目录');
     const switcher = window.locator('.workspace-switcher__trigger');
     for (let attempt = 0; attempt < 3; attempt += 1) {
       if ((await switcher.textContent().catch(() => ''))?.includes('mods')) break;
@@ -115,6 +84,22 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
     const header = window.locator('.tae-animation-group__header').filter({ hasText: groupLabel }).first();
     await expect(header).toHaveCount(1, { timeout: 120_000 });
     if (await header.getAttribute('aria-expanded') !== 'true') await header.click();
+  }
+
+  async function loadActionPages(window) {
+    const animations = window.getByRole('region', { name: '动画' });
+    const loadMore = window.getByTestId('tae-load-more');
+    const countLoaded = async () => (await animations.locator('.tae-animation-group__count').allTextContents())
+      .reduce((total, text) => total + Number(text), 0);
+    // The workbench mounts before its first native page; no button yet is not EOF.
+    await expect.poll(countLoaded, { timeout: 120_000 }).toBeGreaterThan(0);
+    for (let page = 0; page < 40 && await loadMore.count() > 0; page += 1) {
+      await expect(loadMore).toBeEnabled({ timeout: 30_000 });
+      const previousCount = await countLoaded();
+      await loadMore.click();
+      await expect.poll(countLoaded, { timeout: 30_000 }).toBeGreaterThan(previousCount);
+    }
+    await expect(loadMore).toHaveCount(0);
   }
 
   test('真实 ACTION 与 MAP 读取含完整网格/贴图，并能进入可视化工作台', async () => {
@@ -242,12 +227,13 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
 
       await openResource(window, 'map/mapstudio/m10_00_00_00.msb.dcx');
       await expect(window.getByLabel('MSB 地图工作台')).toBeVisible();
-      await expect(window.getByRole('region', { name: 'Viewport' })).toBeVisible();
+      await expect(window.locator('.msb-viewport')).toBeVisible();
       await expect(window.locator('.msb-viewport canvas')).toHaveCount(1, { timeout: 120_000 });
-      await window.waitForFunction(() => {
-        const text = document.querySelector('.msb-viewport')?.textContent ?? '';
-        return /模型(?:已处理)?\s*[1-9]/.test(text) && /Part\s*[1-9]/.test(text);
-      }, { timeout: 120_000 });
+      await expect.poll(async () => {
+        const raw = await window.locator('[data-map-model-counts]').getAttribute('data-map-model-counts');
+        const counts = raw ? JSON.parse(raw) : null;
+        return Boolean(counts && counts.modelsLoaded > 0 && counts.sceneErrors === 0);
+      }, { timeout: 120_000 }).toBe(true);
 
       mkdirSync(resolve(repoRoot, 'output/playwright'), { recursive: true });
       await window.screenshot({ path: resolve(repoRoot, 'output/playwright/real-action-map.png'), fullPage: false });
@@ -317,19 +303,19 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
       await openResource(window, 'msg/engus/item.msgbnd.dcx');
       const fmgPanel = window.getByRole('region', { name: 'FMG 本地化工作台' });
       await expect(fmgPanel).toBeVisible({ timeout: 120_000 });
-      await expect(fmgPanel.getByRole('region', { name: 'Text Categories' })).toBeVisible();
-      await expect(fmgPanel.getByRole('region', { name: 'Text Entries' })).toContainText(/\S/, { timeout: 120_000 });
+      await expect(fmgPanel.getByRole('region', { name: '文本分类' })).toBeVisible();
+      await expect(fmgPanel.getByRole('region', { name: '文本条目' })).toContainText(/\S/, { timeout: 120_000 });
 
       await openResource(window, 'param/gameparam/gameparam.parambnd.dcx');
       const paramPanel = window.getByLabel('PARAM 工作台');
       await expect(paramPanel).toBeVisible({ timeout: 120_000 });
-      const paramsColumn = paramPanel.getByRole('region', { name: 'Params' });
-      const rowsColumn = paramPanel.getByRole('region', { name: 'Rows' });
+      const paramsColumn = paramPanel.getByRole('region', { name: '参数文件' });
+      const rowsColumn = paramPanel.getByRole('region', { name: '行', exact: true });
       await expect(paramsColumn.locator('.wb-row').first()).toBeVisible({ timeout: 120_000 });
       await paramsColumn.locator('.wb-row').first().click();
       await expect(rowsColumn.locator('.wb-row').first()).toBeVisible({ timeout: 120_000 });
       await rowsColumn.locator('.wb-row').first().click();
-      await expect(paramPanel.getByRole('region', { name: 'Fields' })).toBeVisible();
+      await expect(paramPanel.getByRole('region', { name: '字段', exact: true })).toBeVisible();
 
       mkdirSync(resolve(repoRoot, 'output/playwright'), { recursive: true });
       await window.screenshot({ path: resolve(repoRoot, 'output/playwright/real-param-fmg-workbenches.png'), fullPage: false });
@@ -404,9 +390,20 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
       // fallback must retain the physical child prefix instead of relabeling
       // them as a000, which made the loaded partition look incomplete.
       const bankSelector = window.getByTestId('tae-bank-selector');
-      const animations = window.getByRole('region', { name: 'Animations' });
-      const bankLabels = await bankSelector.locator('option').allTextContents();
-      expect(bankLabels).toEqual(expect.arrayContaining([
+      const animations = window.getByRole('region', { name: '动画' });
+      await expect(animations).toBeVisible();
+      await closeAgent(window);
+      const loadMore = window.getByTestId('tae-load-more');
+      for (let page = 0; page < 40 && await loadMore.count() > 0; page += 1) {
+        await expect(loadMore).toBeEnabled({ timeout: 30_000 });
+        const countLoaded = async () => (await animations.locator('.tae-animation-group__count').allTextContents())
+          .reduce((total, text) => total + Number(text), 0);
+        const previousCount = await countLoaded();
+        await loadMore.click();
+        await expect.poll(countLoaded, { timeout: 30_000 }).toBeGreaterThan(previousCount);
+      }
+      await expect(loadMore).toHaveCount(0);
+      await expect.poll(() => bankSelector.locator('option').allTextContents(), { timeout: 120_000 }).toEqual(expect.arrayContaining([
         'a00 (939)',
         'a50 (223)',
         'a100 (4)',
@@ -480,7 +477,9 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
         };
       });
       expect(selectorProbe.ok, JSON.stringify(selectorProbe)).toBe(true);
-      expect(selectorProbe.motionAnimId, JSON.stringify(selectorProbe)).toBe(50002010);
+      // NEXT ee1dd619 reads animation 2011 as a050_002011.hkt, ImportsHKX=false
+      // for the fixed D26A4AFD... container; retain this independent identity.
+      expect(selectorProbe.motionAnimId, JSON.stringify(selectorProbe)).toBe(50002011);
       expect(selectorProbe.taeEntryIndex, JSON.stringify(selectorProbe)).toBe(3);
       expect(selectorProbe.taeEntryId, JSON.stringify(selectorProbe)).toBe(5000050);
       expect(selectorProbe.taeEntryName, JSON.stringify(selectorProbe)).toBe('a50.tae');
@@ -521,7 +520,7 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
     mkdirSync(outputDir, { recursive: true });
 
     async function selectAndCapture(animationName, filePrefix) {
-      const animations = window.getByRole('region', { name: 'Animations' });
+      const animations = window.getByRole('region', { name: '动画' });
       const groupPrefix = /^(a\d{3})_/i.exec(animationName)?.[1];
       await expandActionGroup(window, groupPrefix ? groupPrefix.replace(/^a0/, 'a') : animationName.split('_')[0]);
       const row = animations.locator('.wb-row').filter({ hasText: animationName }).first();
@@ -549,7 +548,8 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
     try {
       await openWorkspace(window);
       await openResource(window, 'chr/c0000.anibnd.dcx');
-      await expect(window.getByRole('region', { name: 'Animations' })).toBeVisible();
+      await expect(window.getByRole('region', { name: '动画' })).toBeVisible();
+      await loadActionPages(window);
       for (const [animationName, prefix] of [
         ['a000_201802', 'c0000-a000-201802'],
         ['a000_201803', 'c0000-a000-201803'],
@@ -559,7 +559,8 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
       }
 
       await openResource(window, 'chr/c1130.anibnd.dcx');
-      await expect(window.getByRole('region', { name: 'Animations' })).toBeVisible();
+      await expect(window.getByRole('region', { name: '动画' })).toBeVisible();
+      await loadActionPages(window);
       for (const [animationName, prefix] of [
         ['a000_003000', 'c1130-a000-003000'],
         ['a000_003001', 'c1130-a000-003001'],

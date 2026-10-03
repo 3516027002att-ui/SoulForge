@@ -8,7 +8,7 @@
  * 因 channel 改名而失败。
  *
  * 保留项：
- *  - 硬约束 18（renderer 不得持有权威文档）在 main 侧的落点，是模块级私有
+ *  - 硬约束 18（renderer 不得持有权威文档）在 main 侧的落点，是服务私有
  *    状态，运行时表面观测不到；
  *  - Bridge 命令名；
  *  - 硬约束 17 的模板截断上报字段名。
@@ -18,9 +18,9 @@ import { resolve } from 'node:path';
 
 function main(): void {
   const root = resolve('../..');
-  // IPC 物理拆分后，EMEVD 事件域的文档权威缓存与打开/提交链位于
-  // ipc/event.ts（组合根 ipc.ts 只做注册接线）。
-  const ipc = readFileSync(resolve(root, 'apps/desktop/src/main/ipc/event.ts'), 'utf8');
+  // 文档权威、异步反汇编与提交链位于 service；adapter 保留源切片通道。
+  const ipc = readFileSync(resolve(root, 'apps/desktop/src/main/services/eventService.ts'), 'utf8')
+    + readFileSync(resolve(root, 'apps/desktop/src/main/ipc/event.ts'), 'utf8');
   const preload = readFileSync(resolve(root, 'apps/desktop/src/preload/index.ts'), 'utf8');
   const commit = readFileSync(resolve(root, 'packages/core/src/editing/emevdBridgeCommit.ts'), 'utf8');
   const emevdEdit = readFileSync(resolve(root, 'packages/core/src/editing/emevdEdit.ts'), 'utf8');

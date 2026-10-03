@@ -1,0 +1,30 @@
+
+/* 焦点可见性（键盘可达）：焦点环，与 hover 阴影/选中态可区分。
+   input/textarea/select 不用 outline，改用边框 + 焦点环阴影（见下方输入基线）。 */
+:focus-visible { outline: 2px solid var(--ember-text); outline-offset: 2px; border-radius: var(--radius-s); }
+input:focus-visible, textarea:focus-visible, select:focus-visible { outline: none; }
+
+/* aria-disabled：保持可聚焦可点击（点击给出能力不可用诊断），仅降低前景对比 */
+[aria-disabled="true"] { opacity: .55; cursor: default; }
+[aria-disabled="true"]:hover { box-shadow: none; }
+
+/* 细滚动条 */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 6px; border: 3px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--ink-3); background-clip: content-box; }
+::-webkit-scrollbar-corner, ::-webkit-scrollbar-track { background: transparent; }
+
+kbd {
+  font-family: var(--font-mono); font-size: 10px; color: var(--ink-1);
+  background: var(--forge-2); border: 1px solid var(--line); border-bottom-width: 2px;
+  border-radius: var(--radius-s); padding: 1px 6px;
+}
+
+/* 数字列表对齐 */
+.st-item, .cq-counts, .audit-entry__meta, .pill, kbd {
+  font-variant-numeric: tabular-nums;
+}
+
+.mono { font-family: var(--font-mono); }
+.muted { color: var(--ink-2); }
+.danger { color: var(--danger-text); }

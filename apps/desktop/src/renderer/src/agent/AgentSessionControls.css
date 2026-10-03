@@ -1,0 +1,24 @@
+
+/* 可折叠会话配置（模型/思考强度/权限模式）——收起再展开不丢状态 */
+.agent-settings { flex: none; border-bottom: 1px solid var(--line); }
+.agent-settings summary {
+  padding: 8px 12px; font-size: 10.5px; font-weight: 600;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2);
+  cursor: pointer; list-style: none;
+  transition: background var(--dur-micro), color var(--dur-micro);
+}
+.agent-settings summary::-webkit-details-marker { display: none; }
+.agent-settings summary::before { content: "▸ "; color: var(--ink-3); }
+.agent-settings[open] summary::before { content: "▾ "; }
+.agent-settings summary:hover { background: var(--control-hover-bg); color: var(--ink-1); }
+
+.agent-controls { display: flex; flex-direction: column; gap: 10px; padding: 4px 12px 12px; }
+.agent-controls__row { display: flex; flex-direction: column; gap: 4px; }
+.agent-controls__label { font-size: 11px; color: var(--ink-2); }
+.agent-controls__hint { font-size: 10.5px; color: var(--ink-3); line-height: 1.5; }
+.agent-controls__lock { font-size: 10.5px; color: var(--warn); line-height: 1.5; }
+/* 任务面板的权限回显。与 .agent-controls__lock 视觉一致（同 --warn token、同字号），
+   但**必须是独立 class**：两者归属不同面板，而同 class 会让 Playwright 严格模式下
+   locator('.agent-controls__lock') 解析到 2 个元素并报 strict mode violation
+   ——实测打破了 renderer.spec.mjs:362 的既有断言。不新造颜色。 */
+.agent-task__lock { font-size: 10.5px; color: var(--warn); line-height: 1.5; }

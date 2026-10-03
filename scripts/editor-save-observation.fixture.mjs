@@ -1,0 +1,415 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { readFile } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
+import ts from 'typescript';
+import * as observationModule from '../apps/desktop/e2e/playwright/editor-save-observation.mjs';
+const { createEditorSaveObservation } = observationModule;
+
+async function actualParamCompletionHelper(name = 'paramIpcCompletion', bindings = {}) {
+  const url = new URL('../apps/desktop/e2e/playwright/tests/editor-loaded-comparison.spec.mjs', import.meta.url);
+  const source = await readFile(url, 'utf8');
+  const ast = ts.createSourceFile(url.pathname, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const helper = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
+  assert.ok(helper, 'The production spec helper must remain discoverable');
+  return new Function(...Object.keys(bindings), `return (${helper.getText(ast)});`)(...Object.values(bindings));
+}
+
+async function actualCaseHook(kind) {
+  const url = new URL('../apps/desktop/e2e/playwright/tests/editor-loaded-comparison.spec.mjs', import.meta.url);
+  const source = await readFile(url, 'utf8');
+  const ast = ts.createSourceFile(url.pathname, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  let callback;
+  function visit(node) {
+    if (ts.isCallExpression(node) && (kind === 'afterEach'
+      ? node.expression.getText(ast) === 'test.afterEach'
+      : node.expression.getText(ast) === 'test' && node.arguments[0]?.getText(ast).includes('loaded PARAM comparison'))) {
+      callback = node.arguments[kind === 'afterEach' ? 0 : 1];
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(ast);
+  assert.ok(callback, `The actual ${kind} callback must be registered`);
+  return bindings => new Function(...Object.keys(bindings), `return (${callback.getText(ast)});`)(...Object.values(bindings));
+}
+
+test('actual failure hook reports a pending setup or body at timeout without awaiting the abandoned catch', async () => {
+  const caseCallback = await actualCaseHook('param'), hook = await actualCaseHook('afterEach');
+  for (const boundary of ['setup', 'body']) {
+    const observations = new Map(), reports = []; let caught = 0, reached;
+    const entered = new Promise(resolve => { reached = resolve; });
+    const pending = new Promise(() => {});
+    const info = { testId: boundary, status: 'timedOut', expectedStatus: 'passed' };
+    const createOwner = () => observationModule.createEditorCaseObservation({ clock: () => 10,
+      emit: (marker, body) => reports.push([marker, JSON.parse(body)]) });
+    const bindings = { caseObservations: observations, createEditorCaseObservation: createOwner,
+      test: { setTimeout() {}, info: () => info },
+      launchOwnedProduction: owner => {
+        if (boundary === 'setup') { owner.stage('launch-search-index'); reached(); return pending; }
+        return Promise.resolve({ app: {}, page: { getByRole: () => ({ click: () => { reached(); return pending; } }) } });
+      }, reportOwnedFailure: () => { caught++; } };
+    const body = caseCallback(bindings)();
+    await entered;
+    // The runner races the body promise; it does not reject an awaited port.
+    await Promise.race([body, Promise.resolve('whole-test-timeout')]);
+    assert.equal(caught, 0);
+    hook(bindings)({}, info);
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0][1].stage, boundary === 'setup' ? 'launch-search-index' : 'param-theme');
+    assert.equal(reports[0][1].sample, 'afterEach');
+    assert.equal(reports[0][1].observationAttached, false);
+    assert.equal(observations.size, 0);
+  }
+});
+
+test('actual launch marks an observation stream attached only after its stdout listener is registered', async () => {
+  const stream = new EventEmitter(), reports = []; let reached;
+  const entered = new Promise(resolve => { reached = resolve; });
+  const owner = observationModule.createEditorCaseObservation({ clock: () => 10,
+    emit: (marker, body) => reports.push([marker, JSON.parse(body)]) });
+  const bindings = {
+    expect: () => ({ toBe() {}, not: { toContain() {} } }), existsSync: () => true,
+    path: { resolve: () => 'owned-artifact', join: () => 'owned-input' }, here: 'owned', productionMain: 'owned-main',
+    prepareEditorComparisonWorkspace: async () => ({ overlay: 'owned', base: 'owned', scriptPath: 'script', paramPath: 'param' }),
+    testWorkspace: () => ({ root: 'owned', registerApp: async () => undefined }),
+    readFile: async () => Buffer.from('owned'), hash: () => 'owned-hash',
+    electron: { launch: async () => ({ process: () => ({ stdout: stream, spawnargs: [] }),
+      firstWindow: () => { reached(); return new Promise(() => {}); } }) }
+  };
+  const launch = await actualParamCompletionHelper('launchOwnedProduction', bindings);
+  void launch(owner); await entered;
+  assert.equal(stream.listenerCount('data'), 1);
+  owner.finish('timedOut', 'passed');
+  assert.equal(reports[0][1].observationAttached, true);
+  assert.equal(reports[0][1].stage, 'launch-first-window');
+});
+
+test('actual PARAM catch and close preserve the originating await when failure reporting or app close stays pending', async () => {
+  const caseCallback = await actualCaseHook('param'), hook = await actualCaseHook('afterEach');
+  for (const boundary of ['report', 'close']) {
+    const observations = new Map(), reports = []; let reached;
+    const entered = new Promise(resolve => { reached = resolve; }), pending = new Promise(() => {});
+    const info = { testId: boundary, status: 'timedOut', expectedStatus: 'passed' };
+    let time = 0;
+    const bindings = { caseObservations: observations,
+      createEditorCaseObservation: () => observationModule.createEditorCaseObservation({ clock: () => ++time,
+        emit: (marker, body) => reports.push([marker, JSON.parse(body)]) }),
+      test: { setTimeout() {}, info: () => info },
+      launchOwnedProduction: async () => ({ app: { close: () => { reached(); return pending; } },
+        page: { getByRole: () => ({ click: async () => { throw new Error('PRIVATE_CLICK_ERROR'); } }) } }),
+      reportOwnedFailure: () => { if (boundary === 'report') { reached(); return pending; } return Promise.resolve(); } };
+    const body = caseCallback(bindings)();
+    await entered;
+    await Promise.race([body, Promise.resolve('whole-test-timeout')]);
+    hook(bindings)({}, info);
+    assert.equal(reports[0][1].stage, boundary === 'report' ? 'catch-report' : 'app-close');
+    assert.equal(reports[0][1].failedStage, 'param-theme');
+    assert.equal(reports[0][1].failedStageAtMs, 2);
+    assert.doesNotMatch(JSON.stringify(reports), /PRIVATE_|error|message|path/);
+  }
+});
+
+test('normal case stays quiet and closed stages/statuses discard untrusted log fields', () => {
+  assert.equal(typeof observationModule.createEditorCaseObservation, 'function');
+  const reports = []; const options = { clock: () => 20, emit: (marker, body) => reports.push([marker, JSON.parse(body)]) };
+  const passed = observationModule.createEditorCaseObservation(options);
+  passed.stage('app-close'); passed.finish('passed', 'passed');
+  assert.equal(reports.length, 0);
+  const failed = observationModule.createEditorCaseObservation(options);
+  failed.stage('PRIVATE_PATH'); failed.stage({ stage: 'param-save', body: 'PRIVATE_BODY' });
+  failed.observationTail.consume('[SF_EDITOR_SAVE_OBSERVATION] {"event":{"atMs":1,"stage":"ipc","method":"resource.readContainerParamPage","state":"start","body":"PRIVATE_BODY"},"counters":{}}\n');
+  failed.finish('failed', 'passed');
+  assert.equal(reports[0][1].stage, 'case-start');
+  assert.equal(reports[0][1].observation.transportErrors, 1);
+  const invalid = observationModule.createEditorCaseObservation(options);
+  invalid.finish('PRIVATE_STATUS', 'passed');
+  assert.equal(reports.length, 1);
+  const valid = observationModule.createEditorCaseObservation(options);
+  valid.stage('param-save'); valid.finish('timedOut', 'passed');
+  assert.equal(reports[1][1].stage, 'param-save');
+  assert.doesNotMatch(JSON.stringify(reports), /PRIVATE_|body|path|testId/);
+});
+
+test('failure hook diagnostics preserve the original failure when their clock or sink throws', () => {
+  const owner = observationModule.createEditorCaseObservation({ clock: () => { throw new Error('PRIVATE_CLOCK'); },
+    emit: () => { throw new Error('PRIVATE_SINK'); } });
+  assert.doesNotThrow(() => { owner.stage('catch-report'); owner.finish('timedOut', 'passed'); });
+});
+
+test('actual failure hook closes only its own case and late callbacks cannot change a later report', async () => {
+  const hook = await actualCaseHook('afterEach'), observations = new Map(), reports = [];
+  const make = () => observationModule.createEditorCaseObservation({ clock: () => 30,
+    emit: (marker, body) => reports.push([marker, JSON.parse(body)]) });
+  const previous = make(); previous.stage('launch-electron'); observations.set('previous', previous);
+  hook({ caseObservations: observations })({}, { testId: 'previous', status: 'timedOut', expectedStatus: 'passed' });
+  const current = make(); current.stage('param-native-baseline'); observations.set('current', current);
+  current.attached();
+  previous.stage('app-close'); previous.attached(); previous.finish('failed', 'passed');
+  hook({ caseObservations: observations })({}, { testId: 'current', status: 'failed', expectedStatus: 'passed' });
+  assert.deepEqual(reports.map(([, report]) => report.stage), ['launch-electron', 'param-native-baseline']);
+  assert.deepEqual(reports.map(([, report]) => report.observationAttached), [false, true]);
+  assert.equal(observations.size, 0);
+});
+
+test('actual PARAM refetch helper reads the host tail and rejects stale, pending, failed or lost observations', async () => {
+  const helper = await actualParamCompletionHelper(), method = 'resource.readContainerParamPage';
+  const checkpoint = await actualParamCompletionHelper('paramObservationCheckpoint');
+  const start = { stage: 'ipc', method, state: 'start' };
+  const finish = { stage: 'ipc', method, state: 'finish', ok: true };
+  const clean = { observerErrors: 0, droppedPublished: 0,
+    transportDroppedEvents: 0, transportDroppedInput: 0, transportErrors: 0 };
+  for (const [events, observedEvents, after, expected] of [
+    [[start, finish], 12, 10, 12],
+    [[start, finish], 12, 12, null],
+    [[start, finish], 12, 11, null],
+    [[start], 11, 10, null],
+    [[start, { ...finish, ok: false }], 12, 10, null],
+    [[start, { stage: 'ipc', method, state: 'throw' }], 12, 10, null],
+    [[{ ...start, method: 'resource.readContainerParamRowIndex' }, { ...finish, method: 'resource.readContainerParamRowIndex' }], 12, 10, null],
+    [[start, { ...finish, ok: false }, start, finish], 14, 10, 14]
+  ]) {
+    const tail = { snapshot: () => ({ ...clean, events, observedEvents }) };
+    assert.equal(await checkpoint(tail), observedEvents);
+    assert.equal(await helper(tail, after, method), expected);
+  }
+  for (const counter of Object.keys(clean)) {
+    const tail = { snapshot: () => ({ ...clean, [counter]: 1, events: [start, finish], observedEvents: 12 }) };
+    await assert.rejects(() => checkpoint(tail), /EDITOR_SAVE_OBSERVATION_TRANSPORT_LOST/);
+    await assert.rejects(() => helper(tail, 10, method), /EDITOR_SAVE_OBSERVATION_TRANSPORT_LOST/);
+  }
+});
+
+test('current PARAM save is read from the original published tail, staying pending after an older success', async () => {
+  const helper = await actualParamCompletionHelper(), method = 'resource.applyContainerParamFieldMutation';
+  const tail = observationModule.createEditorSaveObservationTail();
+  let hold = false; const withheld = [];
+  const h = ports(undefined, (event, counters) => {
+    const packet = `${observationModule.EDITOR_SAVE_OBSERVATION_PREFIX}${JSON.stringify({ event, counters })}\n`;
+    if (hold) withheld.push(packet); else tail.consume(packet);
+  });
+  let resolve;
+  try {
+    h.ipcMain.handle(method, () => ({ ok: true }));
+    await h.handlers.get(method)();
+    // Original invalid save has settled, but its stdout copy arrives later.
+    hold = true; h.ipcMain.handle(method, () => ({ ok: false }));
+    await h.handlers.get(method)();
+    const checkpoint = tail.snapshot().observedEvents;
+    hold = false; for (const packet of withheld) tail.consume(packet);
+    assert.equal(await helper(tail, checkpoint, method), null);
+    h.ipcMain.handle(method, () => new Promise(done => { resolve = done; }));
+    const pending = h.handlers.get(method)();
+    assert.equal(await helper(tail, checkpoint, method), null);
+    resolve({ ok: true }); await pending;
+    assert.equal(await helper(tail, checkpoint, method), h.snapshot().observedEvents);
+  } finally { h.restore(); }
+});
+
+function ports(clock = (() => { let time = 0; return () => ++time; })(), publish) {
+  const handlers = new Map();
+  const ipcMain = { handle: (name, listener) => { handlers.set(name, listener); return 'registered'; } };
+  const writes = [];
+  const stream = { write(...args) { writes.push(args); return false; } };
+  const observation = createEditorSaveObservation({ ipcMain, stdout: { ...stream }, stderr: { ...stream }, clock, publish });
+  return { ...observation, handlers, ipcMain, writes };
+}
+
+test('observed IPC preserves original listener arguments, exact result and rejection without replay', async () => {
+  const h = ports(); let calls = 0;
+  const value = { ok: true, body: 'PRIVATE_PAYLOAD', diagnostics: [
+    { code: 'POSTCOMMIT_REFRESH_FAILED', message: 'PRIVATE_TEXT' }, { code: 'BRIDGE_PRIVATE_PAYLOAD' }
+  ] };
+  const args = [{ sender: 'owned' }, 'PRIVATE_URI', { secret: 'PRIVATE_PAYLOAD' }];
+  assert.equal(h.ipcMain.handle('resource.saveScriptSource', (...received) => {
+    calls++; assert.deepEqual(received, args); return value;
+  }), 'registered');
+  assert.equal(await h.handlers.get('resource.saveScriptSource')(...args), value);
+  const denied = new Error('PRIVATE_ERROR');
+  h.ipcMain.handle('resource.applyContainerParamFieldMutation', () => { calls++; throw denied; });
+  await assert.rejects(h.handlers.get('resource.applyContainerParamFieldMutation')(...args), error => error === denied);
+  assert.equal(calls, 2);
+  assert.doesNotMatch(JSON.stringify(h.snapshot()), /PRIVATE_|sender|secret/);
+  assert.deepEqual(h.snapshot().events[1].codes, ['POSTCOMMIT_REFRESH_FAILED']);
+  assert.deepEqual(h.snapshot().events.map(event => event.state), ['start', 'finish', 'start', 'throw']);
+  h.restore();
+});
+
+test('original PARAM index/page listeners are observed in order with exact values and errors', async () => {
+  const h = ports();
+  const args = [{ sender: 'PRIVATE_SENDER' }, 'PRIVATE_URI', 0, 0, 20, undefined, false, 'PRIVATE_TOKEN'];
+  const index = { ok: true, sessionToken: 'PRIVATE_TOKEN', rows: ['PRIVATE_ROW'] };
+  const failure = new Error('PRIVATE_ERROR'); let calls = 0;
+  h.ipcMain.handle('resource.readContainerParamRowIndex', (...received) => {
+    calls++; assert.deepEqual(received, args.slice(0, 3)); return index;
+  });
+  h.ipcMain.handle('resource.readContainerParamPage', async (...received) => {
+    calls++; assert.deepEqual(received, args); throw failure;
+  });
+  assert.equal(await h.handlers.get('resource.readContainerParamRowIndex')(...args.slice(0, 3)), index);
+  await assert.rejects(h.handlers.get('resource.readContainerParamPage')(...args), error => error === failure);
+  assert.equal(calls, 2);
+  assert.deepEqual(h.snapshot().events.map(({ method, state }) => [method, state]), [
+    ['resource.readContainerParamRowIndex', 'start'], ['resource.readContainerParamRowIndex', 'finish'],
+    ['resource.readContainerParamPage', 'start'], ['resource.readContainerParamPage', 'throw']
+  ]);
+  assert.doesNotMatch(JSON.stringify(h.snapshot()), /PRIVATE_|sender|rows|sessionToken/);
+  h.restore();
+});
+
+test('optional publisher exports only copied sanitized events and fixed counters', async () => {
+  const published = [];
+  const h = ports(undefined, (event, counters) => {
+    published.push(JSON.parse(JSON.stringify({ event, counters })));
+    event.method = 'PRIVATE_MUTATION';
+  });
+  const value = { ok: true, diagnostics: [{ code: 'PARAMDEF_ENCODE_FAILED', message: 'PRIVATE_BODY' }] };
+  h.ipcMain.handle('resource.readContainerParamPage', () => value);
+  assert.equal(await h.handlers.get('resource.readContainerParamPage')('PRIVATE_URI'), value);
+  assert.equal(published.length, 2);
+  assert.deepEqual(published[1].event.codes, ['PARAMDEF_ENCODE_FAILED']);
+  assert.equal(published[1].counters.observedEvents, 2);
+  assert.equal(published[1].counters.droppedPublished, 0);
+  assert.doesNotMatch(JSON.stringify([published, h.snapshot()]), /PRIVATE_|message|sourceUri/);
+  h.restore();
+});
+
+test('throwing or rejecting publishers preserve business settlement without an unhandled rejection', async () => {
+  for (const publish of [() => { throw new Error('PRIVATE_PUBLISH_ERROR'); }, () => Promise.reject(new Error('PRIVATE_PUBLISH_ERROR'))]) {
+    const h = ports(undefined, publish); const value = { ok: true }; const failure = new Error('PRIVATE_BUSINESS_ERROR');
+    const unhandled = []; const onUnhandled = error => unhandled.push(error);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      h.ipcMain.handle('resource.readContainerParamRowIndex', () => value);
+      assert.equal(await h.handlers.get('resource.readContainerParamRowIndex')(), value);
+      h.ipcMain.handle('resource.readContainerParamPage', async () => { throw failure; });
+      await assert.rejects(h.handlers.get('resource.readContainerParamPage')(), error => error === failure);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(h.snapshot().droppedPublished, 4);
+      assert.deepEqual(unhandled, []);
+      assert.doesNotMatch(JSON.stringify(h.snapshot()), /PRIVATE_/);
+    } finally { process.off('unhandledRejection', onUnhandled); h.restore(); }
+  }
+});
+
+test('host receives the bounded original event tail and reports malformed, lost and oversized input', async () => {
+  assert.equal(typeof observationModule.createEditorSaveObservationTail, 'function');
+  const tail = observationModule.createEditorSaveObservationTail();
+  const packets = [];
+  const h = ports(undefined, (event, counters) => packets.push(`[SF_EDITOR_SAVE_OBSERVATION] ${JSON.stringify({ event, counters })}\n`));
+  h.ipcMain.handle('resource.readContainerParamRowIndex', () => ({ ok: true }));
+  for (let index = 0; index < 85; index++) await h.handlers.get('resource.readContainerParamRowIndex')();
+  const joined = packets.filter((_, index) => index !== 3).join('');
+  for (let index = 0; index < joined.length; index += 137) tail.consume(joined.slice(index, index + 137));
+  tail.consume('[SF_EDITOR_SAVE_OBSERVATION] invalid\n');
+  tail.consume(`[SF_EDITOR_SAVE_OBSERVATION] ${JSON.stringify({ event: { atMs: 171, stage: 'ipc', method: 'PRIVATE_CHANNEL', state: 'start' }, counters: {} })}\n`);
+  tail.consume('x'.repeat(70_000));
+  const snapshot = tail.snapshot();
+  assert.equal(snapshot.events.length, 160);
+  assert.equal(snapshot.droppedEvents, 10);
+  assert.equal(snapshot.transportDroppedEvents, 1);
+  assert.equal(snapshot.transportErrors, 2);
+  assert.equal(snapshot.transportDroppedInput, 1);
+  assert.deepEqual(snapshot.events.at(-1), h.snapshot().events.at(-1));
+  assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE_|invalid/);
+  h.restore();
+});
+
+test('actual failure summary uses the original host tail after Electron has closed', async () => {
+  assert.equal(typeof observationModule.createEditorSaveObservationTail, 'function');
+  const tail = observationModule.createEditorSaveObservationTail();
+  const h = ports(undefined, (event, counters) => tail.consume(`[SF_EDITOR_SAVE_OBSERVATION] ${JSON.stringify({ event, counters })}\n`));
+  h.ipcMain.handle('resource.readContainerParamRowIndex', () => ({ ok: true }));
+  await h.handlers.get('resource.readContainerParamRowIndex')();
+  const source = await readFile(new URL('../apps/desktop/e2e/playwright/tests/editor-loaded-comparison.spec.mjs', import.meta.url), 'utf8');
+  const helper = source.slice(source.indexOf('async function reportOwnedFailure('), source.indexOf('\nasync function openResource('));
+  const reports = [];
+  const report = new Function('readFile', 'path', 'hash', 'console', `return (${helper});`)(
+    async () => Buffer.from('owned bytes'), { join: (...parts) => parts.join('/') }, () => 'owned-hash',
+    { log: (marker, body) => reports.push([marker, JSON.parse(body)]) }
+  );
+  const closed = { evaluate: async () => { throw new Error('PRIVATE_CLOSED_ERROR'); } };
+  await report(closed, closed, { overlay: 'owned', scriptPath: 'script', paramPath: 'param' },
+    { script: 'owned-hash', param: 'owned-hash' }, 'param-edit', tail);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0][1].observation.state, 'host-tail');
+  assert.deepEqual(reports[0][1].observation.events, h.snapshot().events);
+  assert.equal(reports[0][1].physical.param.changed, false);
+  assert.doesNotMatch(JSON.stringify(reports), /PRIVATE_/);
+  h.restore();
+});
+
+test('actual owned main publisher uses original stdout and excludes private read arguments', async () => {
+  const source = await readFile(new URL('../apps/desktop/e2e/playwright/editor-comparison-main.mjs', import.meta.url), 'utf8');
+  const body = source.slice(source.indexOf('// Bypass the observation hook'), source.indexOf("await import('./production-main.mjs')"));
+  const handlers = new Map(); const writes = [];
+  const ipcMain = { handle: (channel, listener) => handlers.set(channel, listener) };
+  const stream = { write: value => { writes.push(value); return false; } };
+  const fakeGlobal = {}; let time = 0;
+  new Function('ipcMain', 'performance', 'process', 'global', 'createEditorSaveObservation', 'EDITOR_SAVE_OBSERVATION_PREFIX', body)(
+    ipcMain, { now: () => ++time }, { stdout: { ...stream }, stderr: { ...stream } }, fakeGlobal,
+    createEditorSaveObservation, observationModule.EDITOR_SAVE_OBSERVATION_PREFIX
+  );
+  const result = { ok: true, sessionToken: 'PRIVATE_TOKEN', rows: ['PRIVATE_ROW'] };
+  ipcMain.handle('resource.readContainerParamRowIndex', () => result);
+  assert.equal(await handlers.get('resource.readContainerParamRowIndex')('PRIVATE_URI', 0), result);
+  assert.equal(writes.length, 2);
+  const tail = observationModule.createEditorSaveObservationTail();
+  for (const line of writes) tail.consume(line);
+  assert.deepEqual(tail.snapshot().events, fakeGlobal.__editorSaveObservation().events);
+  assert.doesNotMatch(writes.join(''), /PRIVATE_|sessionToken|rows|sourceUri/);
+});
+
+test('partial observer installation failure restores hooks and preserves normal IPC startup', async () => {
+  const handlers = new Map();
+  const originalHandle = (name, listener) => handlers.set(name, listener);
+  const ipcMain = { handle: originalHandle };
+  const originalWrite = () => true;
+  const stdout = { write: originalWrite };
+  const stderr = Object.freeze({ write: originalWrite });
+  const h = createEditorSaveObservation({ ipcMain, stdout, stderr, clock: () => 1 });
+  assert.equal(ipcMain.handle, originalHandle); assert.equal(stdout.write, originalWrite);
+  ipcMain.handle('resource.saveScriptSource', () => 'normal');
+  assert.equal(await handlers.get('resource.saveScriptSource')(), 'normal');
+  assert.ok(h.snapshot().observerErrors > 0);
+});
+
+test('existing database trace admits only known fields and never payload/SQL/path data', () => {
+  const h = ports();
+  const trace = { method: 'finalizeCommit', event: 'finish', side: 'worker', outcome: 'ok', dbDurationMs: 4,
+    requestId: 'PRIVATE_ID', sql: 'PRIVATE_SQL', body: 'PRIVATE_BODY', path: '/PRIVATE_PATH' };
+  const line = `[SoulForge database utility trace] ${JSON.stringify(trace)}\n`;
+  assert.equal(h.stderr.write(line), false);
+  assert.deepEqual(h.writes[0], [line]);
+  assert.equal(h.snapshot().events[0].method, 'finalizeCommit');
+  assert.equal(h.snapshot().events[0].state, 'finish');
+  assert.doesNotMatch(JSON.stringify(h.snapshot()), /PRIVATE_|sql|body|path|requestId/);
+  h.restore();
+});
+
+test('existing knowledge load trace is observed without SQL, args or identity data', () => {
+  const h = ports();
+  h.stdout.write('[SoulForge database utility trace] {"method":"loadKnowledgeSnapshot","event":"start","side":"worker","sql":"PRIVATE_SQL"}\n');
+  assert.deepEqual(h.snapshot().events.map(event => event.stage), ['database']);
+  assert.equal(h.snapshot().events[0].method, 'loadKnowledgeSnapshot');
+  assert.doesNotMatch(JSON.stringify(h.snapshot()), /PRIVATE_|sql|body|path/);
+  h.restore();
+});
+
+test('observer clock/parser failures do not change original return/error or create a rejection', async () => {
+  const h = ports(() => { throw new Error('observer failure'); });
+  h.ipcMain.handle('resource.saveScriptSource', () => 'exact');
+  assert.equal(await h.handlers.get('resource.saveScriptSource')(), 'exact');
+  assert.equal(h.stderr.write('[SoulForge database utility trace] invalid\n'), false);
+  assert.ok(h.snapshot().observerErrors > 0);
+  h.restore();
+});
+
+test('fixed tail and input limits report dropped observations without retaining large frames', async () => {
+  const h = ports(); h.ipcMain.handle('resource.saveScriptSource', () => ({ ok: true }));
+  for (let index = 0; index < 100; index++) await h.handlers.get('resource.saveScriptSource')();
+  assert.equal(h.stderr.write('x'.repeat(70_000)), false);
+  const snapshot = h.snapshot();
+  assert.equal(snapshot.events.length, snapshot.limit);
+  assert.ok(snapshot.droppedEvents > 0); assert.ok(snapshot.droppedInput > 0);
+  h.restore();
+});

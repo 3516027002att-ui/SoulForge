@@ -6,13 +6,17 @@ import {
   isRagChunkDeltaStats,
   KnowledgeStore,
   openAppDatabase,
+  openWorkspaceDatabase,
+  backupWorkspaceDatabase,
   openSqliteOperationLogStore,
   SqliteKnowledgeStorePersistence,
   type SqliteDatabase,
   type SqliteOperationLogStore
 } from '@soulforge/core';
+import { SqliteOperationLogStore as ReadOnlyOperationLogStore } from '@soulforge/core';
 import {
   OPERATION_LOG_UTILITY_PROTOCOL,
+  isDatabaseReadMethod,
   type OpenWorkspaceDatabasePayload,
   type OperationLogUtilityRequest,
   type OperationLogUtilityResponse,
@@ -33,6 +37,7 @@ let queue: Promise<void> = Promise.resolve();
 let queueDepth = 0;
 let workspaceRootPath: string | null = null;
 let workspaceGame: string | null = null;
+const reader = process.env.SOULFORGE_DATABASE_ROLE === 'reader';
 
 const writeUtilityTrace = createQueueObservationWriter({ side: 'worker' });
 
@@ -116,6 +121,13 @@ async function handleRequest(value: unknown): Promise<'ok' | 'request-failed'> {
   }
 
   try {
+    if (value.deadlineAt !== undefined && Date.now() >= value.deadlineAt) {
+      throw codedError('DATABASE_UTILITY_REQUEST_NOT_EXECUTED', '数据库请求在执行前已过期。');
+    }
+    if (reader && !isDatabaseReadMethod(value.method)
+      && !['openWorkspace', 'openAppDatabase', 'close'].includes(value.method)) {
+      throw codedError('DATABASE_UTILITY_READ_ONLY', '只读数据库进程拒绝写入。');
+    }
     const result = await dispatch(value);
     post({
       protocolVersion: OPERATION_LOG_UTILITY_PROTOCOL,
@@ -178,6 +190,10 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
       return null;
     case 'transitionTransaction':
       return requireDurableRepository().transitionTransaction(request.payload);
+    case 'getTransactionForOperation':
+      return requireDurableRepository().getTransactionForOperation(request.payload.opId);
+    case 'findTransactionsForRequest':
+      return requireDurableRepository().findTransactionsForRequest(request.payload.sessionName, request.payload.requestId);
     case 'listIncompleteTransactions':
       return requireDurableRepository().listIncompleteTransactions();
     case 'recordRecoveryPoint':
@@ -298,7 +314,7 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
         ensureWorkspaceRow: false
       });
       let snapshot = persistence.load();
-      if (!snapshot) {
+      if (!snapshot && !reader) {
         // Preserve the old first-open behavior: gen-0 is durably initialized
         // on the utility connection, never through a main-process handle.
         new KnowledgeStore({ persistence, schemaVersion: 'knowledge-v1' });
@@ -314,6 +330,27 @@ async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
   let nextAppDatabase: SqliteDatabase | null = null;
   let next: SqliteOperationLogStore | null = null;
   try {
+    if (reader) {
+      // The writer has completed migration/import before this process opens.
+      nextAppDatabase = openAppDatabase(payload.appDatabasePath, { readonly: true, fileMustExist: true,
+        ...(process.env.SOULFORGE_SQLITE_NATIVE_BINDING ? { nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING } : {}) });
+      next = new ReadOnlyOperationLogStore(openWorkspaceDatabase(payload.databasePath, { readonly: true, fileMustExist: true,
+        ...(process.env.SOULFORGE_SQLITE_NATIVE_BINDING ? { nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING } : {}) }), payload.workspaceId, true);
+      store = next;
+      durableRepository = new DurableWorkspaceRepository(next.database, payload.workspaceId);
+      workspaceDataRepository = new WorkspaceDataRepository(next.database, payload.workspaceId);
+      appDatabase = nextAppDatabase;
+      appDatabasePath = payload.appDatabasePath;
+      workspaceId = payload.workspaceId;
+      workspaceRootPath = payload.rootPath;
+      workspaceGame = payload.game;
+      return { workspaceId, legacyImport: { status: 'source_missing', recordCount: 0 }, semanticImport: { status: 'source_missing', nodeCount: 0, edgeCount: 0 } };
+    }
+    if (payload.migrationSourceDatabasePath) {
+      await backupWorkspaceDatabase(payload.migrationSourceDatabasePath, payload.databasePath, {
+        ...(process.env.SOULFORGE_SQLITE_NATIVE_BINDING ? { nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING } : {})
+      });
+    }
     nextAppDatabase = openAppDatabase(payload.appDatabasePath, {
       ...(process.env.SOULFORGE_SQLITE_NATIVE_BINDING
         ? { nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING }
@@ -339,6 +376,12 @@ async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
       database: next.database,
       workspaceId: payload.workspaceId
     });
+    if (!next.database.prepare('SELECT 1 FROM knowledge_current WHERE workspace_id = ?').get(payload.workspaceId)) {
+      const persistence = new SqliteKnowledgeStorePersistence(next.database, {
+        workspaceId: payload.workspaceId, rootPath: payload.rootPath, game: payload.game, ensureWorkspaceRow: false
+      });
+      new KnowledgeStore({ persistence, schemaVersion: 'knowledge-v1' });
+    }
     store = next;
     durableRepository = new DurableWorkspaceRepository(next.database, payload.workspaceId);
     workspaceDataRepository = new WorkspaceDataRepository(next.database, payload.workspaceId);
@@ -371,6 +414,7 @@ async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
 function openAppDatabaseOnly(databasePath: string): { appReady: true } {
   if (appDatabase && appDatabasePath === databasePath) return { appReady: true };
   const next = openAppDatabase(databasePath, {
+    ...(reader ? { readonly: true, fileMustExist: true } : {}),
     ...(process.env.SOULFORGE_SQLITE_NATIVE_BINDING
       ? { nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING }
       : {})

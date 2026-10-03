@@ -29,7 +29,7 @@
  *      与 validateToolInput 实际强制的是同一套,而不是两份会漂移的副本;
  *   ⑦ `enum:a|b|c` 声明的取值必须逐个到达模型,且运行期必须真的拒绝集合外的值,
  *      拒绝信息里要列全合法取值;
- *   ⑧ 声明的每个枚举取值,handler 侧归一化函数必须真的接受(不能静默回落);
+ *   ⑧ 声明的每个枚举取值,handler 侧归一化或实际调用必须真的接受(不能静默回落);
  *   ⑨ 整个 input 即某个已知类型的工具(validate_patch / build_patch_graph 的
  *      input 就是 PatchProposal),其必填字段必须与该类型的必填成员一致 ——
  *      第二源是 packages/shared/src/types.ts 的接口定义,不是重述声明。
@@ -109,10 +109,13 @@ const {
   ENUM_FIELD_NORMALIZERS
 } = await import(pathToFileURL(REGISTRY_JS).href);
 const { createAgentToolBridge } = await import(pathToFileURL(BRIDGE_JS).href);
+const { asResourceKinds } = await import(pathToFileURL(join(DIST, 'toolRegistrySupport.js')).href);
+const { WorkspaceIndex } = await import(pathToFileURL(join(DIST, '..', 'indexing', 'workspaceIndex.js')).href);
 
 // 判据⑧读的是生产侧真实归一化函数,不是门禁自己重述一遍取值集合。
 // 重述等于第二份副本,会漂移。
 const ENUM_NORMALIZERS = ENUM_FIELD_NORMALIZERS ?? {};
+const ENUM_ARRAY_NORMALIZERS = { 'search_resources.kinds': asResourceKinds };
 let enumAcceptanceProbes = 0;
 const exemptionsApplied = [];
 
@@ -126,6 +129,55 @@ const bridge = createAgentToolBridge({
 });
 
 const findings = [];
+
+/** sourceFilter has no normalizer: observe the actual handler and index instead. */
+async function checkResourceSourceFilter(values) {
+  const workspace = new WorkspaceIndex('schema-source-filter');
+  const paths = ['map/primary.txt', 'map/recovery.txt.bak'];
+  const files = paths.map((relativePath, index) => ({
+    id: relativePath, workspaceId: 'schema-source-filter', sourceUri: `file:///${relativePath}`,
+    sourcePath: relativePath, absolutePath: `/schema-source-filter/${relativePath}`, relativePath,
+    game: 'sekiro', resourceKind: 'map', parseStatus: 'unparsed', diagnostics: [],
+    extension: '.txt', compoundExtension: '.txt', formatKind: 'text', formatLabel: 'Text', size: 1, mtimeMs: 1,
+    ...(index === 1 ? { artifactMarkers: { artifactRole: 'backup', sourceLayer: 'overlay' } } : {})
+  }));
+  workspace.setFiles(files);
+  const expectedUris = {
+    active: [files[0].sourceUri], all: files.map((file) => file.sourceUri), artifacts: [files[1].sourceUri]
+  };
+  const searches = [];
+  const searchResourcesPage = workspace.searchResourcesPage.bind(workspace);
+  workspace.searchResourcesPage = (options) => {
+    searches.push(options);
+    return searchResourcesPage(options);
+  };
+  const context = { workspaceIndex: workspace, mode: 'fullPermission' };
+  for (const value of values) {
+    searches.length = 0;
+    const result = await registry.run('search_resources', { sourceFilter: value }, context);
+    const actualUris = result.data?.matches?.map(({ item }) => item.sourceUri).sort();
+    if (!result.ok || searches.length !== 1 || searches[0].sourceFilter !== value
+      || Object.keys(searches[0]).length !== 1
+      || JSON.stringify(actualUris) !== JSON.stringify(expectedUris[value]?.slice().sort())) {
+      findings.push({
+        code: 'ENUM_VALUE_NOT_ACCEPTED', tool: 'search_resources', field: 'sourceFilter', value,
+        searchOptions: searches.map((options) => ({ ...options })), actualUris, expectedUris: expectedUris[value], error: result.error,
+        message: 'search_resources 必须原样传递 sourceFilter 并返回该范围内的资源。'
+      });
+    }
+  }
+  for (const value of ['__not_a_valid_enum_value__', '', 'ALL', null, 1, [], {}]) {
+    searches.length = 0;
+    const result = await registry.run('search_resources', { sourceFilter: value }, context);
+    if (result.ok || result.error?.code !== 'INVALID_INPUT' || searches.length !== 0) {
+      findings.push({
+        code: 'ENUM_NOT_ENFORCED', tool: 'search_resources', field: 'sourceFilter', value,
+        searchOptions: searches.map((options) => ({ ...options })), error: result.error,
+        message: 'sourceFilter 非法时必须在资源搜索前以 INVALID_INPUT 拒绝。'
+      });
+    }
+  }
+}
 
 /** 构造探针输入用的合法占位值。 */
 const PLACEHOLDER = {
@@ -200,13 +252,14 @@ for (const descriptor of descriptors) {
   // 故它必须投影成 type=string 且带 enum 列表 —— 与「未识别类型串」不同,
   // 后者运行期一律放过,投影就不能宣告任何类型。
   const enumValuesOf = (bare) => {
-    if (!bare.startsWith('enum:')) return null;
-    const values = bare.slice('enum:'.length).split('|').filter((value) => value.length > 0);
+    const prefix = bare.startsWith('enum[]:') ? 'enum[]:' : 'enum:';
+    if (!bare.startsWith(prefix)) return null;
+    const values = bare.slice(prefix.length).split('|').filter((value) => value.length > 0);
     return values.length > 0 ? values : null;
   };
   const expectedTypeFor = (declared) => {
     const bare = declared.endsWith('?') ? declared.slice(0, -1) : declared;
-    if (enumValuesOf(bare) !== null) return 'string';
+    if (enumValuesOf(bare) !== null) return bare.startsWith('enum[]:') ? 'array' : 'string';
     if (bare === 'safe-integer') return 'integer';
     if (bare === 'string[]') return 'array';
     return ['string', 'number', 'boolean', 'array', 'object'].includes(bare) ? bare : null;
@@ -217,6 +270,7 @@ for (const descriptor of descriptors) {
     const optional = declared.endsWith('?');
     const bare = optional ? declared.slice(0, -1) : declared;
     const declaredEnum = enumValuesOf(bare);
+    const enumArray = bare.startsWith('enum[]:');
     const expectedType = expectedTypeFor(declared);
 
     // 判据②:字段必须存在。
@@ -269,7 +323,7 @@ for (const descriptor of descriptors) {
     // 于是模型基于一个它没要求的结果继续推理。
     if (declaredEnum !== null) {
       declaredCounts.enumFields += 1;
-      const exposedEnum = properties[field]?.enum;
+      const exposedEnum = enumArray ? properties[field]?.items?.enum : properties[field]?.enum;
       if (!Array.isArray(exposedEnum)) {
         findings.push({
           code: 'SCHEMA_ENUM_NOT_EXPOSED',
@@ -305,7 +359,7 @@ for (const descriptor of descriptors) {
         const otherBare = otherDeclared.slice(0);
         probeInput[otherField] = PLACEHOLDER[otherBare] ?? 'x';
       }
-      probeInput[field] = '__not_a_valid_enum_value__';
+      probeInput[field] = enumArray ? [declaredEnum[0], '__not_a_valid_enum_value__'] : '__not_a_valid_enum_value__';
       const enumVerdict = validateToolInput(shape, probeInput);
       if (enumVerdict.ok) {
         findings.push({
@@ -335,13 +389,17 @@ for (const descriptor of descriptors) {
       // 变宽 —— 实测把 direction 声明成 enum:from|to|both|sideways 时判据⑦
       // 全绿,而 asReferenceDirection 只认三个值,sideways 会被静默回落成
       // both。模型照 schema 传了一个「合法」值,拿回的却是它没要求的方向。
-      // 故必须拿 handler 的归一化函数做反向对钉。
-      const normalizer = ENUM_NORMALIZERS[`${descriptor.name}.${field}`];
+      // 故必须拿 handler 的归一化或真实调用做反向对钉。
+      const normalizer = (enumArray ? ENUM_ARRAY_NORMALIZERS : ENUM_NORMALIZERS)[`${descriptor.name}.${field}`];
       if (normalizer) {
         enumAcceptanceProbes += 1;
         for (const value of declaredEnum) {
-          const accepted = normalizer(value);
-          if (accepted !== value) {
+          const expected = enumArray ? [value] : value;
+          const accepted = normalizer(expected);
+          const matches = enumArray
+            ? Array.isArray(accepted) && accepted.length === 1 && accepted[0] === value
+            : accepted === value;
+          if (!matches) {
             findings.push({
               code: 'ENUM_VALUE_NOT_ACCEPTED',
               tool: descriptor.name,
@@ -354,6 +412,9 @@ for (const descriptor of descriptors) {
             });
           }
         }
+      } else if (descriptor.name === 'search_resources' && field === 'sourceFilter' && !enumArray) {
+        enumAcceptanceProbes += 1;
+        await checkResourceSourceFilter(declaredEnum);
       } else {
         findings.push({
           code: 'ENUM_NORMALIZER_UNREGISTERED',
@@ -659,6 +720,7 @@ report({
     + 'required 声明与 validateToolInput 同源;枚举取值逐个到达且 handler 真的接受;'
     + '整个 input 即已知类型的两个工具,其必填字段与 shared 的接口定义一致。'
     + ' 不证明的:字段名起得是否合理;'
+    + '除实测 search_resources.sourceFilter 的传递与筛选外,其他'
     + '「整个 input 即某类型」以外的工具其 run 体是否真的读取了声明字段'
     + '(WHOLE_INPUT_TYPES 只覆盖 validate_patch / build_patch_graph);'
     + 'assess_edit_risk.file 的内层必填字段(ToolInputShape 是 Record<string,string>,'

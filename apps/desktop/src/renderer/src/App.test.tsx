@@ -17,18 +17,42 @@ const appSource = readFileSync(
   join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'App.tsx'),
   'utf8'
 );
+const workspaceControllerSource = /from '\.\/app\/useWorkspaceController\.js'/.test(appSource)
+  ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'useWorkspaceController.ts'), 'utf8')
+  : appSource;
+const agentControllerSource = /from '\.\/app\/useAgentUiController\.js'/.test(appSource)
+  ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'useAgentUiController.ts'), 'utf8')
+  : appSource;
+const navigationControllerSource = /from '\.\/app\/useNavigationController\.js'/.test(appSource)
+  ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'useNavigationController.ts'), 'utf8')
+  : appSource;
+const changeOperationsControllerSource = /from '\.\/app\/useChangeOperationsController\.js'/.test(appSource)
+  ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'useChangeOperationsController.ts'), 'utf8')
+  : appSource;
+const workspaceHeaderSource = /from '\.\/app\/WorkspaceHeaderView\.js'/.test(appSource)
+  ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'WorkspaceHeaderView.tsx'), 'utf8')
+  : appSource;
+const navigationViewSource = /from '\.\/app\/NavigationSidebarViews\.js'/.test(appSource)
+  ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'NavigationSidebarViews.tsx'), 'utf8')
+  : appSource;
+const commandPaletteViewSource = /from '\.\/app\/CommandPaletteView\.js'/.test(appSource)
+  ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'CommandPaletteView.tsx'), 'utf8')
+  : appSource;
+const operationsViewSource = /from '\.\/app\/ChangeOperationsViews\.js'/.test(appSource)
+  ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'ChangeOperationsViews.tsx'), 'utf8')
+  : appSource;
 // buildDomainSummaries 的 visibility 逻辑在 domainNavigation.ts。
 const domainNavigationSource = readFileSync(
   join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'navigation', 'domainNavigation.ts'),
   'utf8'
 );
-// IPC 物理拆分后，回滚域 handler 位于 ipc/operations.ts（断言语义不变）。
+// 回滚业务位于 services/operationService.ts（断言语义不变）。
 const ipcSource = readFileSync(
-  join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc', 'operations.ts'),
+  join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'services', 'operationService.ts'),
   'utf8'
 );
 const workspaceIpcSource = readFileSync(
-  join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc', 'workspace.ts'),
+  join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'services', 'workspaceService.ts'),
   'utf8'
 );
 const workbenchOpsSource = readFileSync(
@@ -60,20 +84,23 @@ describe('问题 1 壳层：开始页只在首次打开；顶栏「开始」召�
     assert.doesNotMatch(appSource, /hasWorkspace: workspace !== null,\s*\n\s*runtimeReady/);
     // 点「开始」的选中态 = 资源栏开着。
     assert.match(appSource, /resourceSidebarOpen/);
-    assert.match(appSource, /domain === 'project' && workspace !== null/);
-    assert.match(appSource, /召唤资源栏/);
+    assert.match(navigationControllerSource, /domain === 'project' && (?:ports\.)?workspace !== null/);
+    assert.match(navigationControllerSource, /setSidebarCollapsed\(collapsed => !collapsed && sidebarView === 'explorer' \? true : false\)/);
   });
 
   it('标题栏不可点品牌标签换成 workspace-switcher 按钮/菜单（打开/更换 Mod、选/换/清原版）', () => {
-    assert.match(appSource, /data-testid="workspace-switcher"/);
-    assert.match(appSource, /data-testid="switcher-open-workspace"/);
-    assert.match(appSource, /data-testid="switcher-choose-base-directory"/);
-    assert.match(appSource, /data-testid="switcher-clear-base-directory"/);
-    assert.match(appSource, /void openWorkspace\(\)/);
-    assert.match(appSource, /void chooseBaseDirectory\(\)/);
-    assert.match(appSource, /clearBaseDirectory\(\)/);
+    assert.match(workspaceHeaderSource, /data-testid="workspace-switcher"/);
+    if (workspaceHeaderSource !== appSource) {
+      assert.match(appSource, /<WorkspaceHeaderView workspace=\{workspaceController\} shell=\{shellInteraction\}/);
+    }
+    assert.match(workspaceHeaderSource, /data-testid="switcher-open-workspace"/);
+    assert.match(workspaceHeaderSource, /data-testid="switcher-choose-base-directory"/);
+    assert.match(workspaceHeaderSource, /data-testid="switcher-clear-base-directory"/);
+    assert.match(workspaceHeaderSource, /void openWorkspace\(\)/);
+    assert.match(workspaceHeaderSource, /void chooseBaseDirectory\(\)/);
+    assert.match(workspaceHeaderSource, /clearBaseDirectory\(\)/);
     // 旧的不可点品牌标签已移除。
-    assert.doesNotMatch(appSource, /className="brand-tag"/);
+    assert.doesNotMatch(workspaceHeaderSource, /className="brand-tag"/);
   });
 
   it('开始态侧栏已拆：源码不得再有 start-sidebar / start-sidebar-tools / start-sidebar-file-list', () => {
@@ -81,23 +108,26 @@ describe('问题 1 壳层：开始页只在首次打开；顶栏「开始」召�
     assert.doesNotMatch(appSource, /data-testid="start-sidebar-tools"/);
     assert.doesNotMatch(appSource, /data-testid="start-sidebar-file-list"/);
     assert.doesNotMatch(appSource, /START_SIDEBAR_FILE_LIMIT/);
+    assert.match(appSource, /import \{ WorkspaceSummaryView \} from '\.\/app\/WorkspaceSummaryView\.js'/);
+    assert.match(appSource, /<WorkspaceSummaryView workspace=\{workspaceController\} operations=\{changeOperations\} document=\{resourceDocument\}/);
   });
 
   it('mountWorkspace 不把 activeDomain 落回 project：恢复失败时默认进 param', () => {
     // 有工作区后挂载不得「先写回 project 再指望恢复」——旧实现
     // `setActiveDomain('project'); setCenterView('project');` 的顺序已删除。
-    assert.doesNotMatch(appSource, /setActiveDomain\('project'\)/);
+    assert.doesNotMatch(navigationControllerSource, /setActiveDomain\('project'\)/);
     // restore 返回 boolean；没有合法上次领域 → 默认 param。
-    assert.match(appSource, /const restoredDomain = restoreLastShellState/);
-    assert.match(appSource, /if \(!restoredDomain\)/);
-    assert.match(appSource, /setActiveDomain\('param'\)/);
+    assert.match(appSource, /installWorkspaceNavigation\(result\.workspaceSessionId, result\.files\)/);
+    assert.match(navigationControllerSource, /if \(restoreLastShellState\(workspaceSessionId, index\)\) return;/);
+    assert.match(navigationControllerSource, /setActiveDomain\('param'\)/);
   });
 
   it('启动恢复只落地一次：过时挂载丢弃，不得叠两套 toast', () => {
-    assert.match(appSource, /let cancelled = false/);
-    assert.match(appSource, /mountGenerationRef/);
-    assert.match(appSource, /if \(generation !== mountGenerationRef\.current\) return/);
-    assert.doesNotMatch(appSource, /restoreAttemptedRef/);
+    assert.match(workspaceControllerSource, /let cancelled = false/);
+    assert.match(workspaceControllerSource, /mountGenerationRef/);
+    assert.match(workspaceControllerSource, /mountGenerationRef\.current === generation/);
+    assert.match(workspaceControllerSource, /if \(!ownsMount\(generation\)\) return/);
+    assert.doesNotMatch(workspaceControllerSource, /restoreAttemptedRef/);
   });
 
   it('workspace.analyze 不得把目录扫描当成已解析并回报 parsedFiles:0', () => {
@@ -107,16 +137,17 @@ describe('问题 1 壳层：开始页只在首次打开；顶栏「开始」召�
   });
 
   it('Agent 任务默认开启一次性 RAG 预检', () => {
-    assert.match(appSource, /useRagSearch:\s*true/);
+    assert.match(agentControllerSource, /useRagSearch:\s*true/);
   });
 
   it('12-E：侧栏不再拼「XX · 逻辑库」（所有语义域都删，Files 数量与 project「开始」仍在）', () => {
     // 用户点名的是侧栏头那句「XX · 逻辑库」：这一句所有域都删，且不留空 hint span。
-    assert.doesNotMatch(appSource, /\$\{domainLabel\(activeDomain\)\} · 逻辑库/);
-    assert.doesNotMatch(appSource, /逻辑库工作域/);
-    assert.doesNotMatch(appSource, /逻辑库工作台/);
+    assert.doesNotMatch(navigationViewSource, /\$\{domainLabel\(activeDomain\)\} · 逻辑库/);
+    assert.doesNotMatch(navigationViewSource, /逻辑库工作域/);
+    assert.doesNotMatch(navigationViewSource, /逻辑库工作台/);
     // Files 数量保留。
-    assert.match(appSource, /formatFilesCount\(physicalBrowseFiles\.length\)/);
+    assert.match(navigationViewSource, /formatFilesCount\(physicalBrowseFiles\.length\)/);
+    if (navigationViewSource !== appSource) assert.match(appSource, /<NavigationSidebarViews navigation=\{navigation\} resource=\{resourceDocument\}/);
   });
 });
 
@@ -128,24 +159,25 @@ describe('P0 回滚与会话续接防线', () => {
   });
 
   it('回滚只锁定当前入口，历史刷新按最新请求落地，快速多击不会重复提交', () => {
-    assert.match(appSource, /rollbackInFlightRef/);
-    assert.match(appSource, /operationHistoryRefreshRef/);
-    assert.match(appSource, /operationHistoryRequestRef/);
-    assert.doesNotMatch(appSource, /disabled=\{rollbackInFlight !== null\}/);
+    assert.match(changeOperationsControllerSource, /rollbackInFlightRef/);
+    assert.match(changeOperationsControllerSource, /operationHistoryRefreshRef/);
+    assert.match(changeOperationsControllerSource, /operationHistoryRequestRef/);
+    assert.doesNotMatch(operationsViewSource, /disabled=\{rollbackInFlight !== null\}/);
     assert.doesNotMatch(workbenchOpsSource, /rollbackBusy\?: boolean/);
     assert.doesNotMatch(workbenchOpsSource, /disabled=\{props\.rollbackBusy === true\}/);
     assert.match(workbenchOpsSource, /rollbackBusyOpId\?: string \| null/);
     assert.match(workbenchOpsSource, /props\.rollbackBusyOpId === row\.opId/);
-    assert.match(appSource, /已有回滚正在处理中，请等待当前操作完成/);
-    assert.match(appSource, /rollbackInFlight === `operation:\$\{entry\.opId\}`/);
-    assert.match(appSource, /rollbackInFlight === `file:\$\{entry\.opId\}:\$\{path\}`/);
+    assert.match(changeOperationsControllerSource, /已有回滚正在处理中，请等待当前操作完成/);
+    assert.match(operationsViewSource, /rollbackInFlight === `operation:\$\{entry\.opId\}`/);
+    assert.match(operationsViewSource, /rollbackInFlight === `file:\$\{entry\.opId\}:\$\{path\}`/);
+    if (operationsViewSource !== appSource) assert.match(appSource, /<ChangeOperationsSidebarViews operations=\{changeOperations\}/);
     assert.match(appSource, /reloadSelectedResourceAfterRollback/);
     assert.match(appSource, /selectFile\(\{ \.\.\.selectedFile \}\)/);
   });
 
   it('partial/max_steps 不会被普通发送隐式续接', () => {
-    assert.match(appSource, /canAutoResumeAgentTask\(agentTask\)/);
-    assert.doesNotMatch(appSource, /agentTask\.phase === 'done' \|\| agentTask\.phase === 'error'/);
+    assert.match(agentControllerSource, /canAutoResumeAgentTask\(agentTask\)/);
+    assert.doesNotMatch(agentControllerSource, /agentTask\.phase === 'done' \|\| agentTask\.phase === 'error'/);
   });
 });
 
@@ -186,10 +218,11 @@ describe('命令面板资源搜索', () => {
   ] as const;
 
   it('App 只在已打开工作区的 indexedFiles 中渲染资源候选，并保留区分空态', () => {
-    assert.match(appSource, /const cmdkAllResourceMatches = useMemo\(\(\) =>/);
-    assert.match(appSource, /if \(!cmdkOpen \|\| !workspace \|\| !cmdkNormalized\) return \[\];/);
-    assert.match(appSource, /filterCommandPaletteResources\(indexedFiles, cmdkNormalized\)/);
-    assert.match(appSource, /workspace \? '无匹配命令或资源。' : '请先打开 Mod 工作区；打开后可搜索资源。'/);
+    assert.match(navigationControllerSource, /const cmdkAllResourceMatches = useMemo\(\(\) =>/);
+    assert.match(navigationControllerSource, /!options\.cmdkOpen \|\| !workspace \|\| !cmdkNormalized \? \[\]/);
+    assert.match(navigationControllerSource, /filterCommandPaletteResources\(indexedFiles, cmdkNormalized\)/);
+    assert.match(commandPaletteViewSource, /workspace \? '无匹配命令或资源。' : '请先打开 Mod 工作区；打开后可搜索资源。'/);
+    if (commandPaletteViewSource !== appSource) assert.match(appSource, /<CommandPaletteView cmdkOpen=\{cmdkOpen\} cmdkQuery=\{cmdkQuery\}/);
   });
 
   it('完整路径、basename、斜杠/反斜杠和裸 basename 都只从索引中稳定命中', () => {

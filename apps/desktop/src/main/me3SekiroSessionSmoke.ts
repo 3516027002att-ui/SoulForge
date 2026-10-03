@@ -15,8 +15,9 @@
  * Launch is augmented by the privileged gateway env contract: a non-Steam game
  * root is passed to me3 via `-e <root>\sekiro.exe`, and SOULFORGE_ME3_SEKIRO_SUSPEND
  * keeps the game suspended until a debugger attaches so no renderer runs. The
- * game directory is only ever read (snapshotted before/after); me3 writes its
- * cache under its own LOCALAPPDATA directories, never the game folder.
+ * game directory is snapshotted before/after; me3 may create or update its
+ * root mod_loader_log.txt. That exact runtime artifact is disclosed separately
+ * from unexpected game resource changes.
  *
  * Without SOULFORGE_ME3_SEKIRO_SESSION_RUN the smoke is an honest skip: it
  * never fakes a launch.
@@ -37,6 +38,7 @@ import type {
 } from '@soulforge/core';
 import { Me3RuntimeAdapter } from '@soulforge/core';
 import { MainMe3RuntimeGateway } from './me3RuntimeGateway.js';
+import { classifyGameDirectoryChanges, cleanupDiagnostic, type CleanupAttempt } from './me3SekiroSessionEvidence.js';
 
 const SEKIRO_EXE = 'sekiro.exe';
 const ME3_EXE = 'me3.exe';
@@ -101,7 +103,9 @@ function listProcesses(name: string): ProcessRow[] {
     windowsHide: true,
     shell: false
   });
-  if (result.status !== 0) return [];
+  if (result.error || result.status !== 0) {
+    throw new Error(`ME3_PROCESS_OBSERVATION_FAILED: tasklist ${name}: ${result.error?.message ?? `exit ${result.status}`}`);
+  }
   const rows: ProcessRow[] = [];
   for (const line of (result.stdout ?? '').split(/\r?\n/)) {
     const match = /"([^"]+)","(\d+)"/.exec(line);
@@ -177,51 +181,42 @@ function snapshotDigest(files: FileSnapshot[]): string {
   return hash.digest('hex');
 }
 
-function diffSnapshots(before: FileSnapshot[], after: FileSnapshot[]): string[] {
-  const afterByName = new Map(after.map((file) => [file.name, file]));
-  const changes: string[] = [];
-  for (const file of before) {
-    const next = afterByName.get(file.name);
-    if (!next) {
-      changes.push(`removed:${file.name}`);
-    } else if (next.size !== file.size || next.mtimeMs !== file.mtimeMs) {
-      changes.push(`changed:${file.name}`);
-    }
-  }
-  for (const file of after) {
-    if (!before.some((item) => item.name === file.name)) changes.push(`added:${file.name}`);
-  }
-  return changes.sort();
-}
-
 // ---- watchdog ----
 
 const sessionStartedAt = Date.now();
 let forcedCleanup = false;
-function forceCleanup(): void {
+function forceCleanup(reason: 'watchdog' | 'failure' | 'exception'): void {
   forcedCleanup = true;
-  const killed: string[] = [];
+  const attempts: CleanupAttempt[] = [];
+  const observationFailures: string[] = [];
   for (const image of [SEKIRO_EXE, ME3_EXE]) {
-    const result = spawnSync('taskkill', ['/IM', image, '/T', '/F'], {
-      windowsHide: true,
-      stdio: 'ignore'
-    });
-    if (result.status !== 0 && result.status !== 128) killed.push(`${image}(code=${result.status})`);
+    let rows: ProcessRow[];
+    try { rows = listProcesses(image); }
+    catch (error) { observationFailures.push(String(error)); continue; }
+    for (const row of rows) {
+      const result = spawnSync('taskkill', ['/PID', String(row.pid), '/T', '/F'], {
+        windowsHide: true,
+        stdio: 'ignore'
+      });
+      let remainingPids: number[] | null = null;
+      try { remainingPids = listProcesses(image).map(process => process.pid); }
+      catch (error) { observationFailures.push(String(error)); }
+      attempts.push({ image, pid: row.pid, exitCode: result.status, remainingPids });
+    }
   }
-  diag('error', 'ME3_SESSION_WATCHDOG_KILLED', '会话超时，看门狗已强制终止残留 me3/sekiro 进程树。', {
-    killed
-  });
+  const diagnostic = cleanupDiagnostic(reason, attempts, Date.now() - sessionStartedAt, WATCHDOG_MS, observationFailures);
+  diag(diagnostic.severity, diagnostic.code, diagnostic.message, diagnostic.details);
 }
 const watchdog = setTimeout(() => {
-  forceCleanup();
-  finish('failed', '会话总时长超过上限，已强制清理并中止。', { timeoutMs: WATCHDOG_MS });
+  forceCleanup('watchdog');
+  finish('failed', '会话总时长超过上限，已尝试清理并中止。', { timeoutMs: WATCHDOG_MS });
 }, WATCHDOG_MS);
 watchdog.unref();
 
 // ---- session flow ----
 
 function failClosed(message: string, extra: Record<string, unknown> = {}): never {
-  forceCleanup();
+  forceCleanup('failure');
   finish('failed', message, extra);
 }
 
@@ -262,6 +257,9 @@ async function main(): Promise<void> {
   if (!RUN) {
     finish('skipped',
       'SOULFORGE_ME3_SEKIRO_SESSION_RUN 未设置，真实 Sekiro 会话未执行（结构化预检 + 诚实跳过）。');
+  }
+  if (process.platform !== 'win32') {
+    finish('skipped', '真实 Sekiro 会话需要 Windows 进程观察与 me3.exe；当前平台未执行游戏。', { code: 'ME3_SEKIRO_PLATFORM_UNAVAILABLE' });
   }
   step('env', true, {
     run: RUN,
@@ -395,7 +393,11 @@ async function main(): Promise<void> {
 
   // 8. game directory read-only check
   const afterSnapshot = await snapshotGameRoot(GAME_ROOT);
-  const changes = diffSnapshots(beforeSnapshot, afterSnapshot);
+  const { unexpectedChanges: changes, runtimeArtifactChanges } = classifyGameDirectoryChanges(beforeSnapshot, afterSnapshot);
+  if (runtimeArtifactChanges.length > 0) {
+    diag('info', 'ME3_RUNTIME_ARTIFACT_CHANGED', 'me3 启动产生了预期的 loader 日志变动。', { runtimeArtifactChanges });
+  }
+  report.runtimeArtifactChanges = runtimeArtifactChanges;
   if (changes.length > 0) {
     diag('warning', 'GAME_DIR_CHANGED', '会话期间游戏目录出现文件变动（本 smoke 自身不写入）。', {
       changes
@@ -404,7 +406,8 @@ async function main(): Promise<void> {
   step('game-dir-snapshot-after', changes.length === 0, {
     fileCount: afterSnapshot.length,
     digest: snapshotDigest(afterSnapshot),
-    changes
+    changes,
+    runtimeArtifactChanges
   });
 
   const clean = term2.ok === true
@@ -415,7 +418,7 @@ async function main(): Promise<void> {
     // 字段名与 authority 都必须与本套件真正观测到的东西对齐。
     //
     // 本套件观测的全是**进程生命周期**：profile 创建、launch、轮询 tasklist
-    // 确认存活、terminate 后进程树消失、游戏目录快照无变动。它用 --suspend
+    // 确认存活、terminate 后进程树消失、游戏资源快照无意外变动。它用 --suspend
     // 启动（渲染器不运行），且 me3RuntimeAdapter 传入的 packagePaths 为空数组
     // ——启动的 profile 里 Mod 包数为零。没有任何一步读内存、读游戏日志或观察画面。
     //
@@ -425,7 +428,7 @@ async function main(): Promise<void> {
     //  · authority 不再置 native-verified。进程起来又干净退出，不足以支撑
     //    「原生已验证」；真实 Mod 加载确认仍是 REL-H 的 open 项。
     //
-    // 另注意成功判据里的 changes.length === 0 是「我们没写游戏目录」，
+    // 成功判据 changes.length === 0 排除已单独披露的 me3 loader 日志，
     // 它是 Mod 已加载的**反面**证据，不能被读成加载成功。
     report.sekiroProcessLifecycleObserved = true;
     report.authority = 'candidate';
@@ -443,7 +446,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  forceCleanup();
+  forceCleanup('exception');
   console.error(error instanceof Error ? error.stack ?? error.message : String(error));
   finish('failed', '会话 smoke 抛出了未捕获异常。', {
     error: error instanceof Error ? error.message : String(error)

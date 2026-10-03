@@ -1,0 +1,97 @@
+
+/* 通用列表 / 表格 / 输入（模型服务、FLVER、EMEVD 等面板） */
+.list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.list li {
+  border: 1px solid var(--line); border-radius: var(--radius-m);
+  padding: 6px 10px; background: var(--forge-0);
+  color: var(--ink-1); font-size: 12px;
+}
+.table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.table th {
+  text-align: left; padding: 6px 10px; color: var(--ink-3);
+  font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  border-bottom: 1px solid var(--line-strong);
+}
+.table td { padding: 5px 10px; border-bottom: 1px solid var(--line); color: var(--ink-1); }
+.input { padding: 6px 10px; font-size: 12.5px; }
+
+/* 三维场景宿主 */
+.scene-host { border: 1px solid var(--line); border-radius: var(--radius-m); overflow: hidden; }
+
+/* 结构化预览 / 容器读取 / 原生检查卡片 */
+.structured-preview-card,
+.container-read-card,
+.native-inspection-card,
+.text-editor-panel,
+.msg-table-editor,
+.context-card,
+.tool-panel {
+  border: 1px solid var(--line); border-radius: var(--radius-m);
+  background: var(--forge-1); padding: 10px 12px;
+}
+.structured-preview-title,
+.container-read-title,
+.text-editor-toolbar,
+.native-inspection-title {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+}
+.structured-preview-title span,
+.container-read-title span,
+.native-inspection-title span {
+  border: 1px solid var(--line-strong); border-radius: 999px;
+  padding: 3px 8px; color: var(--ember-text);
+  font-size: 11px; font-weight: 700; white-space: nowrap;
+}
+.structured-preview-card p,
+.container-read-card p { margin: 10px 0 0; color: var(--ink-1); line-height: 1.45; font-size: 12px; }
+.structured-preview-grid,
+.container-read-grid,
+.native-inspection-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px;
+  margin-top: 10px; color: var(--ink-1); font-size: 12px;
+}
+.structured-preview-card details,
+.container-read-card details,
+.native-inspection-card details,
+.agent-draft details { margin-top: 10px; }
+.structured-preview-card summary,
+.container-read-card summary,
+.native-inspection-card summary,
+.agent-draft summary { color: var(--ember-text); cursor: pointer; font-size: 12px; }
+.structured-symbol-list,
+.container-hint-list,
+.save-diagnostics { display: grid; gap: 6px; margin-top: 8px; }
+.structured-symbol-list span,
+.container-hint-list span,
+.save-diagnostics span {
+  border: 1px solid var(--line); border-radius: var(--radius-m);
+  padding: 5px 8px; color: var(--ink-1); background: var(--forge-0);
+  font-size: 12px; word-break: break-all; user-select: text;
+}
+
+/* 编辑能力条 */
+.edit-capability-strip { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.capability-pill {
+  border: 1px solid var(--line-strong); border-radius: 999px;
+  padding: 4px 8px; font-size: 11px; font-weight: 700;
+}
+.capability-pill.ready {
+  border-color: color-mix(in oklch, var(--ok), transparent 45%);
+  color: var(--ok); background: var(--ok-soft);
+}
+.capability-pill.blocked { color: var(--ink-2); background: var(--forge-2); }
+
+/* 原生检查 */
+.native-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.native-chip-row span {
+  border: 1px solid var(--line-strong); border-radius: 999px;
+  padding: 4px 8px; color: var(--ink-1); background: var(--forge-2); font-size: 11px;
+}
+.native-inspection-card ol { margin: 8px 0 0; padding-left: 20px; color: var(--ink-1); font-size: 12px; line-height: 1.5; }
+.native-evidence-list { display: grid; gap: 8px; margin: 8px 0 0; padding-left: 0; list-style: none; }
+.native-evidence-list li {
+  display: grid; gap: 4px;
+  border: 1px solid var(--line); border-radius: var(--radius-m);
+  padding: 8px; background: var(--forge-0); color: var(--ink-1); font-size: 12px;
+}
+.native-evidence-list code { overflow-wrap: anywhere; white-space: pre-wrap; color: var(--ember-text); user-select: text; }

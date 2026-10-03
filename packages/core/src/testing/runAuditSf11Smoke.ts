@@ -104,11 +104,10 @@ function buildStandardSyntheticTae(): Buffer {
   b.writeBigInt64LE(0n, 0x78);
 
   // Animation Table (0x80)
-  b.writeBigInt64LE(0n, 0x80);
+  b.writeBigInt64LE(10n, 0x80); // anim0 id
   b.writeBigInt64LE(0xA8n, 0x88); // anim0 entry
-  b.writeBigInt64LE(10n, 0x90);   // anim0 id = 10
+  b.writeBigInt64LE(20n, 0x90);   // anim1 id
   b.writeBigInt64LE(0xE8n, 0x98); // anim1 entry
-  b.writeBigInt64LE(20n, 0xA0);   // anim1 id = 20
 
   // anim0 Entry (0xA8)
   b.writeBigInt64LE(0x128n, 0xA8); // eventTableOffset

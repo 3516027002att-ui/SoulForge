@@ -7,7 +7,7 @@ import { _electron as electron } from 'playwright';
 import { assertAgentProductionBuildFresh } from './agent-production-build-lib.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const game = process.env.SOULFORGE_SEKIRO_ROOT ?? 'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro';
+const game = process.env.SOULFORGE_SEKIRO_ROOT ?? process.env.SOULFORGE_SEKIRO_GAME_ROOT ?? 'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro';
 const source = process.env.SOULFORGE_SEKIRO_MOD_ROOT ?? join(game, 'mods');
 const timeoutMs = Number(process.env.SOULFORGE_READINESS_TIMEOUT_MS ?? 180_000);
 if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 600_000) throw new Error('Invalid bounded probe timeout');

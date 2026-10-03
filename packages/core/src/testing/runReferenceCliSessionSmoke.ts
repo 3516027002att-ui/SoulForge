@@ -131,7 +131,7 @@ if (existsSync(hostPath)) {
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const pending = cancellable.dispatch({ id: 'late', tool: 'slow-read', args: {} }, async (_tool, _args, signal) => {
       await gate;
-      // Deliberately ignore AbortSignal to prove the host discards a late result.
+      // Deliberately ignore AbortSignal to prove the host retains a late result.
       void signal;
       return { late: true };
     });
@@ -142,10 +142,11 @@ if (existsSync(hostPath)) {
     release();
     const cancelled = await pending;
     const terminalStatus = cancellable.requestStatus?.('late');
-    check('T11/late-result-discarded', (cancelled as { ok?: boolean; error?: { code?: string } }).ok === false
+    check('T11/late-result-retained', (cancelled as { ok?: boolean; error?: { code?: string } }).ok === false
       && (cancelled as { error?: { code?: string } }).error?.code === 'CLI_REQUEST_CANCELLED'
       && terminalStatus?.state === 'cancelled'
-      && terminalStatus.lateResultDiscarded === true);
+      && terminalStatus.lateResultDiscarded !== true
+      && (cancelled as { result?: unknown }).result !== undefined);
     cancellable.close();
 
     const abortedController = new AbortController();

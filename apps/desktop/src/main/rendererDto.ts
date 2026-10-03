@@ -1,5 +1,18 @@
+import type {
+  RendererIndexedFile,
+  RendererBridgeResult,
+  RendererResourcePreview,
+  RendererSaveResult,
+  RendererPatchHistoryEntry
+} from '../ipc/publicTypes.js';
+export type {
+  RendererIndexedFile,
+  RendererBridgeResult,
+  RendererResourcePreview,
+  RendererSaveResult,
+  RendererPatchHistoryEntry
+} from '../ipc/publicTypes.js';
 import {
-  type BridgeResult,
   type Diagnostic,
   type EditorCatalogSummary,
   type EditorDocumentResult,
@@ -10,40 +23,6 @@ import {
 } from '@soulforge/shared';
 import { maskPathFragments } from '@soulforge/shared';
 
-export type RendererIndexedFile = Omit<
-  IndexedFile,
-  'id' | 'workspaceId' | 'sourcePath' | 'absolutePath'
->;
-
-export type RendererBridgeResult<T = unknown> = Omit<BridgeResult<T>, 'sourcePath'>;
-
-export type RendererResourcePreview = Omit<
-  ResourcePreview,
-  'file' | 'nativeInspection' | 'diagnostics'
-> & {
-  file: RendererIndexedFile;
-  nativeInspection?: RendererBridgeResult<unknown>;
-  diagnostics: Diagnostic[];
-};
-
-export type RendererSaveResult = Omit<
-  SaveTextResourceResult,
-  'backupRoot' | 'changedFiles' | 'diagnostics'
-> & {
-  changedFiles: string[];
-  diagnostics: Diagnostic[];
-  /** 成功 native 写回后的新 revision，供 renderer 失效旧文档状态。 */
-  sourceHash?: string;
-  sourceRevision?: number;
-};
-
-export type RendererPatchHistoryEntry = Omit<
-  PatchHistoryEntry,
-  'workspaceId' | 'changedPaths'
-> & {
-  changedPaths: string[];
-};
-
 const SOURCE_TEXT_KEYS = new Set([
   'dslTemplate',
   'sourcePrefix',
@@ -52,6 +31,9 @@ const SOURCE_TEXT_KEYS = new Set([
   'nextDslTemplate',
   'text'
 ]);
+
+/** Save receipts only need primitive physical identity and logical labels. */
+export type RendererResourceLabelSource = Readonly<Pick<IndexedFile, 'absolutePath' | 'sourcePath' | 'sourceUri'>>;
 
 const SENSITIVE_PATH_KEYS = new Set([
   'absolutePath',
@@ -110,7 +92,7 @@ export function toRendererResourcePreview(preview: ResourcePreview): RendererRes
 
 export function toRendererSaveResult(
   result: SaveTextResourceResult,
-  files: readonly IndexedFile[]
+  files: readonly RendererResourceLabelSource[]
 ): RendererSaveResult {
   return {
     ok: result.ok,
@@ -157,7 +139,7 @@ export function toRendererEditorDocumentResult<T>(
 
 export function toRendererHistoryEntry(
   entry: PatchHistoryEntry,
-  files: readonly IndexedFile[]
+  files: readonly RendererResourceLabelSource[]
 ): RendererPatchHistoryEntry {
   return {
     opId: entry.opId,
@@ -199,11 +181,11 @@ export function sanitizeRendererValue(value: unknown): unknown {
     // Internal workspace ids are currently file URLs and therefore reveal the root.
     if (key === 'workspaceId') continue;
     // 源码是内容，不是本机路径泄漏。70k 行 DarkScript 不得整串跑盘符/UNC 正则。
-    if (SOURCE_TEXT_KEYS.has(key) && typeof child === 'string') {
-      output[key] = child;
-      continue;
+    if (typeof child === 'string') {
+      output[key] = SOURCE_TEXT_KEYS.has(key) ? child : sanitizeRendererString(child);
+    } else {
+      output[key] = child === null || typeof child !== 'object' ? child : sanitizeRendererValue(child);
     }
-    output[key] = sanitizeRendererValue(child);
   }
   return output;
 }
@@ -221,7 +203,7 @@ function sanitizeRendererString(value: string): string {
   return maskPathFragments(value);
 }
 
-function pathToResourceLabel(path: string, files: readonly IndexedFile[]): string {
+function pathToResourceLabel(path: string, files: readonly RendererResourceLabelSource[]): string {
   const match = files.find((file) => file.absolutePath === path || file.sourcePath === path);
   return match?.sourceUri ?? '[本机路径已隐藏]';
 }

@@ -1,0 +1,21 @@
+
+/* S10 引用框选暗幕：只盖中央编辑区（.editor-area 已 position:relative），
+   Agent dock 是 main 之外的 flex 兄弟，天然保持明亮。无此规则时暗幕是
+   文档流里的零高 div，拖拽事件落不到它上。 */
+.cite-scrim {
+  position: absolute; inset: 0; z-index: 60;
+  background: color-mix(in srgb, var(--forge-0) 62%, transparent);
+  cursor: crosshair;
+}
+.cite-scrim__hint {
+  position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+  font-size: 11px; color: var(--ink-2); pointer-events: none;
+  background: var(--forge-2); border: 1px solid var(--line);
+  border-radius: var(--radius-s); padding: 3px 10px;
+}
+/* 选区矩形用 clientX/Y 定位，必须 fixed 才与坐标同系。 */
+.cite-select-box {
+  position: fixed; z-index: 61; pointer-events: none;
+  border: 1px solid var(--ember);
+  background: color-mix(in srgb, var(--ember-soft) 45%, transparent);
+}

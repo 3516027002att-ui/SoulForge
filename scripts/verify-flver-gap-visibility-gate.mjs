@@ -58,6 +58,7 @@ import { fileURLToPath } from 'node:url';
 const LABEL = 'flver-gap-visibility';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const EXE_CANDIDATES = [
+  ...(process.env.SF_TEST_BRIDGE_DLL ? [process.env.SF_TEST_BRIDGE_DLL] : []),
   join(root, 'bridge', 'SoulForge.Bridge', 'bin', 'Release', 'net10.0', 'win-x64', 'publish', 'SoulForge.Bridge.exe'),
   join(root, 'bridge', 'SoulForge.Bridge', 'bin', 'Debug', 'net10.0', 'win-x64', 'SoulForge.Bridge.exe')
 ];
@@ -90,7 +91,7 @@ if (!exe) {
 // ---------------------------------------------------------------------------
 
 const SEM = { POSITION: 0, BONE_WEIGHTS: 1, BONE_INDICES: 2, NORMAL: 3, UV: 5, TANGENT: 6, BITANGENT: 7, VERTEX_COLOR: 10 };
-const TYPE = { FLOAT3: 0x02, BYTE4B: 0x11, BYTE4C: 0x13, UV: 0x15, UVPAIR: 0x16 };
+const TYPE = { FLOAT2: 0x01, FLOAT3: 0x02, BYTE4B: 0x11, BYTE4C: 0x13, UV: 0x15, UVPAIR: 0x16 };
 
 /**
  * 造一个合法的最小 FLVER。
@@ -236,7 +237,8 @@ function buildFlver(opts) {
   return b;
 }
 function openDaemon() {
-  const child = spawn(exe, ['daemon'], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  const dll = exe.toLowerCase().endsWith('.dll');
+  const child = spawn(dll ? process.env.SOULFORGE_DOTNET ?? 'dotnet' : exe, dll ? [exe, 'daemon'] : ['daemon'], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   const pending = new Map();
   let buffer = '';
   let stderr = '';
@@ -350,30 +352,30 @@ try {
     {
       label: 'tangent',
       needle: 'tangent',
-      members: [...CLEAN_MEMBERS, { semantic: SEM.TANGENT, type: TYPE.BYTE4B, structOffset: 28 }],
+      members: [...CLEAN_MEMBERS, { semantic: SEM.TANGENT, type: TYPE.FLOAT2, structOffset: 28 }],
       materialCount: 0,
-      note: 'SemTangent(0x6) 声明后零引用；真实语料实测 93 个 member。'
+      note: 'Supported tangent types are decoded; unsupported Float2 must remain an explicit gap.'
     },
     {
       label: 'bitangent',
       needle: 'bitangent',
-      members: [...CLEAN_MEMBERS, { semantic: SEM.BITANGENT, type: TYPE.BYTE4B, structOffset: 28 }],
+      members: [...CLEAN_MEMBERS, { semantic: SEM.BITANGENT, type: TYPE.FLOAT2, structOffset: 28 }],
       materialCount: 0,
-      note: 'SemBitangent(0x7) 声明后零引用；真实语料实测 22 个 member。'
+      note: 'Supported packed bitangents are decoded; unsupported Float2 must remain an explicit gap.'
     },
     {
       label: 'vertexColor',
       needle: 'vertexColor',
-      members: [...CLEAN_MEMBERS, { semantic: SEM.VERTEX_COLOR, type: TYPE.BYTE4C, structOffset: 28 }],
+      members: [...CLEAN_MEMBERS, { semantic: SEM.VERTEX_COLOR, type: TYPE.BYTE4B, structOffset: 28 }],
       materialCount: 0,
-      note: 'SemVertexColor(0xA) 声明后零引用；真实语料实测 79 个 member。'
+      note: 'Complete supported RGBA is decoded; unsupported UByte4 color layout remains a gap.'
     },
     {
-      label: 'duplicate-uv',
+      label: 'duplicate-weights',
       needle: '第 2+ 个 member',
-      members: [...CLEAN_MEMBERS, { semantic: SEM.UV, type: TYPE.UV, structOffset: 28, index: 1 }],
+      members: [...CLEAN_MEMBERS, { semantic: SEM.BONE_WEIGHTS, type: TYPE.BYTE4C, structOffset: 28, index: 1 }],
       materialCount: 0,
-      note: '第 2 个 UV 被 when 守卫静默挡掉；真实语料 UV member 108 个 vs layout 73 个。'
+      note: 'Position/normal members now survive; duplicate bone weight members remain an explicit partial projection.'
     },
     {
       label: 'unknown-semantic',
@@ -452,19 +454,11 @@ report({
   assertions: checks.length,
   evidence: 'runtime-observed：经生产命令 read-flver-document 真实解析，断言 envelope 的 authority/unparsedGaps',
   fixture: 'synthetic FLVER（微小、合法构造、明确标记，非 native authority）',
-  message: '六类缺口（tangent/bitangent/vertexColor/重复语义/未知语义/material 后 16 字节）'
-    + '各自被登记且把 authority 降为 partial；无缺口基线仍为 native-verified，证明降级不是无条件的。',
+  message: 'Unsupported tangent/bitangent/color layouts, duplicate weight members and unknown semantics remain explicit partial gaps; supported baseline data remains distinguishable.',
   nonClaims: [
-    '**不声称**这些结构已被解析。本门禁证明的恰恰相反：它们未被解析，且这一事实现在对上层可见。',
-    'GXList 未解析：material 后 16 字节只被登记为缺口。GXList 是变长表且条目布局按版本分歧，'
-      + '在没有该结构的真实往返验证前解析它等于在未验证前提下扩大 native 声明面。',
-    'tangent/bitangent/vertexColor 未解析：同上，只登记不解析。要真解析需先有该语义的'
-      + '真实样本、类型覆盖与往返验证。',
-    'FLVER 属 V0.6 延期只读预览族（scope.json 的 SCOPE-ASSET-FLVER）。本门禁不改变该裁定，'
-      + '不开放任何 writer，也不扩大 authority 声明面——它只让声明面更诚实（native-verified → partial）。',
-    'unparsedGaps 的**完备性**未被证明：它覆盖当前已知的六类缺口，不保证没有第七类未知缺口。'
-      + '按定义，尚未被识别的缺口无法由门禁列举。',
-    '真实语料数字（194 个未解析 member、505 条 material 后 16 字节非零）来自一次性探针，'
-      + '不在本门禁的持续判据里；本门禁全部判据跑在 synthetic fixture 上。'
+    'This synthetic gate covers explicit unsupported layouts and partial projections, not all unknown format gaps.',
+    'Supported tangent/bitangent/RGBA fields now have separate native field and diagnostic-preservation tests; this gate does not certify rendering or native shader behavior.',
+    'Historical probe counts are background only. All ongoing predicates here use the declared synthetic fixtures.',
+    'No rendered image, full native material semantics or writer claim follows from this gate.'
   ]
 }, 0);

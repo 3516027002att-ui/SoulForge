@@ -6,8 +6,9 @@
  * 每个阶段都通过新的 native read 取证；不把 renderer 的旧状态当作权威。
  */
 import assert from 'node:assert/strict';
-import { copyFile, mkdir, realpath, rm } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { copyFile, mkdir, realpath, stat } from 'node:fs/promises';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { MapEditTransaction } from '@soulforge/shared';
 import {
@@ -20,8 +21,9 @@ import {
   readMsbDocumentViaBridge,
   rollbackOperation
 } from '../index.js';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
+import { resolveNativeFixture } from './nativeFixtureRegistry.js';
 
-const DEFAULT_GAME_ROOT = 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
 const DEFAULT_RELATIVE_MAP = 'mods/map/mapstudio/m10_00_00_00.msb.dcx';
 
 interface TransformSnapshot {
@@ -45,14 +47,14 @@ function snapshotPart(part: {
 async function readPartFromNative(
   sourcePath: string,
   allowedRoots: string[],
-  oodleRuntimeRoot: string,
+  oodleRuntimeRoot: string | undefined,
   name: string,
   nativeOffset: number | undefined
 ): Promise<TransformSnapshot> {
   const read = await readMsbDocumentViaBridge({
     sourcePath,
     allowedRoots,
-    oodleRuntimeRoot,
+    ...(oodleRuntimeRoot ? { oodleRuntimeRoot } : {}),
     timeoutMs: 120_000
   });
   assert.equal(read.ok, true, `native MSB read failed: ${JSON.stringify(read.diagnostics)}`);
@@ -69,19 +71,43 @@ async function readPartFromNative(
 }
 
 export async function runNativeMapRollbackSmoke(): Promise<void> {
-  const gameRoot = resolve(process.env.SOULFORGE_GAME_ROOT ?? DEFAULT_GAME_ROOT);
-  const sourcePath = await realpath(
-    resolve(process.argv[2] ?? join(gameRoot, DEFAULT_RELATIVE_MAP))
-  );
-  const tempRoot = resolve(join(process.cwd(), `.tmp-mission4-map-rollback-${process.pid}`));
-  const mapRelativePath = 'map/mapstudio/m10_00_00_00.msb.dcx';
-  const mapPath = join(tempRoot, mapRelativePath);
-  const stagingRoot = join(tempRoot, '.staging');
-  const backupBaseDir = join(tempRoot, '.backups');
-  const recoveryDir = join(tempRoot, '.recovery');
-
-  await rm(tempRoot, { recursive: true, force: true });
+  const explicitSource = process.argv[2]?.trim();
+  const gameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() || process.env.SOULFORGE_GAME_ROOT?.trim();
+  const registry = process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY?.trim();
+  const fixtureRoot = process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim();
+  const unavailable = (code: string) => console.log(JSON.stringify({
+    ok: false, status: 'skipped', executed: false, authority: 'unverified', code,
+    scope: 'native MAP rollback',
+    message: 'Native checks were not executed. Configure an explicit MSB path, SOULFORGE_SEKIRO_GAME_ROOT, or SOULFORGE_NATIVE_FIXTURE_REGISTRY with SOULFORGE_NATIVE_FIXTURE_ROOT.'
+  }));
+  if (!explicitSource && !gameRoot && !registry && !fixtureRoot) {
+    unavailable('NATIVE_MAP_INPUT_REQUIRED');
+    return;
+  }
+  if (!explicitSource && Boolean(registry) !== Boolean(fixtureRoot)) throw new Error('NATIVE_FIXTURE_CONFIG_INCOMPLETE');
+  let sourcePath: string;
   try {
+    sourcePath = await realpath(await resolveNativeFixture(
+      explicitSource ?? (!registry && gameRoot ? join(gameRoot, DEFAULT_RELATIVE_MAP) : undefined),
+      'msb-primary', '../../mods/map/mapstudio/m10_00_00_00.msb.dcx'
+    ));
+    if (!(await stat(sourcePath)).isFile()) throw new Error('NATIVE_MAP_SOURCE_NOT_FILE');
+  } catch (error) {
+    if (['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+      unavailable('NATIVE_MAP_SOURCE_UNAVAILABLE');
+      return;
+    }
+    throw error;
+  }
+  const oodleRuntimeRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT?.trim() || gameRoot;
+  await withSmokeWorkspace('native-map-rollback', async (workspace) => {
+    const tempRoot = workspace.root;
+    const mapRelativePath = 'map/mapstudio/m10_00_00_00.msb.dcx';
+    const mapPath = join(tempRoot, mapRelativePath);
+    const stagingRoot = join(tempRoot, '.staging');
+    const backupBaseDir = join(tempRoot, '.backups');
+    const recoveryDir = join(tempRoot, '.recovery');
+
     await mkdir(join(tempRoot, 'map/mapstudio'), { recursive: true });
     await mkdir(stagingRoot, { recursive: true });
     await mkdir(backupBaseDir, { recursive: true });
@@ -90,7 +116,7 @@ export async function runNativeMapRollbackSmoke(): Promise<void> {
 
     const session = await openWorkspaceSession({
       overlayRoot: tempRoot,
-      baseRoot: gameRoot,
+      ...(oodleRuntimeRoot ? { baseRoot: oodleRuntimeRoot } : {}),
       game: 'sekiro'
     });
     const operationLog = new MemoryOperationLogStore();
@@ -181,7 +207,7 @@ export async function runNativeMapRollbackSmoke(): Promise<void> {
       ok: true,
       authority: 'native-verified',
       scope: 'real MSB overlay A→B→A',
-      source: 'real game MSB copied to project-local temporary overlay',
+      source: 'explicit native MSB copied to a test-owned temporary overlay',
       target: before,
       afterB,
       afterA,
@@ -189,12 +215,10 @@ export async function runNativeMapRollbackSmoke(): Promise<void> {
       inverseOpId: rolledBack.inverseOpId,
       verification: 'fresh Bridge reread after commit and rollback'
     }, null, 2));
-  } finally {
-    await rm(tempRoot, { recursive: true, force: true });
-  }
+  });
 }
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith('runNativeMapRollbackSmoke.js')) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   runNativeMapRollbackSmoke().catch((error) => {
     console.error(error);
     process.exit(1);

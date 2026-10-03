@@ -21,6 +21,7 @@
  *   --diagnostics        将阶段耗时与游标诊断以 JSON Lines 写入 stderr
  */
 
+import { runHeadlessAgentCommand } from './headless-agent.mjs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
@@ -135,7 +136,9 @@ function parseArgs(argv) {
     options.command = rest.shift() ?? 'help';
   }
   if (options.analyze && options.noAnalyze) fail('--analyze 与 --no-analyze 不能同时使用');
-  if (options.command === 'call') {
+  if (options.command === 'agent') {
+    options.agentArgs = rest;
+  } else if (options.command === 'call') {
     if (rest[0] === '--stdin') {
       options.stdin = true;
       rest.shift();
@@ -160,6 +163,12 @@ function printUsage() {
   process.stdout.write(`SoulForge CLI — 外置调用生产 Agent 工具
 
 命令:
+  agent exec --task-file <UTF-8 file> --responses-file <fixture>  完整 Agent（JSON Lines）
+  agent exec --task-file <file> --provider-config <file> --max-cost <limit>  有预算的模型任务
+  agent exec --provider test --task-file <file> --no-cost-limit --max-steps <n> --timeout-ms <ms>  明确只用步数/总时长限制的模型任务
+  agent exec --task-file <file> --provider test --test-config <private-test>  原始加密配置（须显式预算及价格）
+  agent exec ... --protocol-stdin  JSON Lines双向审批/取消（绑定当前精确请求）
+  agent exec ... --resume-session <rollout.jsonl>  历史承接＋journal回查，不重放旧调用
   list                         列出全部工具
   describe <tool>              查看工具说明与输入 schema
   call <tool> ['{"k":v}']      调用任意工具
@@ -240,6 +249,12 @@ async function main() {
   const baseRoot = abs(options.base);
   if (!existsSync(workspaceRoot)) fail(`工作区不存在: ${workspaceRoot}`);
   if (baseRoot && !existsSync(baseRoot)) fail(`--base 路径不存在: ${baseRoot}`);
+
+  if (options.command === 'agent') {
+    const report = await runHeadlessAgentCommand(options, core, REPO_ROOT, { emitDiagnostic });
+    if (report.state === 'error') process.exitCode = 1;
+    return;
+  }
 
   const metadataOnly = options.command === 'list' || options.command === 'ls'
     || options.command === 'describe' || options.command === 'desc';
@@ -408,6 +423,12 @@ async function main() {
         });
         return;
       }
+      if (tool === '__host_operation_status') {
+        const opId = typeof args.opId === 'string' ? args.opId : '';
+        writeFrame(opId ? { id: requestId, ok: true, result: await sessionHost.operationStatus(opId) }
+          : { id: requestId, ok: false, error: { code: 'CLI_OPERATION_ID_REQUIRED', message: '必须提供 opId。' } });
+        return;
+      }
       if (tool === '__host_cancel') {
         const targetId = typeof args.requestId === 'string' ? args.requestId : requestId;
         writeFrame({ id: requestId, ok: true, result: sessionHost.requestCancel(targetId) });
@@ -415,7 +436,7 @@ async function main() {
       }
       if (tool === '__host_request_status') {
         const targetId = typeof args.requestId === 'string' ? args.requestId : requestId;
-        const status = sessionHost.requestStatus(targetId);
+        const status = await sessionHost.resolveRequestStatus(targetId);
         writeFrame(status
           ? { id: requestId, ok: true, result: status }
           : { id: requestId, ok: false, error: { code: 'CLI_REQUEST_NOT_FOUND', message: `没有找到请求 ${targetId}。` } });
@@ -433,11 +454,16 @@ async function main() {
           (dispatchTool, dispatchArgs, signal) => executeToolCall(requestId, dispatchTool, dispatchArgs, signal)
         );
         if (!outcome.ok) {
-          writeFrame({ id: requestId, ok: false, error: outcome.error });
+          writeFrame({
+            id: requestId, ok: false, error: outcome.error,
+            requestState: outcome.requestState, transaction: outcome.transaction,
+            ...(outcome.result !== undefined ? { result: outcome.result?.content ? parseToolContent(outcome.result.content) : outcome.result } : {})
+          });
         } else {
           const result = outcome.result;
           writeFrame({
             id: requestId,
+            requestState: outcome.requestState, transaction: outcome.transaction,
             ok: Boolean(result?.ok),
             ...(result?.code ? { code: result.code } : {}),
             result: parseToolContent(result?.content)

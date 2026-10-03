@@ -14,9 +14,7 @@
  * 仅在 SoulForge 桌面版可用」——而当时 e2e 16/16 全绿。fixture 用 sandbox: false
  * 且 preload 路径一度与生产不同，两处差异各自都足以藏住这个缺陷。
  */
-import { test, expect, _electron as electron } from '@playwright/test';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { test, expect, electron, testWorkspace } from '../owned-test.mjs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -24,11 +22,12 @@ const here = dirname(fileURLToPath(import.meta.url));
 const productionMain = resolve(here, '../production-main.mjs');
 
 async function launchProduction(env = {}) {
-  const userDataDir = mkdtempSync(join(tmpdir(), 'sf-e2e-prod-'));
+  const userDataDir = join(testWorkspace().root, 'profile');
   const app = await electron.launch({
     args: [productionMain, `--user-data-dir=${userDataDir}`],
     env: { ...process.env, NODE_ENV: 'production', ...env }
   });
+  await testWorkspace().registerApp(app);
   const window = await app.firstWindow();
   const pageErrors = [];
   const consoleErrors = [];
@@ -39,7 +38,6 @@ async function launchProduction(env = {}) {
   await window.waitForLoadState('domcontentloaded');
   const cleanup = async () => {
     await app.close().catch(() => undefined);
-    rmSync(userDataDir, { recursive: true, force: true });
   };
   return { app, window, pageErrors, consoleErrors, cleanup };
 }

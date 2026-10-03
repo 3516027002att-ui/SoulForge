@@ -43,6 +43,9 @@ export interface RagChunk {
   relativePath?: string;
   resourceKind?: ResourceKind;
   confidence?: ReferenceConfidence;
+  /** Native action completeness survives bounded caches and persistence. */
+  taeActionEventCount?: number;
+  taeActionEventsComplete?: boolean;
 }
 
 export interface RagCorpusStats {

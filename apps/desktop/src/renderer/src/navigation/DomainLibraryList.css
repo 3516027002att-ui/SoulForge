@@ -1,0 +1,24 @@
+
+/* ── 分组逻辑库（R1 裁定：参数域两级——PARAM / GPARAM 常驻，GPARAM 点开出 bank） ── */
+.library-group { display: flex; flex-direction: column; gap: 1px; }
+.library-group__header {
+  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
+  padding: 6px 8px; border-radius: var(--radius-m);
+  color: var(--ink-1); font-size: 12px; font-weight: 600;
+  letter-spacing: .04em; text-transform: uppercase;
+  transition: background var(--dur-micro);
+}
+.library-group__header:hover { background: var(--forge-hover); color: var(--ink-0); }
+.library-group__header:focus-visible { outline: 2px solid var(--ember-text); outline-offset: 1px; }
+.library-group__chevron {
+  flex: none; color: var(--ink-3);
+  transition: transform var(--dur-micro);
+}
+.library-group__header[aria-expanded="true"] .library-group__chevron { transform: rotate(90deg); }
+.library-group__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.library-group__hint {
+  margin-left: auto; font-size: 10px; font-weight: 400; color: var(--ink-3);
+  text-transform: none; white-space: nowrap;
+}
+.library-group__body { display: flex; flex-direction: column; gap: 1px; padding-left: 14px; }
+.library-group__empty { padding: 3px 10px 6px; font-size: 11px; }

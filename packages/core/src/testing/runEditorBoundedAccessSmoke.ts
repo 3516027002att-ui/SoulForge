@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * W-REL-F-SCALE-02 release editor bounded-access smoke (validation-unfrozen
  * closure: 真实文档完整有界访问).
@@ -26,7 +27,7 @@
  * ceiling. Electron functional acceptance remains separately gated.
  */
 import { readdirSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';

@@ -43,6 +43,7 @@ import { base64ToUint8Array, uint8ArrayToBase64 } from '../utils/binary.js';
 import { decodeFieldView } from '../editors/ParamDefPanel.js';
 import { isParamCheckboxField } from './paramCheckboxField.js';
 import { WorkbenchLayout, type WorkbenchColumnSpec } from './WorkbenchLayout.js';
+import { LoadedVersionComparison, LoadedFieldComparison } from '../editors/LoadedVersionComparison.js';
 
 /** 容器 PARAM 选中行 payload 的物理页大小；必须与 main 侧页契约一致。 */
 const PARAM_PAGE_SIZE = 20;
@@ -1454,6 +1455,9 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
       minWidth: 240,
       children: (
         <div className="wb-props">
+          <LoadedVersionComparison key={`${props.containerUri}:${selectedEntry ?? ''}:${selectedRow?.rowIndex ?? ''}:${selectedRow?.id ?? ''}:${selectedRow?.dataHash ?? ''}:${documentSessionToken ?? ''}`}>
+            <LoadedFieldComparison fields={fields} loaded={payloadLoading ? null : decodedValues} drafts={drafts} />
+          </LoadedVersionComparison>
           {/* 选中的 param 读不出来时，右栏给出结构化原因而不是空白。
               对照 Smithbox：它的 Fields 栏永远不会显示「此 param 无 ParamDef」
               ——因为失败的 param 根本进不了列表，用户点不到。本项目不照抄那个

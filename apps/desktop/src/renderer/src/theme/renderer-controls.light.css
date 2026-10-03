@@ -1,0 +1,9 @@
+
+/* ══════════ Light 主题收尾作用域（§10 交互态） ══════════ */
+/* §10.4：light 下输入框用 forge-2 打底——forge-0 太透、与画布几乎同色；
+   焦点边框/焦点环、placeholder 均走共享规则，不需要重复。 */
+[data-theme="light"] input,
+[data-theme="light"] textarea,
+[data-theme="light"] select {
+  background: var(--forge-2);
+}

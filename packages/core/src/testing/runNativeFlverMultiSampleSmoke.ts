@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory } from './harness/smokeWorkspace.js';
 /**
  * Native FLVER multi-sample smoke: enumerate every Sekiro chrbnd container in the
  * registered corpus, extract the inner FLVER, and verify document + mesh decode
@@ -5,7 +6,8 @@
  *
  * Covers the layout diversity matrix found in the corpus:
  *   - version 0x2001A (character) with 40B stride (c1020/c1021/c1220/c1360/c1400/c1700/c7400)
- *   - version 0x20014 with 44B stride (c4510/c5030/c6210/c8010)
+ *   - version 0x20014 with 44B stride (c5030/c6210/c8010)
+ *   - c4510 is version 0x2001A and includes 20/40/44/56B buffers
  *   - secondary vertex buffers with stride 20/24/28/48/56
  *
  * Env contract (mirrors the other native smokes):
@@ -17,9 +19,10 @@
  * reports status "skipped" with exit 0 (honest skip for CI without local game).
  */
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
-import { mkdirSync, readdirSync, existsSync, accessSync, constants } from 'node:fs';
+import { rmSync, readdirSync, existsSync, accessSync, constants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, basename, resolve } from 'node:path';
+import { summarizeFlverValidation } from './flverValidationReport.js';
 
 interface FlverEnvelope {
   authority: string;
@@ -39,6 +42,9 @@ interface FlverEnvelope {
 }
 
 interface MeshEnvelope {
+  meshIndex?: number;
+  geometryEmpty?: boolean;
+  indexCount?: number;
   vertexCount: number;
   vertexStride: number;
   bufferLayoutIndex: number;
@@ -78,6 +84,8 @@ interface SampleReport {
   authority: string;
   meshesChecked: number;
   meshesOk: number;
+  emptyMeshIndices: number[];
+  failedMeshIndices: number[];
   decodeFailures: string[];
   layoutWarnings: number;
   unparsedGaps: string[];
@@ -86,10 +94,12 @@ interface SampleReport {
 async function verifyMesh(
   out: string,
   meshIndex: number,
-  boneCount: number
+  boneCount: number,
+  emptyMeshIndices: number[]
 ): Promise<string[]> {
   const r = await runBridge<MeshEnvelope>({
     command: 'read-flver-mesh',
+    ...(process.env.SOULFORGE_NATIVE_BRIDGE_EXECUTABLE ? { bridgeExecutablePath: process.env.SOULFORGE_NATIVE_BRIDGE_EXECUTABLE } : {}),
     filePath: out,
     allowedRoots: [dirname(out)],
     // The single-mesh command keeps a conservative interactive default of
@@ -107,6 +117,11 @@ async function verifyMesh(
     return [`mesh[${meshIndex}] read failed: ${JSON.stringify(r.diagnostics)}`];
   }
   const d = r.data;
+  if (d.geometryEmpty === true) {
+    if (d.meshIndex !== meshIndex || !Number.isSafeInteger(d.vertexCount) || d.vertexCount < 0 || !Number.isSafeInteger(d.indexCount) || d.indexCount! < 0 || !r.diagnostics.some((item) => item.code === 'FLVER_MESH_EMPTY_TOPOLOGY')) return [`mesh[${meshIndex}] invalid empty-topology classification`];
+    emptyMeshIndices.push(meshIndex);
+    return [];
+  }
   const failures: string[] = [];
   if (!d.positionsBase64) return [`mesh[${meshIndex}] missing positions`];
   const pos = toF32(d.positionsBase64);
@@ -192,6 +207,7 @@ async function verifySample(root: string, tmp: string, id: string): Promise<Samp
 
   const ex = await runBridge<{ contentSize?: number }>({
     command: 'extract-bnd4-child',
+    ...(process.env.SOULFORGE_NATIVE_BRIDGE_EXECUTABLE ? { bridgeExecutablePath: process.env.SOULFORGE_NATIVE_BRIDGE_EXECUTABLE } : {}),
     filePath: container,
     allowedRoots: [chrDir],
     writableRoots: [tmp],
@@ -204,6 +220,7 @@ async function verifySample(root: string, tmp: string, id: string): Promise<Samp
   }
 
   const doc = await runBridge<FlverEnvelope>({
+    ...(process.env.SOULFORGE_NATIVE_BRIDGE_EXECUTABLE ? { bridgeExecutablePath: process.env.SOULFORGE_NATIVE_BRIDGE_EXECUTABLE } : {}),
     command: 'read-flver-document',
     filePath: out,
     allowedRoots: [tmp],
@@ -258,6 +275,8 @@ async function verifySample(root: string, tmp: string, id: string): Promise<Samp
       authority: e.authority,
       meshesChecked: 0,
       meshesOk: 0,
+      emptyMeshIndices: [],
+      failedMeshIndices: [],
       decodeFailures: [],
       layoutWarnings: (e.layoutWarnings ?? []).length,
       unparsedGaps: e.unparsedGaps ?? []
@@ -274,8 +293,11 @@ async function verifySample(root: string, tmp: string, id: string): Promise<Samp
   // 读取；若资源异常，让生产 native reader 的结构化诊断直接失败关闭。
   const checkCount = e.meshCount;
   const decodeFailures: string[] = [];
+  const emptyMeshIndices: number[] = [];
+  const failedMeshIndices: number[] = [];
   for (let m = 0; m < checkCount; m++) {
-    const failures = await verifyMesh(out, m, e.boneCount);
+    const failures = await verifyMesh(out, m, e.boneCount, emptyMeshIndices);
+    if (failures.length) failedMeshIndices.push(m);
     decodeFailures.push(...failures);
   }
 
@@ -286,7 +308,9 @@ async function verifySample(root: string, tmp: string, id: string): Promise<Samp
     vertexStrides: e.vertexStrides,
     authority: e.authority,
     meshesChecked: checkCount,
-    meshesOk: checkCount - decodeFailures.length,
+    meshesOk: checkCount - emptyMeshIndices.length - failedMeshIndices.length,
+    emptyMeshIndices,
+    failedMeshIndices,
     decodeFailures,
     layoutWarnings: (e.layoutWarnings ?? []).length,
     unparsedGaps: e.unparsedGaps ?? []
@@ -317,25 +341,18 @@ async function main(): Promise<void> {
       .map((f) => basename(f, '.chrbnd.dcx'))
       .sort();
 
-  const tmp = join(tmpdir(), 'soulforge-flver-multi-smoke');
-  mkdirSync(tmp, { recursive: true });
+  const tmp = await createSmokeTemporaryDirectory(join(tmpdir(), 'soulforge-flver-multi-smoke-'));
 
   const reports: SampleReport[] = [];
-  for (const id of ids) {
-    reports.push(await verifySample(root, tmp, id));
-  }
-
-  const bad = reports.filter((r) => r.decodeFailures.length > 0);
-  console.log(JSON.stringify({
-    ok: bad.length === 0,
-    status: 'verified',
-    message: `FLVER 多样本原生验证通过（${reports.length} samples, ${reports.reduce((s, r) => s + r.meshCount, 0)} meshes）`,
-    samples: reports,
-    failures: bad
-  }, null, 2));
-
-  await disposeBridgeDaemonPool();
-  if (bad.length > 0) process.exitCode = 1;
+  try {
+    for (const id of ids) {
+      try { reports.push(await verifySample(root, tmp, id)); }
+      catch (error) { reports.push({ id, version: 'unknown', meshCount: 0, vertexStrides: [], authority: 'unverified', meshesChecked: 0, meshesOk: 0, emptyMeshIndices: [], failedMeshIndices: [], decodeFailures: [error instanceof Error ? error.message : String(error)], layoutWarnings: 0, unparsedGaps: [] }); }
+    }
+    const report = summarizeFlverValidation(reports);
+    console.log(JSON.stringify(report, null, 2));
+    if (!report.ok) process.exitCode = report.status === 'failed' ? 1 : 2;
+  } finally { rmSync(tmp, { recursive: true, force: true }); await disposeBridgeDaemonPool(); }
 }
 
 main().catch(async (error) => {

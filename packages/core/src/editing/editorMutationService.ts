@@ -234,6 +234,7 @@ function normalizeStagingDiagnostics(
     severity: entry.severity as Diagnostic['severity'],
     code: entry.code,
     message: entry.message,
+    ...((entry as Diagnostic).details === undefined ? {} : { details: (entry as Diagnostic).details }),
     sourceUri
   }));
 }

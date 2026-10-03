@@ -16,6 +16,7 @@ import {
   type FlverSceneBone,
   type FlverSceneTexture
 } from '../scene/threeSceneController.js';
+import { decodeFlverNativeVertexDiagnostics, type FlverNativeVertexDiagnosticSource } from '../scene/flverNativeVertexDiagnostics.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { decodeBase64ToUint8Array } from '../utils/binary.js';
 
@@ -57,6 +58,21 @@ export interface FlverViewerProps {
     uvSetsBase64?: string[] | undefined;
     normalsBase64?: string | undefined;
     vertexAlphaBase64?: string | undefined;
+    positionStatus?: FlverPreviewMesh['positionStatus'];
+    positionFailure?: string | undefined;
+    positionDiagnostics?: FlverPreviewMesh['positionDiagnostics'];
+    normalStatus?: FlverPreviewMesh['normalStatus'];
+    normalFailure?: string | undefined;
+    normalDiagnostics?: FlverPreviewMesh['normalDiagnostics'];
+    vertexColorStatus?: FlverPreviewMesh['vertexColorStatus'];
+    vertexColorFailure?: string | undefined;
+    vertexColorDiagnostics?: FlverPreviewMesh['vertexColorDiagnostics'];
+    tangentStatus?: FlverPreviewMesh['tangentStatus'];
+    tangentFailure?: string | undefined;
+    tangentDiagnostics?: FlverPreviewMesh['tangentDiagnostics'];
+    bitangentStatus?: FlverPreviewMesh['bitangentStatus'];
+    bitangentFailure?: string | undefined;
+    bitangentDiagnostics?: FlverPreviewMesh['bitangentDiagnostics'];
     cullBackfaces?: boolean | undefined;
     boneWeightsBase64?: string | undefined;
     boneIndicesBase64?: string | undefined;
@@ -93,6 +109,21 @@ export interface FlverViewerProps {
     uvSetsBase64?: string[] | undefined;
     normalsBase64?: string | undefined;
     vertexAlphaBase64?: string | undefined;
+    positionStatus?: FlverPreviewMesh['positionStatus'];
+    positionFailure?: string | undefined;
+    positionDiagnostics?: FlverPreviewMesh['positionDiagnostics'];
+    normalStatus?: FlverPreviewMesh['normalStatus'];
+    normalFailure?: string | undefined;
+    normalDiagnostics?: FlverPreviewMesh['normalDiagnostics'];
+    vertexColorStatus?: FlverPreviewMesh['vertexColorStatus'];
+    vertexColorFailure?: string | undefined;
+    vertexColorDiagnostics?: FlverPreviewMesh['vertexColorDiagnostics'];
+    tangentStatus?: FlverPreviewMesh['tangentStatus'];
+    tangentFailure?: string | undefined;
+    tangentDiagnostics?: FlverPreviewMesh['tangentDiagnostics'];
+    bitangentStatus?: FlverPreviewMesh['bitangentStatus'];
+    bitangentFailure?: string | undefined;
+    bitangentDiagnostics?: FlverPreviewMesh['bitangentDiagnostics'];
     cullBackfaces?: boolean | undefined;
     boneWeightsBase64?: string | undefined;
     boneIndicesBase64?: string | undefined;
@@ -153,7 +184,7 @@ function applyViewerPose(handle: FlverSceneHandle, state: ViewerPoseState, reset
   }
 }
 
-interface MeshData {
+interface MeshData extends FlverNativeVertexDiagnosticSource {
   positionsBase64: string;
   indicesBase64: string;
   indexSize?: number | undefined;
@@ -362,7 +393,7 @@ const EMPTY_SCENE: FlverSemanticScene = {
 };
 
 /**
- * FLVER 3D 预览器：真实 FLVER mesh 渲染（WebGPU-first / WebGL2 fallback）。
+ * FLVER 3D 预览器：真实 FLVER mesh 渲染（WebGL2 默认 / 显式 WebGPU 预览）。
  *
  * 权威场景是渲染器无关的语义场景（typed buffer + 变换，由 IPC readFlverMesh
  * 读入的原始数据构建），投影层（threeSceneController）只消费它并持有全部
@@ -498,40 +529,14 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       try {
         const result = await bridge.readFlverMesh(props.sourceUri!, idx) as {
           ok: boolean;
-          data?: { positionsBase64?: string; indicesBase64?: string; indexSize?: number; uvsBase64?: string; uvSetsBase64?: string[]; normalsBase64?: string; vertexAlphaBase64?: string; cullBackfaces?: boolean; boneWeightsBase64?: string; boneIndicesBase64?: string; skinningMode?: 'weighted' | 'rigid' | 'static'; boneIndexSpace?: 'flver-global' | 'none'; skinningTransformMode?: 'absolute' | 'delta'; renderMode?: 'surface' | 'projected-decal' | 'compatibility-projected'; texturePreviewToken?: string; textureColorSpace?: string; textureAlphaMode?: 'opaque' | 'cutout'; albedo2TextureName?: string; albedo2TexturePreviewToken?: string; albedo2TextureColorSpace?: string; normal2TextureName?: string; normal2TexturePreviewToken?: string; normal2TextureColorSpace?: string; diffuseBlend?: FlverSceneDiffuseBlend; projectionTextureName?: string | null; projectionTexturePreviewToken?: string | null; projectionTextureColorSpace?: string | null; vertexCount?: number };
+          data?: Partial<MeshData>;
           diagnostics?: Array<{ message: string }>;
         };
         if (result.ok && result.data?.positionsBase64) {
-          setMeshDataList([{
-            positionsBase64: result.data.positionsBase64,
-            indicesBase64: result.data.indicesBase64 ?? '',
-            indexSize: result.data.indexSize,
-            ...(result.data.uvsBase64 ? { uvsBase64: result.data.uvsBase64 } : {}),
-            ...(result.data.uvSetsBase64 ? { uvSetsBase64: result.data.uvSetsBase64 } : {}),
-             ...(result.data.normalsBase64 ? { normalsBase64: result.data.normalsBase64 } : {}),
-             ...(result.data.vertexAlphaBase64 ? { vertexAlphaBase64: result.data.vertexAlphaBase64 } : {}),
-             ...(result.data.cullBackfaces !== undefined ? { cullBackfaces: result.data.cullBackfaces } : {}),
-             ...(result.data.projectionTextureName !== undefined ? { projectionTextureName: result.data.projectionTextureName } : {}),
-             ...(result.data.projectionTexturePreviewToken !== undefined ? { projectionTexturePreviewToken: result.data.projectionTexturePreviewToken } : {}),
-             ...(result.data.projectionTextureColorSpace !== undefined ? { projectionTextureColorSpace: result.data.projectionTextureColorSpace } : {}),
-             ...(result.data.boneWeightsBase64 ? { boneWeightsBase64: result.data.boneWeightsBase64 } : {}),
-            ...(result.data.boneIndicesBase64 ? { boneIndicesBase64: result.data.boneIndicesBase64 } : {}),
-            skinningMode: result.data.skinningMode,
-            boneIndexSpace: result.data.boneIndexSpace,
-            skinningTransformMode: result.data.skinningTransformMode,
-            ...(result.data.renderMode ? { renderMode: result.data.renderMode } : {}),
-            ...(result.data.texturePreviewToken ? { texturePreviewToken: result.data.texturePreviewToken } : {}),
-            ...(result.data.textureColorSpace ? { textureColorSpace: result.data.textureColorSpace } : {}),
-            ...(result.data.textureAlphaMode ? { textureAlphaMode: result.data.textureAlphaMode } : {}),
-            ...(result.data.albedo2TextureName ? { albedo2TextureName: result.data.albedo2TextureName } : {}),
-            ...(result.data.albedo2TexturePreviewToken ? { albedo2TexturePreviewToken: result.data.albedo2TexturePreviewToken } : {}),
-            ...(result.data.albedo2TextureColorSpace ? { albedo2TextureColorSpace: result.data.albedo2TextureColorSpace } : {}),
-            ...(result.data.normal2TextureName ? { normal2TextureName: result.data.normal2TextureName } : {}),
-            ...(result.data.normal2TexturePreviewToken ? { normal2TexturePreviewToken: result.data.normal2TexturePreviewToken } : {}),
-            ...(result.data.normal2TextureColorSpace ? { normal2TextureColorSpace: result.data.normal2TextureColorSpace } : {}),
-            ...(result.data.diffuseBlend ? { diffuseBlend: result.data.diffuseBlend } : {}),
-            vertexCount: result.data.vertexCount ?? 0
-          }]);
+          setMeshDataList([toMeshData({
+            ...result.data,
+            positionsBase64: result.data.positionsBase64
+          })]);
         } else {
           setMeshError(result.diagnostics?.[0]?.message ?? '网格数据不可用');
         }
@@ -711,7 +716,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
   );
 }
 
-function buildSemanticScene(input: {
+export function buildSemanticScene(input: {
   meshes: MeshData[];
   skeleton: SkeletonBone[];
   dummies: DummyPoint[];
@@ -745,7 +750,8 @@ function buildSemanticScene(input: {
       previewRenderMode: meshData.renderMode,
       cullBackfaces: meshData.cullBackfaces,
       materialAlphaMode: meshData.textureAlphaMode,
-      wireframeOverlay: false
+      wireframeOverlay: false,
+      ...decodeFlverNativeVertexDiagnostics(meshData, vertexCount, `mesh[${index}]`)
     };
     if (meshData.uvSetsBase64 && meshData.uvSetsBase64.length > 0) {
       mesh.uvSets = meshData.uvSetsBase64.map((base64, uvIndex) => {
@@ -766,7 +772,7 @@ function buildSemanticScene(input: {
     if (meshData.vertexAlphaBase64) {
       mesh.vertexAlpha = decodeFloat32Array(meshData.vertexAlphaBase64, `mesh[${index}].vertexAlpha`);
       assertVertexAttributeLength(mesh.vertexAlpha.length, vertexCount, 1, `mesh[${index}].vertexAlpha`);
-      assertVertexAlpha(mesh.vertexAlpha, `mesh[${index}].vertexAlpha`);
+      if (!mesh.vertexColorDiagnostics?.length) assertVertexAlpha(mesh.vertexAlpha, `mesh[${index}].vertexAlpha`);
     }
     if (meshData.renderMode === 'compatibility-projected') {
       if (typeof meshData.projectionTexturePreviewToken !== 'string') {
@@ -977,7 +983,8 @@ function decodeBundleMesh(
     materialAlphaMode: materialTextures?.alphaMode,
     skeletonId: usesFollowerBinding ? model.modelId : (meshData.skeletonId ?? model.modelId),
     vertexCount,
-    wireframeOverlay: false
+    wireframeOverlay: false,
+    ...decodeFlverNativeVertexDiagnostics(meshData, vertexCount, label)
   };
   if (meshData.indicesBase64) {
     mesh.indices = decodeMeshIndices(meshData.indicesBase64, meshData.indexSize, `${label}.indices`);
@@ -1002,7 +1009,7 @@ function decodeBundleMesh(
   if (meshData.vertexAlphaBase64) {
     mesh.vertexAlpha = decodeFloat32Array(meshData.vertexAlphaBase64, `${label}.vertexAlpha`);
     assertVertexAttributeLength(mesh.vertexAlpha.length, vertexCount, 1, `${label}.vertexAlpha`);
-    assertVertexAlpha(mesh.vertexAlpha, `${label}.vertexAlpha`);
+    if (!mesh.vertexColorDiagnostics?.length) assertVertexAlpha(mesh.vertexAlpha, `${label}.vertexAlpha`);
   }
   if (meshData.renderMode === 'compatibility-projected') {
     if (typeof meshData.projectionTexturePreviewToken !== 'string') {
@@ -1110,49 +1117,41 @@ function toSceneMaterialTextures(texture: FlverPreviewTexture): FlverSceneMateri
   return result;
 }
 
+function nativeVertexDiagnosticSource(source: FlverNativeVertexDiagnosticSource): FlverNativeVertexDiagnosticSource {
+  return {
+    positionStatus: source.positionStatus,
+    positionFailure: source.positionFailure,
+    positionDiagnostics: source.positionDiagnostics,
+    normalStatus: source.normalStatus,
+    normalFailure: source.normalFailure,
+    normalDiagnostics: source.normalDiagnostics,
+    vertexColorStatus: source.vertexColorStatus,
+    vertexColorFailure: source.vertexColorFailure,
+    vertexColorDiagnostics: source.vertexColorDiagnostics,
+    tangentStatus: source.tangentStatus,
+    tangentFailure: source.tangentFailure,
+    tangentDiagnostics: source.tangentDiagnostics,
+    bitangentStatus: source.bitangentStatus,
+    bitangentFailure: source.bitangentFailure,
+    bitangentDiagnostics: source.bitangentDiagnostics
+  };
+}
+
 /** 把外部/IPC 返回的单个网格的 DTO 规整成内部 MeshData（问题4-A 参数复用）。 */
-function toMeshData(input: {
-  positionsBase64: string;
-  indicesBase64: string;
-  indexSize?: number | undefined;
-  uvsBase64?: string | undefined;
-  uvSetsBase64?: string[] | undefined;
-  normalsBase64?: string | undefined;
-  vertexAlphaBase64?: string | undefined;
-  cullBackfaces?: boolean | undefined;
-  boneWeightsBase64?: string | undefined;
-  boneIndicesBase64?: string | undefined;
-  skinningMode?: 'weighted' | 'rigid' | 'static' | undefined;
-  boneIndexSpace?: 'flver-global' | 'none' | undefined;
-  skinningTransformMode?: 'absolute' | 'delta' | undefined;
-  renderMode?: 'surface' | 'projected-decal' | 'compatibility-projected' | undefined;
-  texturePreviewToken?: string | undefined;
-  textureColorSpace?: string | undefined;
-  textureAlphaMode?: 'opaque' | 'cutout' | undefined;
-  albedo2TextureName?: string | undefined;
-  albedo2TexturePreviewToken?: string | undefined;
-  albedo2TextureColorSpace?: string | undefined;
-  normal2TextureName?: string | undefined;
-  normal2TexturePreviewToken?: string | undefined;
-  normal2TextureColorSpace?: string | undefined;
-  diffuseBlend?: FlverSceneDiffuseBlend | undefined;
-  projectionTextureName?: string | null | undefined;
-  projectionTexturePreviewToken?: string | null | undefined;
-  projectionTextureColorSpace?: string | null | undefined;
-  vertexCount: number;
-}): MeshData {
+export function toMeshData(input: Partial<MeshData> & { positionsBase64: string }): MeshData {
   return {
     positionsBase64: input.positionsBase64,
-    indicesBase64: input.indicesBase64,
+    indicesBase64: input.indicesBase64 ?? '',
     indexSize: input.indexSize ?? undefined,
     uvsBase64: input.uvsBase64 ?? undefined,
     uvSetsBase64: input.uvSetsBase64 ?? undefined,
     normalsBase64: input.normalsBase64 ?? undefined,
     vertexAlphaBase64: input.vertexAlphaBase64 ?? undefined,
+    ...nativeVertexDiagnosticSource(input),
     cullBackfaces: input.cullBackfaces,
-    projectionTextureName: input.projectionTextureName ?? undefined,
-    projectionTexturePreviewToken: input.projectionTexturePreviewToken ?? undefined,
-    projectionTextureColorSpace: input.projectionTextureColorSpace ?? undefined,
+    projectionTextureName: input.projectionTextureName,
+    projectionTexturePreviewToken: input.projectionTexturePreviewToken,
+    projectionTextureColorSpace: input.projectionTextureColorSpace,
     boneWeightsBase64: input.boneWeightsBase64 ?? undefined,
     boneIndicesBase64: input.boneIndicesBase64 ?? undefined,
     skinningMode: input.skinningMode,
@@ -1169,7 +1168,7 @@ function toMeshData(input: {
     normal2TexturePreviewToken: input.normal2TexturePreviewToken ?? undefined,
     normal2TextureColorSpace: input.normal2TextureColorSpace ?? undefined,
     diffuseBlend: input.diffuseBlend ?? undefined,
-    vertexCount: input.vertexCount
+    vertexCount: input.vertexCount ?? 0
   };
 }
 

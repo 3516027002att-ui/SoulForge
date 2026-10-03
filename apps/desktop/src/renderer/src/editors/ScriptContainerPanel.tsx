@@ -29,6 +29,7 @@ import { search, searchKeymap } from '@codemirror/search';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 import { describeBridgeAbsence, getRendererBridge } from '../runtime/rendererRuntime.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
+import { LoadedVersionComparison, LoadedScriptComparison } from './LoadedVersionComparison.js';
 
 /*
  * 脚本 IDE（S16）。
@@ -136,6 +137,9 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
   const editorHostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const draftRef = useRef('');
+  const comparisonOpenRef = useRef(false);
+  const sourceReadGenerationRef = useRef(0);
+  const [, refreshComparison] = useState(0);
   const submitRef = useRef<() => void>(() => {});
 
   const bridge = getRendererBridge();
@@ -144,6 +148,11 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
     dirtyRef.current = value;
     setDirtyState(value);
   }
+
+  useEffect(() => () => {
+    sourceReadGenerationRef.current += 1;
+    comparisonOpenRef.current = false;
+  }, []);
 
   /* ── 形态识别：容器（全量条目表）还是独立脚本文件（单 Source） ──── */
   const probeMode = useCallback(async (): Promise<void> => {
@@ -206,14 +215,18 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
   // 容器内条目的内层地址（uri 井号片段）由主进程构造，渲染器只传
   // resourceUri + 条目名 + entryIndex（index 是 native 读链的主键）。
   const loadSource = useCallback(async (entry: { name: string; index: number } | null): Promise<void> => {
+    const generation = ++sourceReadGenerationRef.current;
+    comparisonOpenRef.current = false;
     if (props.resourceUri === '') {
       setSource(null);
       setSourceError(null);
+      setSourceLoading(false);
       return;
     }
     if (bridge === null || typeof bridge.readScriptSource !== 'function') {
       setSource(null);
       setSourceError(describeBridgeAbsence('读取脚本源码'));
+      setSourceLoading(false);
       return;
     }
     setSourceLoading(true);
@@ -225,6 +238,8 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
         entry ? entry.name : undefined,
         entry ? entry.index : undefined
       );
+      if (generation !== sourceReadGenerationRef.current) return;
+      comparisonOpenRef.current = false;
       setSource(view);
       if (view.ok && view.sourceText !== undefined) {
         draftRef.current = view.sourceText;
@@ -237,10 +252,12 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
         setSourceError(view.diagnostics?.[0]?.message ?? '脚本源码读取失败。');
       }
     } catch (error) {
+      if (generation !== sourceReadGenerationRef.current) return;
+      comparisonOpenRef.current = false;
       setSource(null);
       setSourceError(error instanceof Error ? error.message : '脚本源码读取异常。');
     } finally {
-      setSourceLoading(false);
+      if (generation === sourceReadGenerationRef.current) setSourceLoading(false);
     }
   }, [props.resourceUri, bridge]);
 
@@ -253,6 +270,7 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
     const extensions = buildScriptEditorExtensions(
       (text) => {
         draftRef.current = text;
+        if (comparisonOpenRef.current) refreshComparison(version => version + 1);
         if (!dirtyRef.current) setDirty(true);
       },
       () => submitRef.current()
@@ -397,6 +415,17 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
   /* ── 右栏：Source（可编辑源码 IDE）────────────────────────────── */
   const sourceColumn = (
     <div className="stack gap script-source">
+      <LoadedVersionComparison
+        key={`${sourceReadGenerationRef.current}:${source?.logicalName ?? ''}:${source?.entryIndex ?? ''}:${source?.childHash ?? ''}:${source?.containerHash ?? ''}`}
+        onExpandedChange={(expanded) => {
+          comparisonOpenRef.current = expanded;
+          if (expanded) refreshComparison(version => version + 1);
+        }}
+      >
+        {source?.ok && source.sourceText !== undefined
+          ? <LoadedScriptComparison before={source.sourceText} after={draftRef.current} />
+          : <p className="muted">载入源码后可比较。</p>}
+      </LoadedVersionComparison>
       {sourceLoading && <span className="muted" role="status">正在读取/反编译源码…</span>}
       {!sourceLoading && !source && (
         <p className="muted">

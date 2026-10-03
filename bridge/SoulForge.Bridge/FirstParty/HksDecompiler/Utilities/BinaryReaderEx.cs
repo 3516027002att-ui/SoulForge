@@ -12,10 +12,16 @@ namespace SoulForge.Bridge.FirstParty.HksDecompiler.Utilities
     public class BinaryReaderEx
     {
         private static readonly Encoding ASCII = Encoding.ASCII;
-        private static readonly Encoding ShiftJIS = Encoding.UTF8;
+        private static readonly Encoding ShiftJIS = CreateShiftJis();
         private static readonly Encoding UTF8 = Encoding.UTF8;
         private static readonly Encoding UTF16 = Encoding.Unicode;
         private static readonly Encoding UTF16BE = Encoding.BigEndianUnicode;
+
+        private static Encoding CreateShiftJis()
+        {
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            return Encoding.GetEncoding(932, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback);
+        }
 
         private BinaryReader br;
         private Stack<long> steps;
@@ -962,5 +968,4 @@ namespace SoulForge.Bridge.FirstParty.HksDecompiler.Utilities
         #endregion
     }
 }
-
 

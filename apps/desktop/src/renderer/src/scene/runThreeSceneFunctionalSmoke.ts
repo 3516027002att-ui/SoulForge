@@ -3,7 +3,7 @@
  * (threeSceneController.ts).
  *
  * Proves, without any real GPU / DOM / game assets:
- *   1. Backend selection — WebGPU-first with WebGL2 fallback (resolveRendererBackend).
+ *   1. Backend selection — WebGL2 default until verified WebGPU parity (resolveRendererBackend).
  *   2. Proxy scene natural fallback: in Node navigator has no `gpu`, so the mount
  *      must select WebGL2 on its own (rendererFactory only replaces the renderer
  *      implementation, never the backend decision).
@@ -100,6 +100,8 @@ class FakeElement {
   style: Record<string, string> = {};
   clientWidth = 800;
   clientHeight = 600;
+  className = '';
+  parentElement: FakeElement | null = null;
   private readonly handlers = new Map<string, Set<UnknownHandler>>();
   private readonly pointerCaptures = new Set<number>();
 
@@ -116,6 +118,12 @@ class FakeElement {
   }
   getBoundingClientRect(): { left: number; top: number; width: number; height: number } {
     return { left: 0, top: 0, width: this.clientWidth, height: this.clientHeight };
+  }
+  closest(selector: string): FakeElement | null {
+    for (let element: FakeElement | null = this; element; element = element.parentElement) {
+      if (selector === `.${element.className}`) return element;
+    }
+    return null;
   }
   getRootNode(): DocumentLike {
     return fakeDocument;
@@ -243,6 +251,7 @@ function installDisposeCounter(): void {
 // ---------------------------------------------------------------------------
 class FakeRenderer implements ThreeRendererLike {
   readonly calls: string[] = [];
+  readonly sizeCalls: Array<[number, number, boolean | undefined]> = [];
   lastScene: three.Scene | null = null;
   readonly renderMetrics: Array<{
     meshObjects: number;
@@ -255,8 +264,9 @@ class FakeRenderer implements ThreeRendererLike {
   setPixelRatio(): void {
     this.calls.push('setPixelRatio');
   }
-  setSize(): void {
+  setSize(width: number, height: number, updateStyle?: boolean): void {
     this.calls.push('setSize');
+    this.sizeCalls.push([width, height, updateStyle]);
   }
   render(scene: three.Scene): void {
     this.calls.push('render');
@@ -373,6 +383,21 @@ function buildFlverScene(): FlverSemanticScene {
         indices: new Uint16Array([0, 1, 2]),
         skinIndices: new Uint16Array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
         skinWeights: new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]),
+        vertexColorStatus: 'decoded',
+        vertexColorDiagnostics: [0, 1].map((memberOrdinal) => ({
+          memberOrdinal, memberIndex: memberOrdinal + 2, layoutType: 3, layoutTypeName: 'Float4',
+          vertexBufferIndex: 1, bufferLayoutIndex: 4, structOffset: memberOrdinal * 16,
+          rgba: new Float32Array([-2, 3, 0.25, 1.5, 0, 1, 0.5, -0.25, 1, 0, 0, 1])
+        })),
+        tangentStatus: 'decoded',
+        tangentDiagnostics: [{
+          memberOrdinal: 0, memberIndex: 5, layoutType: 3, layoutTypeName: 'Float4',
+          vertexBufferIndex: 1, bufferLayoutIndex: 4, structOffset: 32,
+          xyzw: new Float32Array([1, 0, 0, -1, 0, 1, 0, 1, 0, 0, 1, -1])
+        }],
+        bitangentStatus: 'unsupported',
+        bitangentFailure: 'unsupported native bitangent layout',
+        bitangentDiagnostics: [],
         vertexCount: 3,
         cullBackfaces: true,
         wireframeOverlay: true,
@@ -446,10 +471,86 @@ function testSkinningBindPose(record: (name: string) => void): void {
 // ---------------------------------------------------------------------------
 async function testBackendResolution(record: (name: string) => void): Promise<void> {
   assertEqual(resolveRendererBackend(undefined, false), 'webgl2', 'WebGPU 不可用 → WebGL2 回退');
-  assertEqual(resolveRendererBackend(undefined, true), 'webgpu', 'WebGPU 可用 → WebGPU 优先');
+  assertEqual(resolveRendererBackend(undefined, true), 'webgl2', 'WebGPU 可用仍保留已验证 WebGL2 默认');
   assertEqual(resolveRendererBackend('webgl2', true), 'webgl2', '显式覆盖优先于能力探测');
   assertEqual(resolveRendererBackend('webgpu', false), 'webgpu', '显式 WebGPU 覆盖不受能力探测影响');
   record('backend-resolution');
+}
+
+interface SyntheticResizeSample {
+  cause: string;
+  hostClient: [number, number];
+  rendererSizeArguments: [number, number, boolean | undefined];
+  cameraAspect: number;
+  projectionAspect: number;
+}
+
+async function testResizeContract(record: (name: string) => void): Promise<SyntheticResizeSample[]> {
+  const previousObserver = domGlobals.ResizeObserver;
+  const observed = new Set<FakeElement>();
+  let notify: (() => void) | null = null;
+  let disconnected = false;
+  domGlobals.ResizeObserver = class {
+    constructor(callback: () => void) { notify = callback; }
+    observe(element: FakeElement): void { observed.add(element); }
+    disconnect(): void { disconnected = true; }
+  };
+  const columns = new FakeElement();
+  columns.className = 'workbench__columns';
+  const viewport = new FakeElement();
+  viewport.parentElement = columns;
+  const container = new FakeElement();
+  container.parentElement = viewport;
+  const renderer = new FakeRenderer();
+  let capturedCamera: three.PerspectiveCamera | null = null;
+  let handle: Awaited<ReturnType<typeof mountThreeProxyScene>> | null = null;
+  const samples: SyntheticResizeSample[] = [];
+  try {
+    handle = await mountThreeProxyScene({
+      container: container as unknown as HTMLElement,
+      drawList: buildProxyDrawList(),
+      rendererFactory: () => renderer,
+      cameraAudit: camera => { capturedCamera = camera; }
+    });
+    assert(capturedCamera !== null && notify !== null, 'resize smoke 捕获真实 Three camera 与 observer callback');
+    const camera = capturedCamera as three.PerspectiveCamera;
+    const resize = notify as () => void;
+    assert(observed.has(container) && observed.has(viewport) && observed.has(columns), 'host、viewport 与 columns 都受尺寸观察');
+    const sample = (cause: string, width: number, height: number, trigger?: () => void): void => {
+      container.clientWidth = width;
+      container.clientHeight = height;
+      const previousCount = renderer.sizeCalls.length;
+      trigger?.();
+      if (trigger) assertEqual(renderer.sizeCalls.length, previousCount + 1, 'resize 每次调用实际 setSize 一次');
+      const size = renderer.sizeCalls[renderer.sizeCalls.length - 1]!;
+      assertEqual(size[0], Math.max(width, 1), 'renderer width 跟随 host clientWidth');
+      assertEqual(size[1], Math.max(height, 1), 'renderer height 跟随 host clientHeight');
+      assertEqual(size[2], false, 'resize 保留 CSS 管理的 canvas 显示尺寸');
+      const expectedAspect = size[0] / size[1];
+      const projectionAspect = camera.projectionMatrix.elements[5]! / camera.projectionMatrix.elements[0]!;
+      assert(Math.abs(camera.aspect - expectedAspect) < 1e-12, '真实 camera.aspect 与 renderer 尺寸同步');
+      assert(Math.abs(projectionAspect - expectedAspect) < 1e-12, '真实 projectionMatrix 随 aspect 更新');
+      samples.push({ cause, hostClient: [width, height], rendererSizeArguments: size, cameraAspect: camera.aspect, projectionAspect });
+    };
+    sample('mount', 800, 600);
+    sample('observer: narrow column', 320, 600, resize);
+    sample('observer: expanded columns', 640, 360, resize);
+    sample('observer: taller status area', 640, 220, resize);
+    sample('window: unmeasured host', 0, 0, () => dispatchWindow('resize', {}));
+    sample('window: restored host', 800, 600, () => dispatchWindow('resize', {}));
+    handle.dispose();
+    handle = null;
+    assert(disconnected, 'dispose 断开 ResizeObserver');
+    const count = renderer.sizeCalls.length;
+    dispatchWindow('resize', {});
+    assertEqual(renderer.sizeCalls.length, count, 'dispose 后 window resize 不再改变 renderer');
+    record('synthetic-host-resize-camera-projection');
+    return samples;
+  } finally {
+    handle?.dispose();
+    if (previousObserver === undefined) delete domGlobals.ResizeObserver;
+    else domGlobals.ResizeObserver = previousObserver;
+  }
 }
 
 async function testProxyScene(record: (name: string) => void): Promise<void> {
@@ -601,14 +702,14 @@ async function testProxyScene(record: (name: string) => void): Promise<void> {
   assert(normalDistance > 0, 'W 连续漫游产生位移');
   assert(Math.abs(acceleratedDistance / normalDistance - 3.5) < 1e-6, 'Shift+W 位移严格为普通 W 的 3.5x');
 
-  // 全量释放：内容 + 高亮 overlay + 静态资源（grid/axes geometry）全部 dispose。
+  // 全量释放：内容 + 高亮 overlay + 静态资源（grid/axes geometry + material）全部 dispose。
   handle.dispose();
   assert(createdRenderer.disposed, 'renderer.dispose 被调用');
   for (const resource of audit) {
     assert(disposedSet.has(resource), `代理内容已释放：${resourceName(resource)}`);
   }
   // 内容(2) + 高亮 overlay(1) + 静态(2) = 5。
-  assertEqual(totalDisposeCalls - baselineDispose, 5, '释放计数=内容+overlay+静态资源，无泄漏');
+  assertEqual(totalDisposeCalls - baselineDispose, 7, '释放计数=内容+overlay+静态资源，无泄漏');
 
   record('proxy-natural-webgl2-fallback');
   record('proxy-picking-highlight');
@@ -620,9 +721,13 @@ async function testProxyScene(record: (name: string) => void): Promise<void> {
 async function testProxyModelReplacement(record: (name: string) => void): Promise<void> {
   const audits: Array<{ phase: string; items: Array<{ id: string; state: string }> }> = [];
   const rendererState: { renderer: FakeRenderer | null } = { renderer: null };
+  let mountedCamera: three.PerspectiveCamera | null = null;
+  const drawList = buildModelReplacementDrawList();
+  drawList.items[1]!.position = [2000, 0, 0];
   const handle = await mountThreeProxyScene({
     container: new FakeElement() as unknown as HTMLElement,
-    drawList: buildModelReplacementDrawList(),
+    drawList,
+    cameraAudit: (camera) => { mountedCamera = camera; },
     rendererFactory: () => {
       const renderer = new FakeRenderer();
       rendererState.renderer = renderer;
@@ -651,8 +756,8 @@ async function testProxyModelReplacement(record: (name: string) => void): Promis
 
   const positionsBase64 = Buffer.from(new Float32Array([
     0, 0, 0,
-    1, 0, 0,
-    0, 1, 0
+    256, 0, 0,
+    0, 256, 0
   ]).buffer).toString('base64');
   const indicesBase64 = Buffer.from(new Uint16Array([0, 1, 2]).buffer).toString('base64');
   const replaced = handle.updateModelGeometry?.('map/m000010.FLVER', {
@@ -681,7 +786,45 @@ async function testProxyModelReplacement(record: (name: string) => void): Promis
   assertEqual(handle.selectedId, 'part-001', '几何热替换保留当前选中 placement');
   const ready = audits.filter((entry) => entry.phase === 'mesh-ready').at(-1);
   assert(ready !== undefined, 'model geometry replacement 发出 mesh-ready audit');
-  assert(ready.items.every((item) => item.state === 'proxy'), 'replacement 后 placement 仍由 proxy binding 管理');
+  assert(ready.items.every((item) => item.state === 'mesh'), '真实几何 READY 后所有 placement 的 audit 必须标记 mesh，实例化表示不改变已加载状态');
+  // Exercise the real TransformControls lifecycle and the spatial picking path.
+  await import('three/examples/jsm/controls/TransformControls.js');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  pumpFrames(4);
+  const controls = rendererState.renderer?.lastScene?.children.map((child) => (child as unknown as { controls?: {
+    object?: three.Object3D; dragging: boolean; dispatchEvent(event: { type: string }): void;
+  } }).controls).filter((control) => control?.object);
+  const control = controls?.[0];
+  assert(control?.object !== undefined, '真实 TransformControls 已附着实例 placement');
+  assert(mountedCamera !== null && lastCreatedCanvas !== null, '实例 picking 使用真实 camera 与输入路径');
+  const camera = mountedCamera as three.PerspectiveCamera;
+  const canvas = lastCreatedCanvas;
+  const pickFarFromOrigin = (phase: string): void => {
+    replacementBatch.updateMatrixWorld(true);
+    const placement = new three.Matrix4();
+    replacementBatch.getMatrixAt(1, placement);
+    const hit = new three.Vector3(100, 100, 0).applyMatrix4(placement).applyMatrix4(replacementBatch.matrixWorld);
+    camera.position.copy(hit).add(new three.Vector3(0, 0, 500));
+    camera.lookAt(hit);
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld(true);
+    canvas.dispatch('click', { clientX: 400, clientY: 300 });
+    assertEqual(handle.selectedId, 'part-001', phase + ': 真实大网格远离原点仍能通过 spatial index 选中');
+  };
+  handle.setSelected(null);
+  pickFarFromOrigin('before dragging');
+  control.dragging = true;
+  control.object.position.x += 128;
+  control.dispatchEvent({ type: 'objectChange' });
+  control.dragging = false;
+  await new Promise<void>((resolve) => setTimeout(resolve, 90));
+  handle.setSelected(null);
+  pickFarFromOrigin('after dragging');
+  const repeated = handle.updateModelGeometry?.('m000010', { positionsBase64, indicesBase64, indexSize: 16, vertexCount: 3 });
+  assertEqual(repeated, 2, '重复 READY 仍更新共享批次的两个 placement');
+  assert(audits.at(-1)?.items.every((item) => item.state === 'mesh'), '重复 READY 保持真实网格状态');
+  handle.setDrawList(buildModelReplacementDrawList());
+  assert(audits.at(-1)?.items.every((item) => item.state === 'proxy'), '新 draw list 恢复未加载代理状态');
 
   handle.dispose();
   record('proxy-model-batch-replacement');
@@ -752,6 +895,19 @@ async function testFlverScene(record: (name: string) => void): Promise<void> {
   const positionAttribute = geometry.attributes.position;
   assert(positionAttribute !== undefined, '位置缓冲已设置');
   assertEqual(positionAttribute.count, 3, '位置缓冲保留真实顶点数');
+  for (const name of ['soulforgeVertexColor0', 'soulforgeVertexColor1', 'soulforgeTangent0']) {
+    assertEqual(geometry.getAttribute(name)?.itemSize, 4, `${name} retains all native components`);
+    assertEqual(geometry.getAttribute(name)?.count, 3, `${name} retains every vertex`);
+  }
+  assertEqual(geometry.getAttribute('soulforgeVertexColor0')?.array[3], 1.5, 'native Float4 alpha is not clamped');
+  assertEqual(geometry.getAttribute('color'), undefined, 'native RGBA evidence does not activate generic colors');
+  assertEqual(geometry.getAttribute('tangent'), undefined, 'native tangent evidence does not activate generic tangents');
+  assertEqual(geometry.userData.vertexColorDiagnostics[1].memberIndex, 3, 'geometry preserves native member metadata');
+  assertEqual(geometry.userData.bitangentStatus, 'unsupported', 'geometry preserves unavailable native channel status');
+  const surfaceMaterial = audit1.find((r): r is three.MeshStandardMaterial => r instanceof three.MeshStandardMaterial);
+  assert(surfaceMaterial !== undefined, 'surface retains its standard material');
+  assertEqual(surfaceMaterial.vertexColors, false, 'native diagnostic sets do not enable material vertex colors');
+  assertEqual(surfaceMaterial.opacity, 1, 'native diagnostic alpha does not change material opacity');
   assert(geometry.index !== null, '索引缓冲已设置');
   const texture = audit1.find((r) => r instanceof three.DataTexture) as three.DataTexture | undefined;
   assert(texture !== undefined, 'RGBA 纹理投影为 DataTexture');
@@ -787,7 +943,13 @@ async function testFlverScene(record: (name: string) => void): Promise<void> {
   assert((createdRenderer.calls.filter((c) => c === 'render').length) >= 1, 'FLVER 场景请求并提交了有界渲染帧');
 
   // 内容替换：旧资源必须全部释放。
-  handle.setScene(buildFlverScene());
+  const replacement = buildFlverScene();
+  replacement.meshes[0]!.vertexColors = new Float32Array(9).fill(0.5);
+  handle.setScene(replacement);
+  const legacyGeometry = audit2.find((r): r is three.BufferGeometry => r instanceof three.BufferGeometry && r.hasAttribute('color'));
+  assertEqual(legacyGeometry?.getAttribute('color').itemSize, 3, 'legacy RGB shading attribute stays RGB');
+  const legacyMaterial = audit2.find((r): r is three.MeshStandardMaterial => r instanceof three.MeshStandardMaterial);
+  assertEqual(legacyMaterial?.vertexColors, true, 'explicit legacy RGB still enables material vertex colors');
   for (const resource of audit1) {
     assert(disposedSet.has(resource), `替换场景释放旧内容：${resourceName(resource)}`);
   }
@@ -1022,6 +1184,7 @@ async function main(): Promise<void> {
   };
 
   await testBackendResolution(record);
+  const resizeSamples = await testResizeContract(record);
   await testProxyScene(record);
   await testProxyModelReplacement(record);
   await testFrameUploadCancellation(record);
@@ -1038,7 +1201,11 @@ async function main(): Promise<void> {
         ok: true,
         message: 'Three 场景投影层功能 smoke 通过（无 GPU / 无真实资产）',
         cases,
-        backendContract: 'WebGPU-first / WebGL2 fallback',
+        resizeContract: {
+          scope: 'synthetic host clients + actual renderer arguments + real Three camera/projection; no DOM display bounds or GPU/backing pixel measurement',
+          samples: resizeSamples
+        },
+        backendContract: 'WebGL2 default / explicit WebGPU preview',
         headless: true,
         filesystemAccess: false
       },

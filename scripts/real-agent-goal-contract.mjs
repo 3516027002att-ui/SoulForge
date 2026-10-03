@@ -127,7 +127,8 @@ function normalizeGoal(goal, index, prefix = '') {
       status,
       verificationStatus: status,
       unsupportedReason,
-      ...(changedPath ? { changedPath } : {})
+      ...(changedPath ? { changedPath } : {}),
+      ...(goal.requireMutation === true ? {requireMutation:true} : {})
     };
   }
 
@@ -146,7 +147,8 @@ function normalizeGoal(goal, index, prefix = '') {
       fieldId: goal.fieldId.trim(),
       expectedValue: goal.expectedValue,
       required,
-      ...(changedPath ? { changedPath } : {})
+      ...(changedPath ? { changedPath } : {}),
+      ...(goal.requireMutation === true ? {requireMutation:true} : {})
     };
   }
 
@@ -161,6 +163,7 @@ function normalizeGoal(goal, index, prefix = '') {
       checks,
       required,
       ...(changedPath ? { changedPath } : {}),
+      ...(goal.requireMutation === true ? {requireMutation:true} : {}),
       ...(typeof goal.description === 'string' ? { description: goal.description.slice(0, 512) } : {})
     };
   }
@@ -238,6 +241,7 @@ function normalizeGoal(goal, index, prefix = '') {
     required,
     verificationClass,
     ...(changedPath ? { changedPath } : {}),
+      ...(goal.requireMutation === true ? {requireMutation:true} : {}),
     requireSourceHash
   };
 }

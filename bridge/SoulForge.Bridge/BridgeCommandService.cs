@@ -27,7 +27,8 @@ internal sealed class BridgeCommandService
         IReadOnlyList<string>? allowedRoots = null,
         string? workspaceSessionId = null,
         MapTimingCollector? mapTiming = null,
-        CharacterTimingCollector? characterTiming = null)
+        CharacterTimingCollector? characterTiming = null,
+        bool dispatchProbe = false)
     {
         var command = rawCommand.Trim().ToLowerInvariant();
 
@@ -35,7 +36,7 @@ internal sealed class BridgeCommandService
         // production CLI must not expose a second command universe. The
         // descriptor catalog is the dispatch source for both entry points;
         // unknown names fail before any file probing or writer is reached.
-        if (!BridgeCommandDescriptorCatalog.TryGet(command, out _))
+        if (!dispatchProbe && !BridgeCommandDescriptorCatalog.TryGet(command, out _))
         {
             return BridgeResult<object>.Failed(
                 file,
@@ -211,29 +212,47 @@ internal sealed class BridgeCommandService
 
         if (command == "probe-oodle")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             var probe = OodleRuntimeLocator.Probe(file, BridgeResult<object>.MakeSourceUri(file));
             return BridgeResult<object>.Partial(file, "unknown", probe.Diagnostics, probe);
         }
 
         if (command == "probe-document-locator")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             return ProbeDocumentLocator(file, oodleRuntimeRoot, resourceKind);
         }
 
         if (command == "inventory-asset-resources")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             return InventoryAssetResources(file, options, oodleRuntimeRoot, cancellationToken);
         }
 
-        if (!File.Exists(file))
+        if (!dispatchProbe && !File.Exists(file))
         {
             return BridgeResult<object>.Failed(file, resourceKind, "FILE_NOT_FOUND", "Input file does not exist.");
         }
 
         cancellationToken.ThrowIfCancellationRequested();
 
+        // Disk commands accept only the daemon/host's canonical staging field.
+        // Standalone JSON options cannot grant a second write path.
+        if (!dispatchProbe && BridgeCommandDescriptorCatalog.TryGet(command, out var diskDescriptor)
+            && diskDescriptor.RequiresOutputPath && string.IsNullOrWhiteSpace(outputPath))
+            return BridgeResult<object>.Failed(file, resourceKind, "BRIDGE_OUTPUT_PATH_REQUIRED", "Disk writer/export requires a host-controlled staging output validated against negotiated writable roots.");
+
+        if (!dispatchProbe && LargeResourceReadCache.RequiresCache(file))
+        {
+            if (BridgeCommandDescriptorCatalog.TryGet(command, out var largeDescriptor) && largeDescriptor.Effect == "write")
+                return BridgeResult<object>.Failed(file, resourceKind, "LARGE_RESOURCE_REPACK_UNSUPPORTED", "Oversized container support is read-only; repack and Patch Engine writeback require a separate verified workflow.");
+            if (LargeResourceBridgeReader.Supports(command))
+                return await LargeResourceBridgeReader.ReadAsync(command, file, options, allowedRoots, outputPath, oodleRuntimeRoot, cancellationToken);
+        }
+
         if (command == "read-hks-source")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 byte[] bytes;
@@ -298,6 +317,7 @@ internal sealed class BridgeCommandService
 
         if (command == "compile-hks-source")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 if (!optionsIsObject || !options.TryGetProperty("sourceText", out var sourceElement)
@@ -370,6 +390,7 @@ internal sealed class BridgeCommandService
 
         if (command is "inspect" or "validate")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             var includeDcxDecompressionPreview = OptionBool("includeDcxDecompressionPreview", true);
             return await InspectEnvelopeAsync(
                 file,
@@ -381,6 +402,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-dcx-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 // PARAM/MAP 容器的 list → child snapshot/extract 链会连续访问同一
@@ -418,6 +440,7 @@ internal sealed class BridgeCommandService
 
         if (command == "list-bnd4-entries")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var includeContentHashes = OptionBool("includeContentHashes", false);
@@ -475,6 +498,7 @@ internal sealed class BridgeCommandService
 
         if (command == "snapshot-bnd4-child")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var snapshot = Bnd4NativeWriter.SnapshotChild(file, options, oodleRuntimeRoot);
@@ -491,12 +515,13 @@ internal sealed class BridgeCommandService
 
         if (command == "extract-bnd4-child")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // outputPath 必须用 daemon 已校验并规范化的那一个，不能让 writer 自己再从
             // options 里取原始字符串：daemon 侧对 writable-root 的判定是针对
             // BridgePathBoundary.Verify 的 CanonicalPath 做的，writer 若绕回原始值，
             // 「..」「符号链接」「大小写差异」这类等价路径就能落在校验之外——校验通过、
             // 落盘却在别处。CLI 直调模式没有 daemon 协商的 writableRoots，此时
-            // outputPath 为 null，仍回落到 options（与其他 writer 命令一致）。
+            // outputPath 为 null，准入层会拒绝该磁盘命令。
             if (string.IsNullOrWhiteSpace(outputPath))
             {
                 return BridgeResult<object>.Failed(file, resourceKind, "BND4_CHILD_OUTPUT_REQUIRED",
@@ -518,6 +543,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-fmg-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var document = FmgNativeDocument.Read(NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".fmg"));
@@ -545,6 +571,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-fmg")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             if (string.IsNullOrWhiteSpace(outputPath))
                 return BridgeResult<object>.Failed(file, "msg", "BRIDGE_OUTPUT_PATH_REQUIRED", "FMG writer requires a validated staging output path.");
             try
@@ -563,6 +590,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-text-catalog")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // TEXT-20A：容器级文本目录。tableEntryIndex 缺省只返回目录元数据；
             // 指定时额外返回该表完整条目（主进程缓存后分页，不经临时文件）。
             var tableEntryIndex = optionsIsObject
@@ -593,6 +621,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-param-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 if (OptionBool("headerOnly", false))
@@ -849,6 +878,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-gparam-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 // 支持 loose .gparam 与 .gparam.dcx：DCX 由 DcxNativeDocument 解压，
@@ -890,6 +920,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-gparam")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             if (string.IsNullOrWhiteSpace(outputPath))
                 return BridgeResult<object>.Failed(file, "gparam", "BRIDGE_OUTPUT_PATH_REQUIRED", "GPARAM writer requires a validated staging output path.");
             try
@@ -908,6 +939,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-param")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             if (string.IsNullOrWhiteSpace(outputPath))
                 return BridgeResult<object>.Failed(file, "param", "BRIDGE_OUTPUT_PATH_REQUIRED", "PARAM writer requires a validated staging output path.");
             try
@@ -926,6 +958,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-emevd-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 // EVENT-30A: production open accepts the outer source resource
@@ -1060,6 +1093,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-emevd")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             if (string.IsNullOrWhiteSpace(outputPath))
                 return BridgeResult<object>.Failed(file, "event", "BRIDGE_OUTPUT_PATH_REQUIRED", "EMEVD writer requires a validated staging output path.");
             try
@@ -1087,10 +1121,31 @@ internal sealed class BridgeCommandService
 
         if (command == "read-msb-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
-                var document = MsbNativeDocument.Read(NativeLeafPayload.Resolve(file, oodleRuntimeRoot));
-                var roundTrip = document.VerifyRoundTrip();
+                // Preserve one owned outer receipt for path, physical hash,
+                // DCX resolution and leaf parsing. Default reads do not hash
+                // the outer source solely for telemetry.
+                byte[] source;
+                using (mapTiming?.Measure("fileReadMs")) source = MsbSourceSnapshotReader.Read(file, cancellationToken);
+                string? physicalHash = null;
+                if (mapTiming?.IsMsbDocument == true)
+                {
+                    using (mapTiming.Measure("sourceHashMs")) physicalHash = HashHex(source);
+                    mapTiming.ObserveMsbSource(physicalHash, source.LongLength);
+                }
+                byte[] leaf;
+                using (mapTiming?.Measure("dcxResolveMs")) leaf = NativeLeafPayload.Resolve(source, file, oodleRuntimeRoot);
+                MsbNativeDocument document;
+                using (mapTiming?.Measure("msbReadMs")) document = MsbNativeDocument.Read(leaf);
+                MsbRoundTripReport roundTrip;
+                // Snapshot reader and DCX resolution allocate this private
+                // leaf; nothing publishes/retains it before this synchronous
+                // verification. Keep public/shared-document verification copied.
+                using (mapTiming?.Measure("verifyRoundTripMs")) roundTrip = document.VerifyOwnedSnapshot();
+                if (mapTiming?.IsMsbDocument == true)
+                    mapTiming.ObserveMsbSource(physicalHash, source.LongLength, document.SourceHash, leaf.LongLength);
                 var diagnostics = new[]
                 {
                     new Diagnostic(
@@ -1102,7 +1157,9 @@ internal sealed class BridgeCommandService
                         BridgeResult<object>.MakeSourceUri(file),
                         roundTrip)
                 };
-                return BridgeResult<object>.Partial(file, "map", diagnostics, document.ToEnvelope(roundTrip));
+                object envelope;
+                using (mapTiming?.Measure("toEnvelopeMs")) envelope = document.ToEnvelope(roundTrip);
+                return BridgeResult<object>.Partial(file, "map", diagnostics, envelope);
             }
             catch (OodleRuntimeUnavailableException)
             {
@@ -1112,7 +1169,9 @@ internal sealed class BridgeCommandService
                     file,
                     "map",
                     "MSB_DOCUMENT_KRAK_OODLE_UNAVAILABLE",
-                    "这份地图是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再打开。");
+                    OperatingSystem.IsWindows()
+                        ? "这份地图是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再打开。"
+                        : "这份地图是 KRAK 压缩，当前平台没有可用的 Oodle 解压器。请使用已解压的 MSB 副本，或在支持读取 KRAK 的 Windows 环境打开。");
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
@@ -1122,6 +1181,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-tpf-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var payload = NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".tpf");
@@ -1148,6 +1208,7 @@ internal sealed class BridgeCommandService
 
         if (command == "export-tpf-texture")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             if (string.IsNullOrWhiteSpace(outputPath))
             {
                 return BridgeResult<object>.Failed(file, "texture", "TPF_EXPORT_OUTPUT_REQUIRED", "export-tpf-texture 需要 options.outputPath。");
@@ -1247,6 +1308,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-tpf-texture-preview")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             int textureIndex = 0;
             if (options.ValueKind == JsonValueKind.Object
                 && options.TryGetProperty("textureIndex", out var indexElement)
@@ -1299,6 +1361,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-tpf-texture-replace")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // TEXTURE-52C：TPF 单纹理替换写回。只收 typed replace（textureIndex +
             // newTextureBase64），outputPath 必须是已校验的暂存区路径（越界之外的
             // 边界检查由 BridgeDaemonHost 的 DiskWritingCommands 门在分派前完成）。
@@ -1318,8 +1381,53 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "read-tae-motion-identity")
+        {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
+            try
+            {
+                if (!optionsIsObject || !options.TryGetProperty("animId", out var identityAnimId)
+                    || identityAnimId.ValueKind != JsonValueKind.Number
+                    || !identityAnimId.TryGetInt64(out var requestedAnimId)
+                    || requestedAnimId < 0 || requestedAnimId > 9_007_199_254_740_991L)
+                    throw new InvalidDataException("ACTION_ANIM_ID_INVALID: animId 必须为非负 safe integer。");
+                var (document, _) = OpenTaeDocument(file, oodleRuntimeRoot);
+                var located = document.ResolveAnimation(requestedAnimId,
+                    OptionNullableInt("taeEntryIndex"), OptionNullableInt64("taeEntryId"),
+                    OptionNullableString("taeEntryName"), OptionNullableString("taeGroup"));
+                var motionAnimId = document.ResolveMotionAnimationId(located);
+                if (motionAnimId < 0 || motionAnimId >= 1_000_000_000L)
+                    throw new InvalidDataException("ACTION_TAE_MOTION_IDENTITY_UNRESOLVED: motionAnimId 不在 Sekiro Binder identity 范围内。");
+                // Identity resolution must not construct schema/event projections
+                // for the thousands of other actions in a character container.
+                return BridgeResult<object>.Partial(file, "action", Array.Empty<Diagnostic>(), new
+                {
+                    format = "TAE_MOTION_IDENTITY",
+                    identityProjectionVersion = TaeNativeDocument.IdentityProjectionVersion,
+                    sourceHash = document.SourceHash,
+                    outerFileHash = document.OuterFileHash,
+                    containerSourceHash = document.ContainerSourceHash,
+                    animId = located.Animation.AnimId,
+                    motionAnimId,
+                    taeEntryIndex = located.Entry.TaeEntryIndex,
+                    taeEntryId = located.Entry.TaeEntryId,
+                    taeEntryName = located.Entry.TaeEntryName,
+                    taeGroup = located.Entry.TaeGroup
+                });
+            }
+            catch (TaeEntryMissingException)
+            {
+                return BridgeResult<object>.Failed(file, "action", "TAE_ANIBND_NO_TAE_ENTRY", "anibnd 容器内未找到 TAE 魔数条目。");
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException or OverflowException)
+            {
+                return BridgeResult<object>.Failed(file, "action", "TAE_MOTION_IDENTITY_READ_FAILED", ex.Message);
+            }
+        }
+
         if (command == "read-tae-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 // T3（2026-08-15）：`*.anibnd.dcx` 是 DCX(DFLT)→BND4 容器，内含多个
@@ -1367,6 +1475,23 @@ internal sealed class BridgeCommandService
                         && altParsedSize > 0)
                         animationPageSize = altParsedSize;
                 }
+                // Explicit action reads do not inherit the timeline preview cap.
+                if (optionsIsObject && options.TryGetProperty("animId", out var actionId)
+                    && actionId.TryGetInt64(out var requestedAnimId))
+                {
+                    var located = document.ResolveAnimation(requestedAnimId,
+                        OptionNullableInt("taeEntryIndex"), OptionNullableInt64("taeEntryId"),
+                        OptionNullableString("taeEntryName"), OptionNullableString("taeGroup"));
+                    return BridgeResult<object>.Partial(file, "action", diagnostics, new
+                    {
+                        format = "TAE", identityProjectionVersion = TaeNativeDocument.IdentityProjectionVersion,
+                        sourceHash = document.SourceHash, outerFileHash = document.OuterFileHash, containerSourceHash = document.ContainerSourceHash,
+                        taeEntryCount = document.IsContainer ? document.Entries.Count : 0,
+                        animations = new[] { located.Entry.Document.ToAnimationEnvelope(located.Animation,
+                            null, null, int.MaxValue, int.MaxValue, located.Entry.TaeEntryIndex,
+                            located.Entry.TaeEntryId, located.Entry.TaeEntryName, located.Entry.TaeGroup) }
+                    });
+                }
                 // Production TAE decoding is always backed by the bundled
                 // first-party registry. Do not accept caller-supplied XML
                 // layouts or turn an external template into a runtime input.
@@ -1384,6 +1509,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-tae-event-params")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 // 按 native 事件边界读取参数体，并由 bundled first-party
@@ -1464,6 +1590,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-tae-animation-clip")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var animId = OptionInt64("animId", 0);
@@ -1713,6 +1840,7 @@ internal sealed class BridgeCommandService
 
         if (command == "sample-tae-animation-pose")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var animId = OptionInt64("animId", 0);
@@ -1924,6 +2052,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-chrbnd-flver-preview")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 // Character/parts containers are atomic preview resources. A partsbnd may
@@ -2238,6 +2367,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-map-part-flver-preview")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 // S23：地图 viewport 读 part 模型——mapbnd（DCX→BND4）内按条目名
@@ -2336,7 +2466,11 @@ internal sealed class BridgeCommandService
                 var normals = flver.GetMeshNormalsBase64(meshIndex, maxVertices);
                 var boneWeights = flver.GetMeshBoneWeightsBase64(meshIndex, maxVertices);
                 var boneIndices = flver.GetMeshBoneIndicesBase64(meshIndex, maxVertices);
+                var positionRead = flver.GetMeshVector3Diagnostics(meshIndex, maxVertices);
+                var normalRead = flver.GetMeshVector3Diagnostics(meshIndex, maxVertices, normal: true);
                 var vertexColorRead = flver.GetMeshVertexColorDiagnostics(meshIndex, maxVertices);
+                var tangentRead = flver.GetMeshTangentDiagnostics(meshIndex, maxVertices);
+                var bitangentRead = flver.GetMeshTangentDiagnostics(meshIndex, maxVertices, bitangent: true);
                 var vertexAlpha = vertexColorRead.FirstAlphaBase64;
                 var mesh = flver.Meshes[meshIndex];
                 var mapMeshDiagnostics = new List<Diagnostic>
@@ -2357,6 +2491,18 @@ internal sealed class BridgeCommandService
                     uvsBase64 = uvs,
                     uvSetsBase64 = uvSets,
                     normalsBase64 = normals,
+                    positionStatus = positionRead.Status,
+                    positionFailure = positionRead.Failure,
+                    positionDiagnostics = BuildFlverVector3Diagnostics(positionRead),
+                    normalStatus = normalRead.Status,
+                    normalFailure = normalRead.Failure,
+                    normalDiagnostics = BuildFlverVector3Diagnostics(normalRead),
+                    tangentStatus = tangentRead.Status,
+                    tangentFailure = tangentRead.Failure,
+                    tangentDiagnostics = BuildFlverVector4Diagnostics(tangentRead),
+                    bitangentStatus = bitangentRead.Status,
+                    bitangentFailure = bitangentRead.Failure,
+                    bitangentDiagnostics = BuildFlverVector4Diagnostics(bitangentRead),
                     vertexColorStatus = vertexColorRead.Status,
                     vertexColorFailure = vertexColorRead.Failure,
                     vertexColorDiagnostics = BuildFlverVertexColorDiagnostics(vertexColorRead),
@@ -2375,7 +2521,9 @@ internal sealed class BridgeCommandService
                     file,
                     "map",
                     "MAPBND_KRAK_OODLE_UNAVAILABLE",
-                    "这份地图模型（mapbnd）是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再看模型。");
+                    OperatingSystem.IsWindows()
+                        ? "这份地图模型（mapbnd）是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再看模型。"
+                        : "这份地图模型（mapbnd）是 KRAK 压缩，当前平台没有可用的 Oodle 解压器。请使用已解压的 MAPBND 副本，或在支持读取 KRAK 的 Windows 环境查看。");
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
@@ -2385,6 +2533,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-map-static-geometry")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var modelName = OptionString("modelName", "");
@@ -2392,15 +2541,49 @@ internal sealed class BridgeCommandService
                 var sessionToken = OptionString("sessionToken", "");
                 var cursor = OptionString("cursor", "");
                 // Resolve file hash for session validation
-                byte[] fileBytesForHash;
-                using (mapTiming?.Measure("fileReadMs"))
-                {
-                    fileBytesForHash = File.ReadAllBytes(file);
-                }
+                byte[]? fileBytesForHash = null;
                 string fileHash;
-                using (mapTiming?.Measure("sourceHashMs"))
+                if (string.IsNullOrWhiteSpace(sessionToken))
                 {
-                    fileHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fileBytesForHash)).ToLowerInvariant();
+                    using (mapTiming?.Measure("fileReadMs"))
+                        fileBytesForHash = File.ReadAllBytes(file);
+                    using (mapTiming?.Measure("sourceHashMs"))
+                        fileHash = Convert.ToHexString(SHA256.HashData(fileBytesForHash)).ToLowerInvariant();
+                }
+                else
+                {
+                    // A page still verifies every source byte. The retained FLVER
+                    // supplies geometry, so avoid another source-sized LOH array
+                    // on every warm page merely to hash it and discard it.
+                    FileStream source;
+                    using (mapTiming?.Measure("fileReadMs"))
+                        source = new FileStream(file, FileMode.Open, FileAccess.Read,
+                            FileShare.Read, bufferSize: 1,
+                            options: FileOptions.SequentialScan);
+                    using (source)
+                    {
+                        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(64 * 1024);
+                        try
+                        {
+                            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                            while (true)
+                            {
+                                cancellationToken.ThrowIfCancellationRequested();
+                                int read;
+                                using (mapTiming?.Measure("fileReadMs"))
+                                    read = source.Read(buffer, 0, 64 * 1024);
+                                if (read == 0) break;
+                                using (mapTiming?.Measure("sourceHashMs"))
+                                    hash.AppendData(buffer, 0, read);
+                            }
+                            using (mapTiming?.Measure("sourceHashMs"))
+                                fileHash = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+                        }
+                        finally
+                        {
+                            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+                        }
+                    }
                 }
 
                 MapStaticGeometryService.SessionEntry? session = null;
@@ -2437,6 +2620,17 @@ internal sealed class BridgeCommandService
 
                     string resolvedEntryName = modelName;
                     byte[]? flverBytes = null;
+                    // Unknown/expired session tokens keep the existing cold-read
+                    // fallback. Only a validated warm session needs no source array.
+                    if (fileBytesForHash is null)
+                    {
+                        using (mapTiming?.Measure("fileReadMs"))
+                            fileBytesForHash = File.ReadAllBytes(file);
+                        // Bind a cold fallback to the bytes it will parse even
+                        // if the file changed after the preceding streamed read.
+                        using (mapTiming?.Measure("sourceHashMs"))
+                            fileHash = Convert.ToHexString(SHA256.HashData(fileBytesForHash)).ToLowerInvariant();
+                    }
                     using (mapTiming?.Measure("bndResolveMs"))
                     {
                         // Resolve FLVER payload: BND4 container or direct FLVER
@@ -2446,13 +2640,13 @@ internal sealed class BridgeCommandService
                         bool isDcx = payload.Length >= 4 && payload.AsSpan(0, 4).SequenceEqual("DCX\0"u8);
                         if (isDcx && IsLikelyBnd4ContainerPath(file))
                         {
-                            var cached = Bnd4NativeWriter.GetCachedBinder(file, oodleRuntimeRoot);
+                            var cached = Bnd4NativeWriter.GetBinderFromCapturedBytes(file, sourceBytes, oodleRuntimeRoot);
                             payload = cached.Dcx.Payload;
                             cachedBinder = cached.Binder;
                         }
                         else if (isDcx)
                         {
-                            payload = DcxNativeDocument.Read(file, oodleRuntimeRoot).Payload;
+                            payload = DcxNativeDocument.Read(sourceBytes, oodleRuntimeRoot, file).Payload;
                         }
 
                         if (payload.Length >= 4 && payload.AsSpan(0, 4).SequenceEqual("BND4"u8))
@@ -2589,12 +2783,12 @@ internal sealed class BridgeCommandService
                     telemetry = new { skin = MapStaticGeometryService.SkinCalls, skeleton = MapStaticGeometryService.SkeletonCalls, parse = MapStaticGeometryService.ParseCount }
                 };
                 // Quick size check: serialize and check byte count
-                string json;
+                long serializedBytes;
                 using (mapTiming?.Measure("serializeMs"))
                 {
-                    json = System.Text.Json.JsonSerializer.Serialize(payloadObj);
+                    serializedBytes = JsonByteCounter.Count(payloadObj);
                 }
-                if (System.Text.Encoding.UTF8.GetByteCount(json) >= 8 * 1024 * 1024)
+                if (serializedBytes >= 8 * 1024 * 1024)
                     return BridgeResult<object>.Failed(file, "map", "MAP_STATIC_CHUNK_TOO_LARGE", "单个静态几何响应超过 8 MiB 限制。");
 
                 var diagnostics = new List<Diagnostic>
@@ -2628,7 +2822,10 @@ internal sealed class BridgeCommandService
             }
             catch (OodleRuntimeUnavailableException)
             {
-                return BridgeResult<object>.Failed(file, "map", "MAPBND_KRAK_OODLE_UNAVAILABLE", "这份地图模型（mapbnd）是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再看模型。");
+                return BridgeResult<object>.Failed(file, "map", "MAPBND_KRAK_OODLE_UNAVAILABLE",
+                    OperatingSystem.IsWindows()
+                        ? "这份地图模型（mapbnd）是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再看模型。"
+                        : "这份地图模型（mapbnd）是 KRAK 压缩，当前平台没有可用的 Oodle 解压器。请使用已解压的 MAPBND 或 FLVER 副本，或在支持读取 KRAK 的 Windows 环境查看。");
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
@@ -2638,6 +2835,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-flver-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var document = FlverNativeDocument.ReadFile(file);
@@ -2666,6 +2864,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-flver-mesh")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var document = FlverNativeDocument.ReadFile(file);
@@ -2674,17 +2873,46 @@ internal sealed class BridgeCommandService
                 var maxVertices = OptionInt("maxVertices", 10_000);
                 var maxIndices = OptionInt("maxIndices", 30_000);
                 var texturePackagePaths = OptionPaths("texturePackagePaths", 8);
+                if (meshIndex < 0 || meshIndex >= document.Meshes.Count)
+                    return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_INDEX_OUT_OF_RANGE", $"Mesh index {meshIndex} is outside [0,{document.Meshes.Count}).");
+                var sourceMesh = document.Meshes[meshIndex];
+                var selectedFaceSetIndex = document.GetDisplayFaceSetOrdinal(meshIndex);
+                var selectedFaceSet = document.GetFaceSet(selectedFaceSetIndex);
+                if (sourceMesh.VertexCount == 0 || sourceMesh.FaceSetIndices.Count == 0 || selectedFaceSet?.IndexCount == 0)
+                    return BridgeResult<object>.Partial(file, "chr", new[] {
+                        new Diagnostic("info", "FLVER_MESH_EMPTY_TOPOLOGY", "Native mesh has no drawable vertices or display triangles; it is not a missing mesh.", BridgeResult<object>.MakeSourceUri(file))
+                    }, new { meshIndex, vertexCount = sourceMesh.VertexCount, indexCount = selectedFaceSet?.IndexCount ?? 0, geometryEmpty = true });
+                if (selectedFaceSet is null)
+                    return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_TOPOLOGY_DECODE_UNAVAILABLE", "Mesh exists but its display FaceSet references or index encoding are unsupported.");
+                if (sourceMesh.VertexCount > maxVertices)
+                    return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_VERTEX_LIMIT_EXCEEDED", $"Mesh requires {sourceMesh.VertexCount} vertices; requested maximum is {maxVertices}.");
                 var positions = document.GetMeshPositionsBase64(meshIndex, maxVertices);
+                if (positions == null)
+                    return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_POSITION_DECODE_UNAVAILABLE", "Mesh exists but its complete position layout cannot be decoded within the requested bounds.", new { meshIndex, sourceMesh.VertexCount, document.LayoutWarnings, document.UnparsedGaps });
                 var indices = document.GetMeshIndicesBase64(meshIndex, maxIndices);
+                if (indices == null)
+                {
+                    var descriptor = document.GetMeshGeometryDescriptor(meshIndex);
+                    var requiredIndices = descriptor is null ? 0 : checked(document.CountDisplayTriangles(descriptor) * 3);
+                    if (descriptor is not null && requiredIndices == 0)
+                        return BridgeResult<object>.Partial(file, "chr", new[] {
+                            new Diagnostic("info", "FLVER_MESH_EMPTY_TOPOLOGY", "Native display FaceSet contains no nondegenerate triangles.", BridgeResult<object>.MakeSourceUri(file))
+                        }, new { meshIndex, vertexCount = sourceMesh.VertexCount, indexCount = selectedFaceSet.IndexCount, geometryEmpty = true });
+                    return BridgeResult<object>.Failed(file, "chr", requiredIndices > maxIndices ? "FLVER_MESH_INDEX_LIMIT_EXCEEDED" : "FLVER_MESH_INDEX_DECODE_UNAVAILABLE",
+                        $"Mesh exists but complete display indices are unavailable (required={requiredIndices}, maximum={maxIndices}).");
+                }
                 var uvSets = document.GetMeshUVSetsBase64(meshIndex, maxVertices);
                 var uvs = uvSets?.FirstOrDefault();
                 var normals = document.GetMeshNormalsBase64(meshIndex, maxVertices);
                 var boneWeights = document.GetMeshBoneWeightsBase64(meshIndex, maxVertices);
                 var boneIndices = document.GetMeshBoneIndicesBase64(meshIndex, maxVertices);
+                var positionRead = document.GetMeshVector3Diagnostics(meshIndex, maxVertices);
+                var normalRead = document.GetMeshVector3Diagnostics(meshIndex, maxVertices, normal: true);
                 var vertexColorRead = document.GetMeshVertexColorDiagnostics(meshIndex, maxVertices);
+                var tangentRead = document.GetMeshTangentDiagnostics(meshIndex, maxVertices);
+                var bitangentRead = document.GetMeshTangentDiagnostics(meshIndex, maxVertices, bitangent: true);
                 var vertexAlpha = vertexColorRead.FirstAlphaBase64;
-                if (positions == null)
-                    return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_NOT_FOUND", $"网格索引 {meshIndex} 超出范围或数据不可用。");
+
                 var mesh = document.Meshes[meshIndex];
                 var textureLeaves = ResolveCharacterTextureLeaves(
                     file,
@@ -2743,6 +2971,18 @@ internal sealed class BridgeCommandService
                     uvsBase64 = uvs,
                     uvSetsBase64 = uvSets,
                     normalsBase64 = normals,
+                    positionStatus = positionRead.Status,
+                    positionFailure = positionRead.Failure,
+                    positionDiagnostics = BuildFlverVector3Diagnostics(positionRead),
+                    normalStatus = normalRead.Status,
+                    normalFailure = normalRead.Failure,
+                    normalDiagnostics = BuildFlverVector3Diagnostics(normalRead),
+                    tangentStatus = tangentRead.Status,
+                    tangentFailure = tangentRead.Failure,
+                    tangentDiagnostics = BuildFlverVector4Diagnostics(tangentRead),
+                    bitangentStatus = bitangentRead.Status,
+                    bitangentFailure = bitangentRead.Failure,
+                    bitangentDiagnostics = BuildFlverVector4Diagnostics(bitangentRead),
                     vertexColorStatus = vertexColorRead.Status,
                     vertexColorFailure = vertexColorRead.Failure,
                     vertexColorDiagnostics = BuildFlverVertexColorDiagnostics(vertexColorRead),
@@ -2794,20 +3034,11 @@ internal sealed class BridgeCommandService
 
         if (command == "read-flver-skeleton")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var document = FlverNativeDocument.ReadFile(file);
-                var bones = document.Bones.Select(b => new
-                {
-                    index = b.Index,
-                    name = b.Name,
-                    parentIndex = b.ParentIndex,
-                    nextSiblingIndex = b.NextSiblingIndex,
-                    translation = new[] { b.TranslationX, b.TranslationY, b.TranslationZ },
-                    rotation = new[] { b.RotationX, b.RotationY, b.RotationZ },
-                    scale = new[] { b.ScaleX, b.ScaleY, b.ScaleZ },
-                    rotationOrder = "XZY"
-                }).ToArray();
+                var bones = BuildFlverSkeleton(document);
                 return BridgeResult<object>.Partial(file, "chr", new[]
                 {
                     new Diagnostic("info", "FLVER_SKELETON_EXTRACTED",
@@ -2827,6 +3058,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-flver-texture-slots")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var document = FlverNativeDocument.ReadFile(file);
@@ -2836,7 +3068,13 @@ internal sealed class BridgeCommandService
                     index = t.Index,
                     type = t.Type,
                     path = t.Path,
-                    materialIndex = t.MaterialIndex
+                    materialIndex = t.MaterialIndex,
+                    tilingScale = new[] { t.TilingScaleU, t.TilingScaleV },
+                    tilingTypeU = t.TilingTypeU,
+                    tilingTypeV = t.TilingTypeV,
+                    unk14 = t.Unk14,
+                    unk18 = t.Unk18,
+                    unk1C = t.Unk1C
                 }).ToArray();
                 return BridgeResult<object>.Partial(file, "chr", new[]
                 {
@@ -2845,6 +3083,9 @@ internal sealed class BridgeCommandService
                         BridgeResult<object>.MakeSourceUri(file))
                 }, new
                 {
+                    sourceHash = document.SourceHash,
+                    materialCount = document.MaterialCount,
+                    materials = document.GetMaterialMetadata(),
                     textureCount = slots.Count,
                     textures
                 });
@@ -2857,6 +3098,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-flver-dummies")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var document = FlverNativeDocument.ReadFile(file);
@@ -2888,6 +3130,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-flver")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // MODEL-51C：FLVER 材质槽写回。字节补丁 writer，outputPath 必须
             // 是已校验的暂存区路径（BRIDGE_OUTPUT_PATH_REQUIRED 之外的边界
             // 检查由 BridgeDaemonHost 的 DiskWritingCommands 门在分派前完成）。
@@ -2909,6 +3152,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-mtd-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // MATERIAL-53A：恢复 read-mtd-document。MTD 当前仍受 scope.json
             // 的 authorityAtRuling=unverified 约束，
             // 按 resumeRequires 走通用承接流程时恢复三处入口：本分支、
@@ -2956,6 +3200,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-mtd-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // MATERIAL-53C：MTD 材质属性写回。只收 typed property set（paramId +
             // newValue），outputPath 必须是已校验的暂存区路径（越界之外的边界检查由
             // BridgeDaemonHost 的 DiskWritingCommands 门在分派前完成）。
@@ -2985,6 +3230,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-fxr-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // VFX-54A：FXR3 只读。FXR 是 ffxbnd.dcx 容器内子项，支持三种输入形态：
             //   ① 裸 .fxr 文件 → 直接解析；
             //   ② .dcx 容器 → DcxNativeDocument 解压，再判定 BND4 容器定位 FXR 子项；
@@ -3097,6 +3343,7 @@ internal sealed class BridgeCommandService
 
         if (command == "list-ffxbnd-entries")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // S24：ffxbnd 效果库的 .fxr 子项清单（逻辑名，UI 左栏逐条列出）。
             // 只列条目名，不解析任何 effect——一条失败不应把整包判死。
             try
@@ -3135,6 +3382,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-esd-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var payload = NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".esd");
@@ -3213,6 +3461,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-esd-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // BEHAVIOR-55C：ESD 状态转移写回（behavior-transition-upsert）。
             // 只收 typed transition mutation：set-transition-target（字节级外科替换
             // 条件记录的 targetStateOffset）/ insert-transition（entry 表内新增
@@ -3244,6 +3493,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-tae-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // ANIMATION-56C：TAE 事件写回（tae-event-upsert）。
             // 只收 typed event upsert mutation：update-event-times（字节级外科替换
             // 事件 startTime/endTime，时间槽被兄弟共享时 fail-closed）/ insert-event
@@ -3284,6 +3534,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-fxr-document")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             // VFX-54C：FXR3 字段写回（vfx-field-set）。
             // 只收 typed mutation：vfx-field-set 字节级外科替换某个「已知布局」容器
             // （host/property/section8）里 Section11 的一个 Int32。未知 node type、
@@ -3315,6 +3566,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-msb")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             if (string.IsNullOrWhiteSpace(outputPath))
                 return BridgeResult<object>.Failed(file, "map", "BRIDGE_OUTPUT_PATH_REQUIRED", "MSB writer requires a validated staging output path.");
             try
@@ -3349,6 +3601,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-bnd4")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             if (string.IsNullOrWhiteSpace(outputPath))
                 return BridgeResult<object>.Failed(file, resourceKind, "BRIDGE_OUTPUT_PATH_REQUIRED", "BND4 writer requires a validated staging output path.");
             try
@@ -3367,6 +3620,7 @@ internal sealed class BridgeCommandService
 
         if (command == "read-luabnd-document" || command == "inspect-luabnd")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
                 var doc = LuabndNativeDocument.Read(file, oodleRuntimeRoot);
@@ -3388,10 +3642,13 @@ internal sealed class BridgeCommandService
 
         if (command == "read-luabnd-script")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
-                var childSelector = options.TryGetProperty("childPath", out var childPathEl) ? childPathEl.GetString() : null;
-                var entryIndex = options.TryGetProperty("entryIndex", out var idxEl) && idxEl.ValueKind == JsonValueKind.Number ? idxEl.GetInt32().ToString() : null;
+                if (options.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Object))
+                    throw new InvalidDataException("BRIDGE_OPTIONS_INVALID: LUABND options must be a JSON object.");
+                var childSelector = OptionNullableString("childPath");
+                var entryIndex = OptionNullableInt("entryIndex")?.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 var selector = childSelector ?? entryIndex;
                 if (string.IsNullOrWhiteSpace(selector))
                 {
@@ -3399,19 +3656,17 @@ internal sealed class BridgeCommandService
                 }
 
                 var doc = LuabndNativeDocument.Read(file, oodleRuntimeRoot);
-                if (options.TryGetProperty("expectedContainerHash", out var expContHash)
-                    && expContHash.ValueKind == JsonValueKind.String
-                    && !string.IsNullOrWhiteSpace(expContHash.GetString())
-                    && !doc.SourceHash.Equals(expContHash.GetString(), StringComparison.OrdinalIgnoreCase))
+                var expectedContainerHash = OptionNullableString("expectedContainerHash");
+                if (expectedContainerHash is not null
+                    && !doc.SourceHash.Equals(expectedContainerHash, StringComparison.OrdinalIgnoreCase))
                 {
                     return BridgeResult<object>.Failed(file, "script", "LUABND_CONTAINER_HASH_MISMATCH", "luabnd 容器 expectedContainerHash 不匹配。");
                 }
 
                 var script = doc.ReadScript(selector);
-                if (options.TryGetProperty("expectedChildHash", out var expChildHash)
-                    && expChildHash.ValueKind == JsonValueKind.String
-                    && !string.IsNullOrWhiteSpace(expChildHash.GetString())
-                    && !script.ContentHash.Equals(expChildHash.GetString(), StringComparison.OrdinalIgnoreCase))
+                var expectedChildHash = OptionNullableString("expectedChildHash");
+                if (expectedChildHash is not null
+                    && !script.ContentHash.Equals(expectedChildHash, StringComparison.OrdinalIgnoreCase))
                 {
                     return BridgeResult<object>.Failed(file, "script", "LUABND_CHILD_HASH_MISMATCH", "脚本 expectedChildHash 不匹配。");
                 }
@@ -3434,7 +3689,8 @@ internal sealed class BridgeCommandService
 
         if (command == "write-luabnd-script")
         {
-            var targetOutPath = outputPath ?? (options.TryGetProperty("outputPath", out var outPathEl) ? outPathEl.GetString() : null);
+            if (dispatchProbe) return BoundDispatchResult(file, command);
+            var targetOutPath = outputPath;
             if (string.IsNullOrWhiteSpace(targetOutPath))
                 return BridgeResult<object>.Failed(file, "script", "BRIDGE_OUTPUT_PATH_REQUIRED", "write-luabnd-script 需要已校验的 options.outputPath。");
 
@@ -3462,7 +3718,8 @@ internal sealed class BridgeCommandService
 
         if (command == "export-luabnd")
         {
-            var exportDir = outputPath ?? (options.TryGetProperty("outputPath", out var outPathEl) ? outPathEl.GetString() : (options.TryGetProperty("outputDirectory", out var outDirEl) ? outDirEl.GetString() : null));
+            if (dispatchProbe) return BoundDispatchResult(file, command);
+            var exportDir = outputPath;
             if (string.IsNullOrWhiteSpace(exportDir))
             {
                 return BridgeResult<object>.Failed(file, "script", "BRIDGE_OUTPUT_PATH_REQUIRED", "export-luabnd 需要指定 outputPath 或 options.outputDirectory。");
@@ -3470,8 +3727,13 @@ internal sealed class BridgeCommandService
 
             try
             {
+                if (options.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Object))
+                    throw new InvalidDataException("BRIDGE_OPTIONS_INVALID: LUABND options must be a JSON object.");
+                if (optionsIsObject && options.TryGetProperty("includeMetadataJson", out var jsonEl)
+                    && jsonEl.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                    throw new InvalidDataException("BRIDGE_OPTIONS_INVALID: options.includeMetadataJson must be a boolean.");
+                var includeJson = OptionBool("includeMetadataJson", true);
                 var doc = LuabndNativeDocument.Read(file, oodleRuntimeRoot);
-                var includeJson = !options.TryGetProperty("includeMetadataJson", out var jsonEl) || jsonEl.GetBoolean();
                 var result = doc.ExportAll(exportDir, includeJson);
                 return BridgeResult<object>.Ok(file, "script", result);
             }
@@ -3491,19 +3753,30 @@ internal sealed class BridgeCommandService
 
         if (command == "read-bridge-artifact")
         {
+            if (dispatchProbe) return BoundDispatchResult(file, command);
             return BridgeResult<object>.Failed(file, "unknown", "BRIDGE_ARTIFACT_DAEMON_ONLY", "read-bridge-artifact 仅由 BridgeDaemonHost 守护进程支持。");
         }
 
         cancellationToken.ThrowIfCancellationRequested();
         return command switch
         {
-            "export-event" => ExportSemanticCandidate(file, "event", "原生 EMEVD 语义导出不可用；请查看返回的结构化诊断。", oodleRuntimeRoot),
-            "export-map" => ExportSemanticCandidate(file, "map", "原生 MSB 语义导出不可用；请查看返回的结构化诊断。", oodleRuntimeRoot),
-            "export-param" => ExportSemanticCandidate(file, "param", "原生 PARAM 语义导出不可用；请查看返回的结构化诊断。", oodleRuntimeRoot),
-            "export-msg" => MsgTextExport.Export(file, oodleRuntimeRoot),
+            "export-event" => dispatchProbe ? BoundDispatchResult(file, command) : ExportSemanticCandidate(file, "event", "原生 EMEVD 语义导出不可用；请查看返回的结构化诊断。", oodleRuntimeRoot),
+            "export-map" => dispatchProbe ? BoundDispatchResult(file, command) : ExportSemanticCandidate(file, "map", "原生 MSB 语义导出不可用；请查看返回的结构化诊断。", oodleRuntimeRoot),
+            "export-param" => dispatchProbe ? BoundDispatchResult(file, command) : ExportSemanticCandidate(file, "param", "原生 PARAM 语义导出不可用；请查看返回的结构化诊断。", oodleRuntimeRoot),
+            "export-msg" => dispatchProbe ? BoundDispatchResult(file, command) : MsgTextExport.Export(file, oodleRuntimeRoot),
             _ => BridgeResult<object>.Failed(file, resourceKind, "UNKNOWN_COMMAND", $"Unknown bridge command: {command}")
         };
         }
+
+    // Internal-only probe: CLI options never control this flag. It reaches the
+    // same dispatch branch but stops before resource I/O, staging or export.
+    internal Task<BridgeResult<object>> ProbeDispatchAsync(string command) =>
+        ExecuteAsync(command, "dispatch-probe", CancellationToken.None, dispatchProbe: true);
+
+    private static BridgeResult<object> BoundDispatchResult(string file, string command) =>
+        BridgeResult<object>.Partial(file, "unknown", new[] {
+            new Diagnostic("info", "BRIDGE_COMMAND_DISPATCH_BOUND", $"Bound dispatch branch: {command}", BridgeResult<object>.MakeSourceUri(file))
+        }, new { command });
 
     private static IReadOnlyList<NativeLeafEntry> ResolveCharacterTextureLeaves(
         string file,
@@ -3669,6 +3942,27 @@ internal sealed class BridgeCommandService
             : null;
     }
 
+    private static object[]? BuildFlverVector3Diagnostics(FlverVector3ReadResult result)
+        => result.Status != "decoded" ? null : result.Members.Select(member => (object)new
+        {
+            memberOrdinal = member.MemberOrdinal, memberIndex = member.MemberIndex,
+            layoutType = member.LayoutType, layoutTypeName = member.LayoutTypeName,
+            vertexBufferIndex = member.VertexBufferIndex, bufferLayoutIndex = member.BufferLayoutIndex,
+            structOffset = member.StructOffset, xyzBase64 = member.XyzBase64, normalWBase64 = member.NormalWBase64
+        }).ToArray();
+
+    private static object[]? BuildFlverVector4Diagnostics(FlverVector4ReadResult result)
+    {
+        if (result.Status != "decoded") return null;
+        return result.Members.Select(member => (object)new
+        {
+            memberOrdinal = member.MemberOrdinal, memberIndex = member.MemberIndex,
+            layoutType = member.LayoutType, layoutTypeName = member.LayoutTypeName,
+            vertexBufferIndex = member.VertexBufferIndex, bufferLayoutIndex = member.BufferLayoutIndex,
+            structOffset = member.StructOffset, xyzwBase64 = member.XyzwBase64
+        }).ToArray();
+    }
+
     private static object[]? BuildFlverVertexColorDiagnostics(FlverVertexColorReadResult result)
     {
         if (result.Status != "decoded") return null;
@@ -3754,7 +4048,11 @@ internal sealed class BridgeCommandService
                 $"FLVER_MESH_INDICES_UNAVAILABLE: 网格 {meshIndex} 的完整 triangle-list 无法在上限 {maxIndices} 内导出。");
         var skinning = flver.GetMeshSkinning(meshIndex, maxVertices);
         var uvSets = flver.GetMeshUVSetsBase64(meshIndex, maxVertices);
+        var positionRead = flver.GetMeshVector3Diagnostics(meshIndex, maxVertices);
+        var normalRead = flver.GetMeshVector3Diagnostics(meshIndex, maxVertices, normal: true);
         var vertexColorRead = flver.GetMeshVertexColorDiagnostics(meshIndex, maxVertices);
+        var tangentRead = flver.GetMeshTangentDiagnostics(meshIndex, maxVertices);
+        var bitangentRead = flver.GetMeshTangentDiagnostics(meshIndex, maxVertices, bitangent: true);
         var renderMode = useCompatibilityProjection
             ? "compatibility-projected"
             : nativeRenderMode;
@@ -3770,6 +4068,18 @@ internal sealed class BridgeCommandService
             uvsBase64 = uvSets?.FirstOrDefault(),
             uvSetsBase64 = uvSets,
             normalsBase64 = flver.GetMeshNormalsBase64(meshIndex, maxVertices),
+            positionStatus = positionRead.Status,
+            positionFailure = positionRead.Failure,
+            positionDiagnostics = BuildFlverVector3Diagnostics(positionRead),
+            normalStatus = normalRead.Status,
+            normalFailure = normalRead.Failure,
+            normalDiagnostics = BuildFlverVector3Diagnostics(normalRead),
+            tangentStatus = tangentRead.Status,
+            tangentFailure = tangentRead.Failure,
+            tangentDiagnostics = BuildFlverVector4Diagnostics(tangentRead),
+            bitangentStatus = bitangentRead.Status,
+            bitangentFailure = bitangentRead.Failure,
+            bitangentDiagnostics = BuildFlverVector4Diagnostics(bitangentRead),
             vertexColorStatus = vertexColorRead.Status,
             vertexColorFailure = vertexColorRead.Failure,
             vertexColorDiagnostics = BuildFlverVertexColorDiagnostics(vertexColorRead),
@@ -4248,7 +4558,7 @@ internal sealed class BridgeCommandService
         if (!IsAnibndPath(file))
             return (TaeDocumentSet.FromRaw(TaeNativeDocument.ReadFile(file)), Array.Empty<Diagnostic>());
 
-        var bnd4 = ReadBnd4Container(file, oodleRuntimeRoot);
+        var bnd4 = ReadBnd4Container(file, oodleRuntimeRoot, out var outerFileHash);
         var taeEntries = new List<TaeDocumentSetEntry>();
         for (var i = 0; i < bnd4.Entries.Count; i++)
         {
@@ -4287,6 +4597,7 @@ internal sealed class BridgeCommandService
         var documentSet = TaeDocumentSet.FromAnibnd(
             bnd4.SourceHash,
             bnd4.SourceBytes.Length,
+            outerFileHash,
             taeEntries);
         var legacyPrimary = taeEntries.FirstOrDefault(entry => entry.TaeEntryId == 5000000);
         var diagnostics = new[]
@@ -4318,16 +4629,22 @@ internal sealed class BridgeCommandService
         return (documentSet, diagnostics);
     }
 
-    private static Bnd4NativeDocument ReadBnd4Container(string path, string? oodleRuntimeRoot)
+    private static Bnd4NativeDocument ReadBnd4Container(string path, string? oodleRuntimeRoot) =>
+        ReadBnd4Container(path, oodleRuntimeRoot, out _);
+
+    private static Bnd4NativeDocument ReadBnd4Container(string path, string? oodleRuntimeRoot, out string outerFileHash)
     {
         byte[] payload;
         if (IsDcxFile(path))
         {
-            payload = DcxNativeDocument.Read(path, oodleRuntimeRoot).Payload;
+            var dcx = DcxNativeDocument.Read(path, oodleRuntimeRoot);
+            outerFileHash = dcx.SourceHash;
+            payload = dcx.Payload;
         }
         else
         {
             payload = File.ReadAllBytes(path);
+            outerFileHash = HashHex(payload);
             if (IsDcxBytes(payload))
                 payload = DcxNativeDocument.Read(payload, oodleRuntimeRoot, path).Payload;
         }

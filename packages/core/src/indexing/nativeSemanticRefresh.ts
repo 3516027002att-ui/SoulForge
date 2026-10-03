@@ -586,8 +586,9 @@ export async function decodeNativeParamRows(input: {
   rows: readonly unknown[];
   signal?: AbortSignal;
   referenceFieldsOnly?: boolean;
+  /** @internal Scoped to one native table; never retained by the live workspace. */
+  fieldProjectionCache?: NativeParamFieldProjectionCache;
 }): Promise<ParamRowSymbol[]> {
-  const fieldsById = new Map(input.definition.fields.map((field) => [field.id, field]));
   // PARAM reference enrichment only needs fields carrying trusted Refs= rules,
   // their condition siblings, or the existing text-id predicate.  Keeping the
   // projection narrow matters on real gameparam tables with tens of thousands
@@ -627,6 +628,26 @@ export async function decodeNativeParamRows(input: {
   const decodeDefinition = input.referenceFieldsOnly
     ? { ...input.definition, fields: input.definition.fields.filter((field) => referenceFieldIds.has(field.id)) }
     : input.definition;
+  const fieldCache = input.fieldProjectionCache ?? new Map();
+  const fieldProjections = new Map(decodeDefinition.fields.map((field) => {
+    const refs = input.referenceFieldsOnly ? parsedReferenceFields.get(field.id) : undefined;
+    const metadata = {
+      fieldId: field.id, name: field.name, type: field.type,
+      ...(field.description ? { description: field.description } : {}),
+      ...(refs && refs.targets.length > 0 ? { refs: refs.targets, refsProvenance: 'trusted-metadata' as const } : {}),
+      ...(refs && refs.rejected.length > 0 ? { refsRejected: refs.rejected, refsProvenance: 'trusted-metadata' as const } : {})
+    };
+    const metadataKey = JSON.stringify(metadata, (_key, value) =>
+      typeof value === 'number' && (Object.is(value, -0) || !Number.isFinite(value))
+        ? { nativeNumericValue: Object.is(value, -0) ? '-0' : String(value) }
+        : value);
+    let bucket = fieldCache.get(field.id);
+    if (!bucket || bucket.metadataKey !== metadataKey) {
+      bucket = { metadataKey, values: new Map() };
+      fieldCache.set(field.id, bucket);
+    }
+    return [field.id, { metadata, bucket }] as const;
+  }));
   // Keep backwards-compatible fixture callers (which only supplied
   // file.sha256) while making the packed/native path explicit.  Once either
   // identity is supplied, do not copy one hash into the other domain.
@@ -657,19 +678,23 @@ export async function decodeNativeParamRows(input: {
       : undefined;
     const fields: ParamFieldSymbol[] = decodeRowFields(bytes, decodeDefinition)
       .map((field) => {
-      const definitionField = fieldsById.get(field.fieldId);
-      const refs = input.referenceFieldsOnly
-        ? parsedReferenceFields.get(field.fieldId)
-        : undefined;
-      return {
-        fieldId: field.fieldId,
-        name: field.name,
-        type: field.type,
-        ...(definitionField?.description ? { description: definitionField.description } : {}),
-        value: field.value,
-        ...(refs && refs.targets.length > 0 ? { refs: refs.targets, refsProvenance: 'trusted-metadata' as const } : {}),
-        ...(refs && refs.rejected.length > 0 ? { refsRejected: refs.rejected, refsProvenance: 'trusted-metadata' as const } : {})
-      };
+        const projection = fieldProjections.get(field.fieldId)!;
+        const key = field.value === null ? 'null'
+          : typeof field.value === 'number' && Object.is(field.value, -0) ? 'number:-0'
+            : `${typeof field.value}:${String(field.value)}`;
+        // Keep arbitrary long native strings and uncommon values out of the
+        // bounded table-local cache. Their full visible values still survive.
+        const cacheable = !(typeof field.value === 'string' && field.value.length > 256);
+        if (cacheable) {
+          const existing = projection.bucket.values.get(key);
+          if (existing) return existing;
+        }
+        const cell: ParamFieldSymbol = { ...projection.metadata, value: field.value };
+        if (cacheable && projection.bucket.values.size < 64) {
+          freezeParamFieldCell(cell);
+          projection.bucket.values.set(key, cell);
+        }
+        return cell;
     });
     rows.push({
       uri: `${input.file.sourceUri}#${input.tableName}/${rowId}`,
@@ -696,6 +721,20 @@ export async function decodeNativeParamRows(input: {
   }
   throwIfAborted(input.signal);
   return rows;
+}
+
+/** Primitive values share metadata cells; row vectors and physical receipts remain independent. */
+export type NativeParamFieldProjectionCache = Map<string, {
+  metadataKey: string;
+  values: Map<string, ParamFieldSymbol>;
+}>;
+
+function freezeParamFieldCell(value: object): void {
+  if (Object.isFrozen(value)) return;
+  for (const child of Object.values(value)) {
+    if (child !== null && typeof child === 'object') freezeParamFieldCell(child);
+  }
+  Object.freeze(value);
 }
 
 async function runWithConcurrencyPool<T>(
@@ -771,6 +810,7 @@ async function readParamExports(
       reportProgress('read-start', entry);
       const tableName = stripLeafExtension(entry.name, '.param');
       const decodedRows: ParamRowSymbol[] = [];
+      const fieldProjectionCache: NativeParamFieldProjectionCache = new Map();
       let definition: ParamDefDocument | undefined;
       let decodeStarted = false;
       const pagedRead = await readParamDocumentRowsPagedViaBridge({
@@ -810,6 +850,7 @@ async function readParamExports(
           typeName: identity.typeName,
           definition,
           rows: batch,
+          fieldProjectionCache,
           ...(input.referenceFieldsOnly ? { referenceFieldsOnly: true } : {}),
           ...(input.signal ? { signal: input.signal } : {})
         });
@@ -1012,7 +1053,10 @@ async function listNativeEntries(
   }
   const bridgeRunner = input.bridgeRunner ?? runBridge;
   const result = await bridgeRunner<Record<string, unknown>>({
-    command: 'read-dcx-document',
+    // Directory enumeration does not need the DCX/BND writer self-tests in
+    // read-dcx-document. Keep the same native physical source and entry
+    // identities while avoiding several full-container rebuilds per refresh.
+    command: 'list-bnd4-entries',
     filePath: file.absolutePath,
     resourceUri: file.sourceUri,
     allowedRoots,
@@ -1026,15 +1070,23 @@ async function listNativeEntries(
   if (reportedOuterFileHash !== expectedOuterFileHash) {
     throw new Error('native container read outer hash 与固定 source receipt 不一致。');
   }
-  const nested = recordValue(data.nested);
-  return arrayValue(nested.entries).flatMap((value) => {
+  if (!Array.isArray(data.entries)
+    || !Number.isSafeInteger(data.entryCount) || data.entryCount !== data.entries.length) {
+    throw new Error('native container directory 缺少完整的条目目录或 entryCount 不一致。');
+  }
+  const seenIndexes = new Set<number>();
+  const entries = data.entries.map((value) => {
     const record = recordValue(value);
     const index = numberValue(record.index);
     const name = stringValue(record.name);
-    return index !== undefined && Number.isSafeInteger(index) && name.toLowerCase().endsWith(extension)
-      ? [{ index, name }]
-      : [];
+    if (index === undefined || !Number.isSafeInteger(index) || index < 0
+      || seenIndexes.has(index) || name.length === 0) {
+      throw new Error('native container directory 包含无效或重复的物理条目身份。');
+    }
+    seenIndexes.add(index);
+    return { index, name };
   });
+  return entries.filter((entry) => entry.name.toLowerCase().endsWith(extension));
 }
 
 async function materializeNativeEntry(

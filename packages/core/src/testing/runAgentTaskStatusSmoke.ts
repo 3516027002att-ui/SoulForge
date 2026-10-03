@@ -1,4 +1,4 @@
-/** Current-task status must agree across run results, lifecycle events and rollout. */
+/** Finite engine outcomes and actual resource facts remain separate from task evaluation. */
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { createAgentToolBridge } from '../ai/agentToolBridge.js';
@@ -7,10 +7,8 @@ import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { runAgentToolLoop } from '../model-services/agentLoop.js';
 import { parseRolloutLines } from '../model-services/rolloutRecorder.js';
 import type {
-  AgentEvent, AgentPermissionMode, ChatMessage, ModelServiceAdapter, RolloutItem, ToolCall
+  AgentEvent, AgentPermissionMode, ChatMessage, ModelCompleteResult, ModelServiceAdapter, RolloutItem, ToolCall
 } from '../model-services/types.js';
-
-const hostNoticeMarker = '【系统执行核验｜host=';
 
 function agentDeltaText(events: readonly AgentEvent[]): string {
   return events
@@ -19,10 +17,6 @@ function agentDeltaText(events: readonly AgentEvent[]): string {
     ))
     .map((event) => event.text)
     .join('');
-}
-
-function countTextMarker(text: string, marker: string): number {
-  return text.split(marker).length - 1;
 }
 
 function assistantContents(messages: readonly ChatMessage[]): string[] {
@@ -34,42 +28,50 @@ function assistantContents(messages: readonly ChatMessage[]): string[] {
 interface StatusCase {
   name: string;
   text: string;
-  partial: boolean;
   query?: string;
   mode?: AgentPermissionMode;
 }
 
 const cases: StatusCase[] = [
-  { name: 'historical no-write report', text: '已完成定位与原生确认，本次未做任何写入。', partial: true },
-  { name: 'historical staging failure', text: '## 执行结果：未能写入（环境阻断，非方案错误）', partial: true },
-  { name: 'explicit incomplete task', text: '本次任务未完成，仍缺少原生写入证据。', partial: true },
-  { name: 'blocked handoff is terminal', text: '当前任务被阻塞，无法继续执行。下一步需要补齐语料。', partial: true },
-  { name: 'partial status', text: '**状态：partial**，血条修改已完成，掉落尚未完成。', partial: true },
-  { name: 'bare blocked status', text: 'BLOCKED：未取得当前原生证据。', partial: true },
-  { name: 'English current status', text: 'This task is incomplete.', partial: true },
-  { name: 'partial read-only task', query: '只读分析这份事件', mode: 'plan', text: '本次任务未完成，缺少所需文件。', partial: true },
-  { name: 'successful modification', text: '本次修改完成，写入已提交并回读验证。', partial: false },
-  { name: 'read-only analysis in normal mode', query: '只读分析事件，不要修改', text: '分析完成，本次未做任何写入。', partial: false },
-  { name: 'diagnosis only', query: '仅排查写回失败原因，无需修复', text: '原因已确认，本次未写入。', partial: false },
-  { name: 'analysis mentioning modification', query: '分析上次修改为什么失败', text: '原因已确认，本次未写入。', partial: false },
-  { name: 'analysis and implementation', query: '请分析并修复写回问题', text: '本次未写入。', partial: true },
-  { name: 'plan does not require writes', mode: 'plan', text: '规划完成，本次未做任何写入。', partial: false },
-  { name: 'no declared mutation objective', query: '检查现有数值', text: '检查完成，本次未做任何写入。', partial: false },
-  { name: 'error-code explanation', query: '解释错误码', text: '错误码 partial 表示任务部分完成。', partial: false },
-  { name: 'explanation in edit task', text: '错误码说明：本次任务未完成是旧提示，本次修复已经验证通过。', partial: false },
-  { name: 'historical failure', text: '历史报告记录：本次未做任何写入。\n本次修改已完成并回读验证。', partial: false },
-  { name: 'quoted old status', text: '旧报告写着“本次任务未完成”。\n本次修复已通过。', partial: false },
-  { name: 'inline quoted old failure', text: "返回里曾有'本次未写入'提示，本次已修复。", partial: false },
-  { name: 'inline code sample', text: '返回文案样例是 `本次未写入`，本次已修复。', partial: false },
-  { name: 'blockquote', text: '> 当前任务：blocked\n\n以上为旧报告，本次已完成。', partial: false },
-  { name: 'code sample', text: '```text\n当前任务未完成\n```\n代码示例已整理完成。', partial: false },
-  { name: 'conditional failure', text: '如果本次未写入，就应标记 partial；本次已经写入并验证。', partial: false },
-  { name: 'status term explanation', text: 'partial 的含义是部分完成。本次修复通过。', partial: false },
-  { name: 'label explanation', text: '状态：partial 表示部分完成，本次已经修复。', partial: false },
-  { name: 'subtask status is not overall status', text: '历史迁移任务未完成不影响本次请求。本次修改已完成。', partial: false }
+  { name: 'historical no-write report', text: '已完成定位与原生确认，本次未做任何写入。' },
+  { name: 'historical staging failure', text: '## 执行结果：未能写入（环境阻断，非方案错误）' },
+  { name: 'explicit incomplete task', text: '本次任务未完成，仍缺少原生写入证据。' },
+  { name: 'blocked handoff is terminal', text: '当前任务被阻塞，无法继续执行。下一步需要补齐语料。' },
+  { name: 'partial status', text: '**状态：partial**，血条修改已完成，掉落尚未完成。' },
+  { name: 'bare blocked status', text: 'BLOCKED：未取得当前原生证据。' },
+  { name: 'English current status', text: 'This task is incomplete.' },
+  { name: 'partial read-only task', query: '只读分析这份事件', mode: 'plan', text: '本次任务未完成，缺少所需文件。' },
+  { name: 'successful modification', text: '本次修改完成，写入已提交并回读验证。' },
+  { name: 'read-only analysis in normal mode', query: '只读分析事件，不要修改', text: '分析完成，本次未做任何写入。' },
+  { name: 'diagnosis only', query: '仅排查写回失败原因，无需修复', text: '原因已确认，本次未写入。' },
+  { name: 'analysis mentioning modification', query: '分析上次修改为什么失败', text: '原因已确认，本次未写入。' },
+  { name: 'analysis and implementation', query: '请分析并修复写回问题', text: '本次未写入。' },
+  { name: 'plan does not require writes', mode: 'plan', text: '规划完成，本次未做任何写入。' },
+  { name: 'no declared mutation objective', query: '检查现有数值', text: '检查完成，本次未做任何写入。' },
+  { name: 'error-code explanation', query: '解释错误码', text: '错误码 partial 表示任务部分完成。' },
+  { name: 'explanation in edit task', text: '错误码说明：本次任务未完成是旧提示，本次修复已经验证通过。' },
+  { name: 'historical failure', text: '历史报告记录：本次未做任何写入。\n本次修改已完成并回读验证。' },
+  { name: 'quoted old status', text: '旧报告写着“本次任务未完成”。\n本次修复已通过。' },
+  { name: 'inline quoted old failure', text: "返回里曾有'本次未写入'提示，本次已修复。" },
+  { name: 'inline code sample', text: '返回文案样例是 `本次未写入`，本次已修复。' },
+  { name: 'blockquote', text: '> 当前任务：blocked\n\n以上为旧报告，本次已完成。' },
+  { name: 'code sample', text: '```text\n当前任务未完成\n```\n代码示例已整理完成。' },
+  { name: 'conditional failure', text: '如果本次未写入，就应标记 partial；本次已经写入并验证。' },
+  { name: 'status term explanation', text: 'partial 的含义是部分完成。本次修复通过。' },
+  { name: 'label explanation', text: '状态：partial 表示部分完成，本次已经修复。' },
+  { name: 'subtask status is not overall status', text: '历史迁移任务未完成不影响本次请求。本次修改已完成。' }
 ];
 
+function fixtureUsage(message: ChatMessage) {
+  return { inputTokens: 10, outputTokens: Math.max(1, Buffer.byteLength(JSON.stringify(message), 'utf8')) };
+}
+
+function fixtureCompletion(result: ModelCompleteResult): ModelCompleteResult {
+  return { ...result, usage: result.usage ?? fixtureUsage(result.message) };
+}
+
 export async function runAgentTaskStatusSmoke(): Promise<void> {
+  const taskVerdicts: Array<{ scenario: string; engineFinish: string; task: 'unverified' | 'resource_partial'; basis: string }> = [];
   for (const streaming of [false, true]) {
     for (const scenario of cases) {
       const events: AgentEvent[] = [];
@@ -79,10 +81,11 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
         protocol: 'openai-compatible',
         async complete() {
           calls += 1;
-          return { message: { role: 'assistant', content: scenario.text }, finishReason: 'stop', diagnostics: [] };
+          return fixtureCompletion({ message: { role: 'assistant', content: scenario.text }, finishReason: 'stop', diagnostics: [] });
         },
         async *stream() {
           calls += 1;
+          yield { type: 'usage', ...fixtureUsage({ role: 'assistant', content: scenario.text }) };
           yield { type: 'text-delta', text: scenario.text };
           yield { type: 'message-stop', finishReason: 'stop' };
         },
@@ -115,7 +118,7 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
       });
       const label = `${scenario.name}, streaming=${streaming}`;
       assert.equal(calls, 1, `${label}: terminal reports must not be resampled`);
-      assert.equal(result.finishReason, scenario.partial ? 'partial' : 'stop', label);
+      assert.equal(result.finishReason, 'stop', `${label}: model wording does not change engine termination`);
       const providerEnd = events.find((event) => event.type === 'step-complete');
       assert.ok(providerEnd?.type === 'step-complete', label);
       assert.equal(providerEnd.finishReason, 'stop', `${label}: retain provider outcome`);
@@ -125,8 +128,12 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
       const durableEnd = rollout.find((item) => item.type === 'turn-complete');
       assert.ok(durableEnd?.type === 'turn-complete', label);
       assert.equal(durableEnd.finishReason, result.finishReason, label);
-      assert.equal(durableEnd.taskStatus, scenario.partial ? 'partial' : 'completed', label);
-      assert.equal(result.diagnostics.some((item) => item.code === 'AGENT_REPORTED_TASK_PARTIAL'), scenario.partial, label);
+      assert.equal(durableEnd.taskStatus, 'completed', `${label}: compatibility control status`);
+      assert.equal(result.audit.toolCalls.length, 0, `${label}: no independent domain proof`);
+      assert.equal(result.messages.at(-1)?.content, scenario.text, `${label}: preserve provider text`);
+      assert.equal(agentDeltaText(events), scenario.text, `${label}: actual provider text reaches the event boundary exactly once`);
+      assert.ok(!result.diagnostics.some((item) => item.code === 'AGENT_REPORTED_TASK_PARTIAL'), label);
+      taskVerdicts.push({ scenario: label, engineFinish: result.finishReason, task: 'unverified', basis: 'Only provider text was returned; no independent domain evidence was obtained.' });
     }
   }
 
@@ -146,25 +153,27 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
       async complete() {
         providerCalls += 1;
         if (providerCalls <= calls.length) {
-          return {
+          return fixtureCompletion({
             message: { role: 'assistant', content: '', toolCalls: [calls[providerCalls - 1]!] },
             finishReason: 'tool_use',
             diagnostics: []
-          };
+          });
         }
-        return {
+        return fixtureCompletion({
           message: { role: 'assistant', content: '本次修改完成并回读验证。' },
           finishReason: 'stop',
           diagnostics: []
-        };
+        });
       },
       async *stream() {
         providerCalls += 1;
         if (providerCalls <= calls.length) {
+          yield { type: 'usage', ...fixtureUsage({ role: 'assistant', content: '', toolCalls: [calls[providerCalls - 1]!] }) };
           yield { type: 'tool-call', toolCall: calls[providerCalls - 1]! };
           yield { type: 'message-stop', finishReason: 'tool_use' };
           return;
         }
+        yield { type: 'usage', ...fixtureUsage({ role: 'assistant', content: '本次修改完成并回读验证。' }) };
         yield { type: 'text-delta', text: '本次修改完成并回读验证。' };
         yield { type: 'message-stop', finishReason: 'stop' };
       },
@@ -182,7 +191,7 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
       taskQuery: '修改并验证这个资源',
       permissionMode: 'normal',
       tools: [
-        { name: 'write_fixture', description: 'fixture write', parametersJsonSchema: {}, permissionLevel: 'read' },
+        { name: 'write_fixture', description: 'fixture write', parametersJsonSchema: {}, permissionLevel: 'commit' },
         { name: 'read_fixture', description: 'fixture read', parametersJsonSchema: {}, permissionLevel: 'read' }
       ],
       executeTool: async (call) => call.name === 'write_fixture'
@@ -191,6 +200,7 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
             content: JSON.stringify({
               ok: true,
               state: 'committed',
+              transaction: { state: 'committed', opId: 'sticky-refresh-op' },
               data: { record: { lifecycle: { transaction: 'committed', knowledgeRefresh: 'failed' } } }
             })
           }
@@ -204,6 +214,7 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
             })
           },
       maxSteps: 5,
+      requestApproval: async () => ({ decision: 'once' }),
       streaming,
       onEvent: (event) => { events.push(event); },
       rollout: {
@@ -213,44 +224,17 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
     });
     assert.equal(providerCalls, 3, `sticky refresh, streaming=${streaming}: provider calls`);
     assert.equal(result.finishReason, 'partial', `sticky refresh, streaming=${streaming}`);
-    assert.ok(result.diagnostics.some((item) => item.code === 'AGENT_KNOWLEDGE_REFRESH_DEGRADED_STICKY'));
-    assert.equal(
-      countTextMarker(agentDeltaText(events), `${hostNoticeMarker}partial】`),
-      1,
-      `sticky refresh, streaming=${streaming}: UI host notice`
-    );
-    const stickyUiText = agentDeltaText(events);
-    assert.equal(
-      countTextMarker(stickyUiText, '本次修改完成并回读验证。'),
-      1,
-      `sticky refresh, streaming=${streaming}: UI model text`
-    );
-    assert.ok(
-      stickyUiText.indexOf('本次修改完成并回读验证。') < stickyUiText.indexOf(`${hostNoticeMarker}partial】`),
-      `sticky refresh, streaming=${streaming}: host notice follows model text`
-    );
-    const resultAssistants = assistantContents(result.messages);
-    assert.equal(
-      resultAssistants.filter((text) => text.includes(`${hostNoticeMarker}partial】`)).length,
-      1,
-      `sticky refresh, streaming=${streaming}: result host notice`
-    );
-    assert.equal(
-      resultAssistants.filter((text) => text === '本次修改完成并回读验证。').length,
-      1,
-      `sticky refresh, streaming=${streaming}: model text preserved`
-    );
-    assert.match(
-      resultAssistants.find((text) => text.includes(`${hostNoticeMarker}partial】`)) ?? '',
-      /知识刷新状态为 failed/,
-      `sticky refresh, streaming=${streaming}: refresh detail`
-    );
+    assert.ok(result.diagnostics.some((item) => item.code === 'AGENT_KNOWLEDGE_REFRESH_DEGRADED'));
+    assert.equal(result.audit.toolCalls.length, 2);
+    assert.ok(result.audit.toolCalls.every((call) => call.ok));
+    assert.equal(result.audit.approvals?.[0]?.decision, 'once');
+    const committed = JSON.parse(result.messages.find((message) => message.role === 'tool' && message.name === 'write_fixture')!.content);
+    assert.equal(committed.state, 'committed');
+    assert.equal(committed.transaction.state, 'committed');
+    assert.equal(committed.data.record.lifecycle.knowledgeRefresh, 'failed');
+    assert.equal(agentDeltaText(events), '本次修改完成并回读验证。');
+    assert.equal(assistantContents(result.messages).filter((text) => text === '本次修改完成并回读验证。').length, 1);
     const reloaded = parseRolloutLines(rollout.map((item) => JSON.stringify(item)));
-    assert.equal(
-      reloaded.messages.filter((message) => message.content.includes(`${hostNoticeMarker}partial】`)).length,
-      1,
-      `sticky refresh, streaming=${streaming}: rollout reload host notice`
-    );
     assert.equal(
       reloaded.messages.filter((message) => message.content === '本次修改完成并回读验证。').length,
       1,
@@ -264,6 +248,7 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
     const sessionEnd = events.find((event) => event.type === 'turn-complete');
     assert.ok(sessionEnd?.type === 'turn-complete');
     assert.equal(sessionEnd.finishReason, 'partial');
+    taskVerdicts.push({ scenario: `sticky refresh, streaming=${streaming}`, engineFinish: result.finishReason, task: 'resource_partial', basis: 'Write is committed, but its knowledge refresh failed and a later read cannot erase that fact.' });
   }
 
   // A sticky refresh failure must annotate every non-stop terminal without
@@ -279,44 +264,49 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
         { id: `${terminalCase}-read-call`, name: 'read_fixture', argumentsJson: '{}' }
       ];
       let providerCalls = 0;
+      let executedWrites = 0;
+      let executedReads = 0;
       const adapter: ModelServiceAdapter = {
         protocol: 'openai-compatible',
         async complete() {
           providerCalls += 1;
           if (providerCalls === 1) {
-            return {
+            return fixtureCompletion({
               message: { role: 'assistant', content: '', toolCalls: [calls[0]!] },
               finishReason: 'tool_use' as const,
               diagnostics: [],
-              ...(terminalCase === 'length' ? { usage: { outputTokens: 1 } } : {})
-            };
+              ...(terminalCase === 'length' ? { usage: { inputTokens: 10, outputTokens: 63 } } : {})
+            });
           }
           if (providerCalls === 2) {
-            return {
+            return fixtureCompletion({
               message: { role: 'assistant', content: '', toolCalls: [calls[1]!] },
               finishReason: 'tool_use' as const,
-              diagnostics: []
-            };
+              diagnostics: [],
+              ...(terminalCase === 'length' ? { usage: { inputTokens: 10, outputTokens: 1 } } : {})
+            });
           }
-          return {
+          return fixtureCompletion({
             message: { role: 'assistant', content: '' },
             finishReason: 'error' as const,
             diagnostics: [{ severity: 'error' as const, code: 'MODEL_SERVICE_HTTP_ERROR', message: 'fixture terminal error' }]
-          };
+          });
         },
         async *stream() {
           providerCalls += 1;
           if (providerCalls === 1) {
-            if (terminalCase === 'length') yield { type: 'usage', outputTokens: 1 };
+            yield { type: 'usage', ...(terminalCase === 'length' ? { inputTokens: 10, outputTokens: 63 } : fixtureUsage({ role: 'assistant', content: '', toolCalls: [calls[0]!] })) };
             yield { type: 'tool-call', toolCall: calls[0]! };
             yield { type: 'message-stop', finishReason: 'tool_use' };
             return;
           }
           if (providerCalls === 2) {
+            yield { type: 'usage', ...(terminalCase === 'length' ? { inputTokens: 10, outputTokens: 1 } : fixtureUsage({ role: 'assistant', content: '', toolCalls: [calls[1]!] })) };
             yield { type: 'tool-call', toolCall: calls[1]! };
             yield { type: 'message-stop', finishReason: 'tool_use' };
             return;
           }
+          yield { type: 'usage', ...fixtureUsage({ role: 'assistant', content: '' }) };
           yield { type: 'error', code: 'MODEL_SERVICE_HTTP_ERROR', message: 'fixture terminal error' };
         },
         async listModels() { return { ok: true, models: [] }; }
@@ -333,20 +323,23 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
         taskQuery: '修改并验证这个资源',
         permissionMode: 'normal',
         tools: [
-          { name: 'write_fixture', description: 'fixture write', parametersJsonSchema: {}, permissionLevel: 'read' },
+          { name: 'write_fixture', description: 'fixture write', parametersJsonSchema: {}, permissionLevel: 'commit' },
           { name: 'read_fixture', description: 'fixture read', parametersJsonSchema: {}, permissionLevel: 'read' }
         ],
         executeTool: async (call) => {
           if (call.name === 'write_fixture') {
+            executedWrites += 1;
             return {
               ok: true,
               content: JSON.stringify({
                 ok: true,
                 state: 'committed',
+                transaction: { state: 'committed', opId: 'sticky-terminal-op' },
                 data: { record: { lifecycle: { transaction: 'committed', knowledgeRefresh: 'failed' } } }
               })
             };
           }
+          executedReads += 1;
           if (terminalCase === 'cancelled') controller.abort();
           return {
             ok: true,
@@ -359,7 +352,8 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
           };
         },
         maxSteps: 5,
-        ...(terminalCase === 'length' ? { maxTotalOutputTokens: 1 } : {}),
+        requestApproval: async () => ({ decision: 'once' }),
+        ...(terminalCase === 'length' ? { maxTotalOutputTokens: 64 } : {}),
         ...(terminalCase === 'cancelled' ? { signal: controller.signal } : {}),
         streaming,
         onEvent: (event) => { events.push(event); },
@@ -378,42 +372,28 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
         ? 2
         : terminalCase === 'error'
           ? 3
-          : 1;
+          : 2;
       assert.equal(providerCalls, expectedProviderCalls, `${label}: provider calls`);
-      assert.equal(result.finishReason, terminalCase, `${label}: actual finishReason`);
-      assert.equal(
-        countTextMarker(agentDeltaText(events), `${hostNoticeMarker}${terminalCase}】`),
-        1,
-        `${label}: UI host notice`
-      );
-      const resultAssistants = assistantContents(result.messages);
-      assert.equal(
-        resultAssistants.filter((text) => text.includes(`${hostNoticeMarker}${terminalCase}】`)).length,
-        1,
-        `${label}: result host notice`
-      );
-      assert.match(
-        resultAssistants.find((text) => text.includes(`${hostNoticeMarker}${terminalCase}】`)) ?? '',
-        /后续读取成功不改变本次刷新失败/,
-        `${label}: refresh detail`
-      );
+      const expectedFinish = terminalCase === 'length' ? 'partial' : terminalCase;
+      assert.equal(result.finishReason, expectedFinish, `${label}: actual finishReason`);
+      assert.equal(executedWrites, 1, `${label}: committed write remains observed`);
+      assert.equal(executedReads, terminalCase === 'length' ? 0 : 1, `${label}: output exhaustion must not dispatch the next read`);
+      assert.ok(result.diagnostics.some((item) => item.code === 'AGENT_KNOWLEDGE_REFRESH_DEGRADED'), `${label}: actual refresh diagnostic`);
+      const committed = JSON.parse(result.messages.find((message) => message.role === 'tool' && message.name === 'write_fixture')!.content);
+      assert.equal(committed.transaction.state, 'committed', `${label}: transaction truth`);
+      assert.equal(committed.data.record.lifecycle.knowledgeRefresh, 'failed', `${label}: refresh truth`);
       const reloaded = parseRolloutLines(rollout.map((item) => JSON.stringify(item)));
-      assert.equal(
-        reloaded.messages.filter((message) => message.content.includes(`${hostNoticeMarker}${terminalCase}】`)).length,
-        1,
-        `${label}: rollout reload host notice`
-      );
-      assert.equal(reloaded.terminal?.finishReason, terminalCase, `${label}: rollout finishReason`);
+      assert.equal(reloaded.terminal?.finishReason, expectedFinish, `${label}: rollout finishReason`);
       assert.equal(reloaded.terminal?.taskStatus, expectedTaskStatus, `${label}: rollout taskStatus`);
       const sessionEnd = events.find((event) => event.type === 'turn-complete');
       assert.ok(sessionEnd?.type === 'turn-complete', label);
-      assert.equal(sessionEnd.finishReason, terminalCase, `${label}: session finishReason`);
+      assert.equal(sessionEnd.finishReason, expectedFinish, `${label}: session finishReason`);
+      taskVerdicts.push({ scenario: label, engineFinish: result.finishReason, task: 'resource_partial', basis: 'A committed write retains failed-refresh metadata across cancellation, error or output exhaustion.' });
     }
   }
 
-  // A previous turn's assistant answer must not suppress the current turn's
-  // no-model-text terminal summary.  This also proves the synthetic summary
-  // reaches the live UI exactly once, not only durable rollout storage.
+  // A previous turn's assistant answer does not change a pre-aborted run.
+  // Cancellation emits durable metadata without dispatching a provider/tool.
   for (const streaming of [false, true]) {
     const controller = new AbortController();
     controller.abort();
@@ -424,7 +404,7 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
       protocol: 'openai-compatible',
       async complete() {
         providerCalls += 1;
-        return { message: { role: 'assistant', content: 'must not be called' }, finishReason: 'stop', diagnostics: [] };
+        return fixtureCompletion({ message: { role: 'assistant', content: 'must not be called' }, finishReason: 'stop', diagnostics: [] });
       },
       async *stream() {
         providerCalls += 1;
@@ -460,22 +440,12 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
     const label = `stale assistant terminal, streaming=${streaming}`;
     assert.equal(providerCalls, 0, `${label}: provider calls`);
     assert.equal(result.finishReason, 'cancelled', label);
-    assert.equal(
-      countTextMarker(agentDeltaText(events), '【系统收口摘要-cancelled】'),
-      1,
-      `${label}: UI summary`
-    );
-    assert.equal(
-      result.messages.filter((message) => message.content.includes('【系统收口摘要-cancelled】')).length,
-      1,
-      `${label}: result summary`
-    );
+    assert.equal(result.steps, 0, `${label}: no model turn`);
+    assert.equal(result.audit.toolCalls.length, 0, `${label}: no tool dispatch`);
+    assert.equal(agentDeltaText(events), '', `${label}: no fabricated provider text`);
+    assert.deepEqual(assistantContents(result.messages), ['旧轮已完成。'], `${label}: preserve existing history`);
     const reloaded = parseRolloutLines(rollout.map((item) => JSON.stringify(item)));
-    assert.equal(
-      reloaded.messages.filter((message) => message.content.includes('【系统收口摘要-cancelled】')).length,
-      1,
-      `${label}: rollout reload summary`
-    );
+    assert.equal(reloaded.messages.length, 0, `${label}: no new assistant report was persisted`);
     assert.equal(reloaded.terminal?.finishReason, 'cancelled', `${label}: rollout finishReason`);
     assert.equal(reloaded.terminal?.taskStatus, 'cancelled', `${label}: rollout taskStatus`);
   }
@@ -504,7 +474,7 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
     for (const streaming of [false, true]) {
       const registry = new ToolRegistry();
       registry.register({
-        name: 'write_oversized_fixture', description: 'fixture committed write', permission: 'read',
+        name: 'write_oversized_fixture', description: 'fixture committed write', permission: 'commit', permissionLevel: 'commit',
         run: () => ({
           ok: true,
           state: 'committed' as const,
@@ -520,7 +490,7 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
         })
       });
       registry.register({
-        name: 'read_oversized_fixture', description: 'fixture ordinary read', permission: 'read',
+        name: 'read_oversized_fixture', description: 'fixture ordinary read', permission: 'read', permissionLevel: 'read',
         run: () => ({
           ok: true,
           state: 'completed' as const,
@@ -529,7 +499,7 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
       });
       const bridge = createAgentToolBridge({
         registry,
-        context: { workspaceIndex: new WorkspaceIndex('bridge-loop-sticky-fixture'), mode: 'plan' }
+        context: { workspaceIndex: new WorkspaceIndex('bridge-loop-sticky-fixture'), mode: 'normal' }
       });
       const events: AgentEvent[] = [];
       const rollout: RolloutItem[] = [];
@@ -543,20 +513,22 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
         async complete() {
           providerCalls += 1;
           if (providerCalls <= calls.length) {
-            return {
+            return fixtureCompletion({
               message: { role: 'assistant', content: '', toolCalls: [calls[providerCalls - 1]!] },
               finishReason: 'tool_use', diagnostics: []
-            };
+            });
           }
-          return { message: { role: 'assistant', content: '本次修改完成并回读验证。' }, finishReason: 'stop', diagnostics: [] };
+          return fixtureCompletion({ message: { role: 'assistant', content: '本次修改完成并回读验证。' }, finishReason: 'stop', diagnostics: [] });
         },
         async *stream() {
           providerCalls += 1;
           if (providerCalls <= calls.length) {
+            yield { type: 'usage', ...fixtureUsage({ role: 'assistant', content: '', toolCalls: [calls[providerCalls - 1]!] }) };
             yield { type: 'tool-call', toolCall: calls[providerCalls - 1]! };
             yield { type: 'message-stop', finishReason: 'tool_use' };
             return;
           }
+          yield { type: 'usage', ...fixtureUsage({ role: 'assistant', content: '本次修改完成并回读验证。' }) };
           yield { type: 'text-delta', text: '本次修改完成并回读验证。' };
           yield { type: 'message-stop', finishReason: 'stop' };
         },
@@ -576,6 +548,7 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
         tools: bridge.tools,
         executeTool: bridge.executeTool,
         maxSteps: 5,
+        requestApproval: async () => ({ decision: 'once' }),
         streaming,
         onEvent: (event) => { events.push(event); },
         rollout: {
@@ -587,30 +560,25 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
       assert.equal(providerCalls, 3, `${label}: provider calls`);
       assert.equal(result.finishReason, refreshCase.partial ? 'partial' : 'stop', label);
       assert.equal(
-        result.diagnostics.some((item) => item.code === 'AGENT_KNOWLEDGE_REFRESH_DEGRADED_STICKY'),
+        result.diagnostics.some((item) => item.code === 'AGENT_KNOWLEDGE_REFRESH_DEGRADED'),
         refreshCase.partial,
         label
       );
       const sessionEnd = events.find((event) => event.type === 'turn-complete');
       assert.ok(sessionEnd?.type === 'turn-complete', label);
       assert.equal(sessionEnd.finishReason, result.finishReason, label);
-      const expectedHostNoticeCount = refreshCase.partial ? 1 : 0;
-      assert.equal(
-        countTextMarker(agentDeltaText(events), hostNoticeMarker),
-        expectedHostNoticeCount,
-        `${label}: UI host notice count`
-      );
-      assert.equal(
-        assistantContents(result.messages).filter((text) => text.includes(hostNoticeMarker)).length,
-        expectedHostNoticeCount,
-        `${label}: result host notice count`
-      );
+      assert.equal(result.audit.approvals?.[0]?.decision, 'once', `${label}: mutation approval`);
+      const committedMessage = result.messages.find((message) => message.role === 'tool' && message.name === 'write_oversized_fixture');
+      assert.ok(committedMessage, `${label}: committed result remains present`);
+      const committed = JSON.parse(committedMessage.content);
+      assert.equal(committed.state, 'committed', `${label}: bounded bridge retains transaction state`);
+      assert.ok(committedMessage.content.includes('bridge-loop-committed-op'), `${label}: operation identity`);
+      assert.equal(agentDeltaText(events), '本次修改完成并回读验证。', `${label}: actual model text reaches the event boundary exactly once`);
       const reloaded = parseRolloutLines(rollout.map((item) => JSON.stringify(item)));
-      assert.equal(
-        reloaded.messages.filter((message) => message.content.includes(hostNoticeMarker)).length,
-        expectedHostNoticeCount,
-        `${label}: rollout reload host notice count`
-      );
+      assert.equal(reloaded.messages.filter((message) => message.content === '本次修改完成并回读验证。').length, 1, `${label}: model text remains durable`);
+      assert.equal(reloaded.terminal?.finishReason, result.finishReason, `${label}: durable finish`);
+      assert.equal(reloaded.terminal?.taskStatus, refreshCase.partial ? 'partial' : 'completed', `${label}: compatibility resource status`);
+      taskVerdicts.push({ scenario: label, engineFinish: result.finishReason, task: refreshCase.partial ? 'resource_partial' : 'unverified', basis: refreshCase.partial ? 'Committed operation retains its failed-refresh metadata after bounding and a later read.' : 'Healthy refresh metadata does not by itself establish independent native mutation proof.' });
     }
   }
 
@@ -649,7 +617,9 @@ export async function runAgentTaskStatusSmoke(): Promise<void> {
     ]);
     clearTimeout(timer);
     assert.equal(result.finishReason, 'cancelled');
+    assert.equal(result.audit.toolCalls.length, 0);
   }
+  console.log(JSON.stringify({ statusCases: cases.length * 2, taskVerdicts }));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

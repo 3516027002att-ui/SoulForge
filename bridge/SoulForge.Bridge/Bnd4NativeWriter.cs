@@ -4,7 +4,7 @@ using System.Text.Json;
 
 internal static class Bnd4NativeWriter
 {
-    private static readonly ConcurrentDictionary<string, (long Length, DateTime LastWriteUtc, DcxNativeDocument Dcx, Bnd4NativeDocument Binder)> BinderCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, (long Length, DateTime LastWriteUtc, bool MatchesPathMetadata, DcxNativeDocument Dcx, Bnd4NativeDocument Binder)> BinderCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly object BinderCacheGate = new();
 
     public static (DcxNativeDocument Dcx, Bnd4NativeDocument Binder) GetCachedBinder(string sourcePath, string? oodleRuntimeRoot)
@@ -12,7 +12,9 @@ internal static class Bnd4NativeWriter
         lock (BinderCacheGate)
         {
             var info = new FileInfo(sourcePath);
-            if (info.Exists && BinderCache.TryGetValue(sourcePath, out var cached) && cached.Length == info.Length && cached.LastWriteUtc == info.LastWriteTimeUtc)
+            if (info.Exists && BinderCache.TryGetValue(sourcePath, out var cached) && cached.MatchesPathMetadata
+                && cached.Length == info.Length && cached.LastWriteUtc == info.LastWriteTimeUtc
+                && cached.Dcx.SourceHash == HashCurrentSourceFile(sourcePath))
             {
                 return (cached.Dcx, cached.Binder);
             }
@@ -20,8 +22,53 @@ internal static class Bnd4NativeWriter
             var binder = Bnd4NativeDocument.Read(dcx.Payload);
             if (info.Exists)
             {
-                BinderCache[sourcePath] = (info.Length, info.LastWriteTimeUtc, dcx, binder);
+                BinderCache[sourcePath] = (info.Length, info.LastWriteTimeUtc, true, dcx, binder);
             }
+            return (dcx, binder);
+        }
+    }
+
+    private static string HashCurrentSourceFile(string sourcePath)
+    {
+        using var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Read,
+            FileShare.Read, bufferSize: 1, options: FileOptions.SequentialScan);
+        if (source.Length <= 0 || source.Length > DcxNativeDocument.MaxSourceBytes)
+            throw new InvalidDataException($"DCX 文件大小 {source.Length} 超出安全读取范围。");
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(64 * 1024);
+        try
+        {
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            long readBytes = 0;
+            int read;
+            while ((read = source.Read(buffer, 0, 64 * 1024)) > 0)
+            {
+                readBytes += read;
+                if (readBytes > DcxNativeDocument.MaxSourceBytes)
+                    throw new InvalidDataException("DCX 文件大小超出安全读取范围。");
+                hash.AppendData(buffer, 0, read);
+            }
+            return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+        }
+        finally { System.Buffers.ArrayPool<byte>.Shared.Return(buffer); }
+    }
+
+    // The caller has already captured and hashed these exact source bytes.
+    // Reuse only a byte-identical decoded container; never reopen the path or
+    // let file size/timestamp stand in for current content on this read path.
+    public static (DcxNativeDocument Dcx, Bnd4NativeDocument Binder) GetBinderFromCapturedBytes(
+        string sourcePath, byte[] sourceBytes, string? oodleRuntimeRoot)
+    {
+        lock (BinderCacheGate)
+        {
+            if (BinderCache.TryGetValue(sourcePath, out var cached)
+                && cached.Dcx.SourceBytes.AsSpan().SequenceEqual(sourceBytes))
+                return (cached.Dcx, cached.Binder);
+
+            var dcx = DcxNativeDocument.Read(sourceBytes, oodleRuntimeRoot, sourcePath);
+            var binder = Bnd4NativeDocument.Read(dcx.Payload);
+            // The path may have changed after capture. This cache entry proves
+            // captured content only, so the legacy path adapter must re-read it.
+            BinderCache[sourcePath] = (sourceBytes.LongLength, default, false, dcx, binder);
             return (dcx, binder);
         }
     }

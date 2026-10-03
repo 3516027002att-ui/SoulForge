@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { withSmokeWorkspace } from '../testing/harness/smokeWorkspace.js';
 import { executePatchIrThroughTransaction } from '../patch/durablePatchCommit.js';
 import { createPatchIr } from '../patch-engine/patchIr.js';
-import { openLocalCliSession } from './localCliSession.js';
+import { cliWorkspaceRoot, openLocalCliSession } from './localCliSession.js';
 
-await withSmokeWorkspace('cli-rollback-authorization', async ({ root }) => {
+await withSmokeWorkspace('cli-rollback-authorization', async ({ root }) => withIsolatedStorage(join(root, 'storage'), async () => {
   const overlayRoot = join(root, 'mod');
   await mkdir(overlayRoot, { recursive: true });
   const targetPath = join(overlayRoot, 'rollback.txt');
@@ -82,9 +82,30 @@ await withSmokeWorkspace('cli-rollback-authorization', async ({ root }) => {
   assert.equal(replay.code, 'CLI_ROLLBACK_CONFIRMATION_REPLAYED');
   assert.equal(await readFile(targetPath, 'utf8'), 'before\n');
   await authorized.dispose();
+}));
+
+await withSmokeWorkspace('cli-storage-fail-closed', async ({ root }) => {
+  const overlayRoot = join(root, 'mod'); await mkdir(overlayRoot);
+  const blocked = join(root, 'blocked-storage'); await writeFile(blocked, 'unchanged');
+  await withIsolatedStorage(blocked, async () => {
+    await assert.rejects(openLocalCliSession({ overlayRoot, game: 'sekiro', analyze: false, requireDurableLog: true }), error => (error as NodeJS.ErrnoException).code === 'ENOTDIR');
+    assert.equal(await readFile(blocked, 'utf8'), 'unchanged');
+  });
 });
 
-console.log(JSON.stringify({ ok: true, checks: 13 }));
+console.log(JSON.stringify({ ok: true, checks: 15, storage: 'fixture-owned; explicit failure never falls back' }));
+
+async function withIsolatedStorage<T>(storageRoot: string, execute: () => Promise<T>): Promise<T> {
+  const previous = process.env.SF_E2E_WORKSPACE_STORAGE_ROOT;
+  process.env.SF_E2E_WORKSPACE_STORAGE_ROOT = storageRoot;
+  try {
+    assert.ok(!relative(storageRoot, cliWorkspaceRoot('storage-scope-check')).startsWith('..'));
+    return await execute();
+  } finally {
+    if (previous === undefined) delete process.env.SF_E2E_WORKSPACE_STORAGE_ROOT;
+    else process.env.SF_E2E_WORKSPACE_STORAGE_ROOT = previous;
+  }
+}
 
 function rollbackCall(opId: string) {
   return {

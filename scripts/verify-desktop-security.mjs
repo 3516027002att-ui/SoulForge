@@ -3,8 +3,11 @@ import { readFile } from 'node:fs/promises';
 const files = {
   main: await readFile(new URL('../apps/desktop/src/main/index.ts', import.meta.url), 'utf8'),
   ipc: await readFile(new URL('../apps/desktop/src/main/ipc.ts', import.meta.url), 'utf8'),
+  workspace: await readFile(new URL('../apps/desktop/src/main/ipc/workspace.ts', import.meta.url), 'utf8'),
   agent: await readFile(new URL('../apps/desktop/src/main/ipc/agent.ts', import.meta.url), 'utf8'),
+  agentSession: await readFile(new URL('../apps/desktop/src/main/services/agentSessionService.ts', import.meta.url), 'utf8'),
   rendererApp: await readFile(new URL('../apps/desktop/src/renderer/src/App.tsx', import.meta.url), 'utf8'),
+  rendererAgent: await readFile(new URL('../apps/desktop/src/renderer/src/app/useAgentUiController.ts', import.meta.url), 'utf8'),
   preload: await readFile(new URL('../apps/desktop/src/preload/index.ts', import.meta.url), 'utf8'),
   rendererDto: await readFile(new URL('../apps/desktop/src/main/rendererDto.ts', import.meta.url), 'utf8'),
   databaseUtility: await readFile(new URL('../apps/desktop/src/main/databaseUtility.ts', import.meta.url), 'utf8'),
@@ -33,7 +36,11 @@ const checks = [
   ['IPC 统一校验发送方', files.ipc.includes('assertTrustedSender(event, channel)')],
   ['IPC 校验主文档地址', files.ipc.includes('trustedRendererDocuments')
     && files.ipc.includes('actualDocument !== expectedDocument')],
-  ['目录选择使用一次性凭据', files.ipc.includes('consumeDirectorySelection')],
+  ['目录选择使用一次性凭据', files.ipc.includes('registerWorkspaceIpcHandlers(')
+    && files.workspace.includes('consumeDirectorySelection(event, options.overlaySelectionId')
+    && files.workspace.includes('directorySelections.delete(selectionId)')
+    && files.workspace.includes('selection.ownerWebContentsId !== event.sender.id')
+    && files.workspace.includes('selection.expiresAt < Date.now()')],
   ['渲染进程不能创建确认凭据', !files.preload.includes('createConfirmation')],
   ['渲染进程不能传入确认凭据', !files.preload.includes('ConfirmationReceipt')],
   ['渲染进程不能传入工作区绝对路径', !files.preload.includes('workspaceRoot')],
@@ -42,9 +49,12 @@ const checks = [
     && files.agent.includes('consumePermissionGrant')
     && files.agent.includes("ai.agent.permission.request")],
   ['Agent 审批列表不接受 renderer 覆盖', !files.agent.includes('request.approvalRequiredLevels')
-    && files.agent.includes("mode === 'fullPermission' ? { approvalRequiredLevels: [] }" )],
-  ['renderer 只请求 main-issued Agent grant', files.rendererApp.includes('requestAiAgentPermission')
-    && !files.rendererApp.includes('approvalRequiredLevels: []')],
+    && !files.agentSession.includes('request.approvalRequiredLevels')
+    && files.agentSession.includes("mode === 'fullPermission' ? { approvalRequiredLevels: [] }" )],
+  ['renderer 只请求 main-issued Agent grant', files.rendererApp.includes('useAgentUiController(')
+    && files.rendererAgent.includes('bridge.requestAiAgentPermission')
+    && !files.rendererApp.includes('approvalRequiredLevels: []')
+    && !files.rendererAgent.includes('approvalRequiredLevels: []')],
   ['Agent 会话控制校验 owner', files.agent.includes('sessionOwnerMatches(request.sessionId, _event.sender.id)')
     && files.agent.includes('sessionOwnerMatches(decoded.sessionId, _event.sender.id)')],
   ['Agent 事件按窗口 owner 路由', files.agent.includes('agentEventTargets')

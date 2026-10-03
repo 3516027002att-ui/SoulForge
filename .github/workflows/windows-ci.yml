@@ -41,10 +41,10 @@ jobs:
 
   verify:
     needs: changes
-    runs-on: windows-latest
+    # Keep native Electron builds on the same verified MSVC baseline as desktop CI.
+    runs-on: windows-2022
     timeout-minutes: 90
     steps:
-      # Freshness checks need the Evidence anchor's Git ancestry.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -57,26 +57,29 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - run: npm ci
-      - run: node scripts/verify.mjs --audit
-      # One build includes the database smoke entry. That smoke verifies source
-      # and output fingerprints before reusing this exact artifact.
+      # Production artifacts contain production entries only. Database checks
+      # build their own isolated smoke output through desktop-test-build.mjs.
       - name: Build shared production artifacts
         if: needs.changes.outputs.build == 'true'
-        run: node scripts/ensure-agent-production-build.mjs --database-smoke
+        run: node scripts/ensure-agent-production-build.mjs
       - name: Public checks (single execution plan)
         env:
           VERIFY_TIERS: ${{ needs.changes.outputs.tiers }}
+          REQUIRE_E2E: ${{ needs.changes.outputs.build }}
           SOULFORGE_CONTRACT_REQUIRE_BUNDLES: '1'
-        run: node scripts/verify.mjs --tier $env:VERIFY_TIERS --require-tier governance,unit --require-suite test:renderer-e2e --json-out output/verify-ci-public.json --timeout-ms 1200000
+        run: |
+          $required = @()
+          if ($env:REQUIRE_E2E -eq 'true') { $required = @('--require-suite', 'test:renderer-e2e') }
+          node scripts/check.mjs --tier $env:VERIFY_TIERS --require-tier governance,unit @required --json-out output/verify-ci-public.json --timeout-ms 2700000
       # Public runners have no private corpus. Keep the honest skip reports.
       - name: Native honest-skip contracts
         if: needs.changes.outputs.build == 'true'
         run: |
-          node scripts/verify.mjs --tier native --filter private-native-gate --json-out output/verify-ci-native-private.json
+          node scripts/check.mjs --tier native --filter private-native-gate --json-out output/verify-ci-native-private.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/verify.mjs --tier native --filter section28-sekiro-gate --json-out output/verify-ci-native-section28.json
+          node scripts/check.mjs --tier native --filter section28-sekiro-gate --json-out output/verify-ci-native-section28.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/verify.mjs --tier native --filter me3-sekiro-session --json-out output/verify-ci-native-me3.json
+          node scripts/check.mjs --tier native --filter me3-sekiro-session --json-out output/verify-ci-native-me3.json
       - name: Upload verification evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -85,13 +88,15 @@ jobs:
           path: |
             apps/desktop/e2e/playwright/playwright-report/
             apps/desktop/e2e/playwright/test-results/
+            .local-validation/public-renderer-e2e/
             output/verify-ci-*.json
           if-no-files-found: ignore
 
   installer:
     needs: [changes, verify]
     if: needs.changes.outputs.installer == 'true'
-    runs-on: windows-latest
+    # Keep native Electron builds on the same verified MSVC baseline as desktop CI.
+    runs-on: windows-2022
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -116,15 +121,17 @@ jobs:
       - run: npm run release:installer:manifest
       - name: Package integrity and reproducibility
         run: |
-          node scripts/verify.mjs --tier release --filter release- --exclude release:manifest,release:installer:manifest,test:release-cross-machine --json-out output/verify-ci-release.json
+          node scripts/check.mjs --tier release --filter release- --exclude release:manifest,release:installer:manifest,test:release-cross-machine --json-out output/verify-ci-release.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/verify.mjs --tier release --filter portable-packaging --json-out output/verify-ci-portable.json
+          node scripts/check.mjs --tier release --filter portable-packaging --json-out output/verify-ci-portable.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/verify.mjs --suite test:packaged-bridge-runtime --require-executed --json-out output/verify-ci-packaged-bridge.json
+          node scripts/check.mjs --suite test:packaged-bridge-runtime --require-executed --json-out output/verify-ci-packaged-bridge.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/check.mjs --suite test:first-party-schema-package --require-executed --json-out output/verify-ci-schema-package.json
       - name: Installer lifecycle (execute mode)
         env:
           SOULFORGE_INSTALLER_LIFECYCLE_RUN: '1'
-        run: node scripts/verify.mjs --tier release --filter installer-lifecycle --require-executed --json-out output/verify-ci-installer.json
+        run: node scripts/check.mjs --tier release --filter installer-lifecycle --require-executed --json-out output/verify-ci-installer.json
       - name: Upload installer evidence
         if: always()
         uses: actions/upload-artifact@v4

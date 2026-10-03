@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * Native EMEVD structural + instruction-arg smoke:
  * DFLT/KRAK-decompress common.emevd.dcx → correct Sekiro header parse →
@@ -7,7 +8,7 @@
  * against the TypeScript decompressor for the payload hash when DFLT.
  */
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
