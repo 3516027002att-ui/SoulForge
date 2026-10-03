@@ -9,6 +9,7 @@ const require = createRequire(import.meta.url);
 const ts = require(process.env.SOULFORGE_TEST_TYPESCRIPT_PATH ?? 'typescript');
 const rendererPath = fileURLToPath(new URL('../../apps/desktop/src/main/rendererDto.ts', import.meta.url));
 const maskPath = fileURLToPath(new URL('../../packages/shared/src/path-sanitizer.ts', import.meta.url));
+const preloadPath = fileURLToPath(new URL('../../apps/desktop/src/preload/resultTransforms.ts', import.meta.url));
 
 function compile(source, filename, shared = {}, observe = () => {}) {
   const result = ts.transpileModule(source, {
@@ -38,7 +39,29 @@ function load(observe) {
 }
 
 const api = load();
+const preload = compile(readFileSync(preloadPath, 'utf8'), preloadPath,
+  compile(readFileSync(maskPath, 'utf8'), maskPath));
 const plain = value => JSON.parse(JSON.stringify(value));
+
+test('main and preload mask network file authority without corrupting logical resource identity', () => {
+  for (const uri of [
+    'file://prod-server/share/mod/a.fmg', 'file://prod-server.fmg/share/mod/a.fmg',
+    'file://192.168.0.23/share/mod/a.fmg', 'file://prod-server:445/share/mod/a.fmg',
+    'file://%70rod-server/share/mod/a.fmg', 'file://%63hr/share/mod/a.fmg'
+  ]) {
+    const input = { sourceUri: uri, message: `Read failed: ${uri} (retry later)`, nested: [
+      { sourceUri: 'file://chr/c0000.anibnd.dcx', relatedUri: uri },
+      { sourceUri: 'file://map/mapstudio/m10_00_00_00.msb.dcx' },
+      { sourceUri: 'file://param/gameparam/gameparam.parambnd.dcx' },
+      { sourceUri: 'file://pack.bnd#bnd/child/item.fmg' }
+    ] };
+    const expected = { ...input, sourceUri: '[本机路径已隐藏]',
+      message: 'Read failed: [本机路径已隐藏] (retry later)',
+      nested: [{ ...input.nested[0], relatedUri: '[本机路径已隐藏]' }, ...input.nested.slice(1)] };
+    assert.deepEqual(plain(api.sanitizeRendererValue(input)), expected);
+    assert.deepEqual(plain(preload.stripPathFields(input)), expected);
+  }
+});
 
 test('object primitive fields avoid recursive visits while array elements retain map behavior', () => {
   const visits = [];
@@ -141,9 +164,9 @@ test('root and field primitive identities, sparse arrays and binary identity are
 
 test('diagnostics retain their projection and cyclic object failure is not hidden', () => {
   const output = api.sanitizeDiagnostics([{ severity: 'error', code: 'X', message: '失败 C:/private',
-    sourceUri: 'file://logical', details: { token: 'secret', text: 'C:/content', message: 'C:/private' } }]);
+    sourceUri: 'file://event/logical.emevd', details: { token: 'secret', text: 'C:/content', message: 'C:/private' } }]);
   assert.deepEqual(plain(output), [{ severity: 'error', code: 'X', message: '失败 [本机路径已隐藏]',
-    sourceUri: 'file://logical', details: { text: 'C:/content', message: '[本机路径已隐藏]' } }]);
+    sourceUri: 'file://event/logical.emevd', details: { text: 'C:/content', message: '[本机路径已隐藏]' } }]);
   const cycle = {}; cycle.self = cycle;
   assert.throws(() => api.sanitizeRendererValue(cycle), error => error.name === 'RangeError');
 });

@@ -11,6 +11,58 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { maskPathFragments, MASKED_PATH_PLACEHOLDER } from './path-sanitizer.js';
+import { KNOWN_RESOURCE_DIRS } from './types.js';
+
+it('masks network file authorities, including dotted hosts, ports and encoded hosts', () => {
+  for (const value of [
+    'file://prod-server/share/mod/a.fmg',
+    'FILE://prod-server.example/share/mod/a.fmg',
+    'file://prod-server.fmg/share/mod/a.fmg',
+    'file://prod-server.bnd/share/mod/a.fmg',
+    'file://192.168.0.23/share/mod/a.fmg',
+    'file://[2001:db8::1]/share/mod/a.fmg',
+    'file://prod-server:445/share/mod/a.fmg',
+    'file://user@prod-server/share/mod/a.fmg',
+    'file://%70rod-server/share/mod/a.fmg',
+    'file://%63hr/share/mod/a.fmg',
+    'file://%31%32%37.0.0.1/share/mod/a.fmg',
+    'file://prod-server.fmg%2fshare',
+    'file://prod-server.fmg%252fshare',
+    'file://custom/share/mod/a.fmg'
+  ]) {
+    assert.equal(maskPathFragments(value), MASKED_PATH_PLACEHOLDER, value);
+    assert.equal(maskPathFragments(`Read failed: ${value} (retry later)`),
+      `Read failed: ${MASKED_PATH_PLACEHOLDER} (retry later)`, value);
+  }
+});
+
+it('preserves actual project directory authorities, root files and container selectors', () => {
+  for (const directory of KNOWN_RESOURCE_DIRS) {
+    const uri = `file://${directory}/logical-resource.fmg`;
+    assert.equal(maskPathFragments(uri), uri);
+  }
+  for (const uri of [
+    'file://unknown', 'file://resource',
+    'file://regulation.bin', 'file://bytecode.hks', 'file://a.fmg',
+    'file://notes.txt', 'file://pack.bnd#bnd/child/item.fmg',
+    'file://regulation.bin!/EquipParam.param',
+    'file://chr/c0000.anibnd.dcx!/c0000.tae',
+    'file://msg/ja%20JP/item.msgbnd.dcx#bnd/child/item.fmg',
+    'FILE://CHR/c0000.anibnd.dcx', 'file:///workspace/a.fmg'
+  ]) assert.equal(maskPathFragments(uri), uri, uri);
+});
+
+it('logical authority does not permit encoded path escapes or physical separators', () => {
+  for (const uri of [
+    'file://chr/../private/a.fmg',
+    'file://map/%2e%2e/private/a.fmg',
+    'file://param/%252e%252e/private/a.fmg',
+    'file://chr/c0000%5canibnd.dcx',
+    'file://chr%2fprod-server/share/mod/a.fmg',
+    'file://resource/share/mod/a.fmg',
+    'file://unknown/share/mod/a.fmg'
+  ]) assert.equal(maskPathFragments(uri), MASKED_PATH_PLACEHOLDER, uri);
+});
 
 it('masks POSIX paths and physical file URLs while preserving surrounding text', () => {
   for (const value of ['/home/user/mod/file', '/tmp/soulforge/a.fmg', '/workspace/relative/file', 'file:///home/user/a.fmg', 'file://localhost/home/user/a.fmg', 'file://D:/Users/user/a.fmg']) {

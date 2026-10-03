@@ -25,16 +25,26 @@ const WINDOWS_DRIVE_PATH = /(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s'"()（）\[\]「�
 const UNC_OR_DEVICE_PATH = /\\\\(?:[?.]\\)?[^\\/\s]+[\\/][^\s'"()（）\[\]「」『』，。、；：！？]*/g;
 
 /** Match a whole URI before looking for slash paths within it. */
-const URI = /[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s'"()（）\[\]「」『』，。、；！？]*/;
+const URI = /[A-Za-z][A-Za-z0-9+.-]*:\/\/(?:[^\s'"()（）\[\]「」『』，。、；！？]|\[[A-Za-z0-9_.:%-]+\])*/;
 const POSIX_PATH = /(?<![A-Za-z0-9_./:%\\-])\/[^\s'"()（）\[\]「」『』，。、；：！？]+/;
 const URI_OR_PATH = new RegExp(
   [URI.source, WINDOWS_DRIVE_PATH.source, UNC_OR_DEVICE_PATH.source, POSIX_PATH.source].join('|'), 'g'
 );
 
-function isLogicalFileUri(value: string): boolean {
-  if (/^file:\/\/(?:[A-Za-z]:|(?:localhost|127\.0\.0\.1|\[::1\])(?:[/:?#]|$))/i.test(value)) return false;
-  if (!/^file:\/\/\//i.test(value)) return true; // file://chr/... is workspace-relative.
-  if (!/^file:\/\/\/workspace(?:\/|$)/i.test(value)) return false;
+// These directory authorities are the shared/types.ts KNOWN_RESOURCE_DIRS
+// consumed by scanWorkspace + makeFileResourceUri. Keep this module standalone
+// for the main/preload source-bound loaders; tests cover every declared directory.
+const LOGICAL_RESOURCE_AUTHORITIES = new Set([
+  'event', 'map', 'param', 'msg', 'menu', 'script', 'action', 'ai',
+  'sfx', 'chr', 'obj', 'other'
+]);
+
+// Root-file labels also come from makeFileResourceUri (for example regulation.bin,
+// standalone HKS, or pack.bnd#bnd/child). Suffixes follow resourceFileTypes and the
+// editor catalog; they identify logical labels, not native parsing authority.
+const LOGICAL_ROOT_FILE = /\.(?:bin|bnd|dcx|flver|msb|param|fmg|lua|hks|emevd|esd|tae|tpf|dds|gfx|gparam|mtd|matbin|fxr|txt|md|json|xml|yml|yaml|js|ts|csv|ini|cfg|toml|log|bak|prev)$/i;
+
+function decodeUriComponent(value: string): string | undefined {
   let decoded = value;
   try {
     for (let depth = 0; depth < 4; depth += 1) {
@@ -42,9 +52,33 @@ function isLogicalFileUri(value: string): boolean {
       if (next === decoded) break;
       decoded = next;
     }
-  } catch { return false; }
-  return !decoded.includes('\\') && !/%[0-9a-f]{2}/i.test(decoded)
-    && !decoded.split('/').some(segment => segment === '.' || segment === '..');
+  } catch { return undefined; }
+  return /%[0-9a-f]{2}/i.test(decoded) ? undefined : decoded;
+}
+
+function isLogicalFileUri(value: string): boolean {
+  const decoded = decodeUriComponent(value);
+  if (!decoded || decoded.includes('\\') || /[\u0000-\u001f\u007f]/.test(decoded)
+    || decoded.split(/[/?#]/).some(segment => segment === '.' || segment === '..')) return false;
+
+  const match = /^file:\/\/([^/?#]*)(.*)$/i.exec(value);
+  if (!match) return false;
+  const authority = match[1]!;
+  const suffix = match[2]!;
+  if (authority === '') return /^file:\/\/\/workspace(?:\/|$)/i.test(value);
+  if (LOGICAL_RESOURCE_AUTHORITIES.has(authority.toLowerCase())) return true;
+  // Actual no-source labels from Bridge ParserTypes and the EMEVD outline.
+  if (/^(?:unknown|resource)$/i.test(authority) && suffix === '') return true;
+
+  const containerChild = authority.endsWith('!') && suffix.startsWith('/');
+  // A file-looking network host with an ordinary /share/path is still physical.
+  if (suffix.startsWith('/') && !containerChild) return false;
+  // Decode the raw authority on its own, so an encoded separator cannot move
+  // a server/share path into the root-file or fragment forms above.
+  const decodedAuthority = decodeUriComponent(authority);
+  if (!decodedAuthority || /[\\/:?#@]/.test(decodedAuthority)) return false;
+  const filename = containerChild ? decodedAuthority.slice(0, -1) : decodedAuthority;
+  return LOGICAL_ROOT_FILE.test(filename);
 }
 
 /**
