@@ -191,6 +191,31 @@ test('insertion copies a trusted other-action template and applies fields in one
   assert.deepEqual(await readFile(source), bytes);
 }));
 
+test('insertion inherits or confirms the trusted template type and rejects a different requested type before staging', async () => withFixture(async ({source, root, bytes, session}) => {
+  const mutation = {mutation:'insert-event',animId:400020,templateAnimId:400000,templateEventIndex:0,startTime:5,endTime:6};
+  for (const [name, eventType] of [['inherited',undefined],['confirmed',100]]) {
+    const outputPath = join(root, `${name}-type.tae`);
+    const result = await session.call('write-tae-document',source,{outputPath,
+      expectedDocumentHash:createHash('sha256').update(bytes).digest('hex'),
+      mutations:[{...mutation,...(eventType === undefined ? {} : {eventTypeId:eventType})}]});
+    assert.notEqual(result.parseStatus,'failed',JSON.stringify(result));
+    const readback = await session.call('read-tae-document',outputPath,{animId:400020});
+    assert.notEqual(readback.parseStatus,'failed',JSON.stringify(readback));
+    const events = readback.data.animations[0].events;
+    const inserted = events.at(-1);
+    assert.equal(inserted.eventTypeId,100);
+    assert.equal(inserted.startTime,5);
+    assert.equal(inserted.endTime,6);
+  }
+  const outputPath = join(root,'different-type.tae');
+  const rejected = await session.call('write-tae-document',source,{outputPath,
+    expectedDocumentHash:createHash('sha256').update(bytes).digest('hex'),mutations:[{...mutation,eventTypeId:101}]});
+  assert.equal(rejected.parseStatus,'failed');
+  assert.match(JSON.stringify(rejected.diagnostics),/eventTypeId 101.*类型 100.*不一致/);
+  await assert.rejects(readFile(outputPath),{code:'ENOENT'});
+  assert.deepEqual(await readFile(source),bytes);
+}));
+
 test('insertion copies another native document and rejects unavailable or incompatible templates without output', async () => withFixture(async ({ source, root, bytes, expected, session }) => {
   const foreign = Buffer.from(bytes); foreign.writeInt32LE(6789, expected[0].field);
   const template = { templateAnimId: 400000, templateEventIndex: 0, templateDocumentBase64: foreign.toString('base64'), expectedTemplateDocumentHash: createHash('sha256').update(foreign).digest('hex') };
