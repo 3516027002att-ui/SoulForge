@@ -110,7 +110,7 @@
     "test:map-request-cancellation": "node --experimental-strip-types apps/desktop/src/main/ipc/mapRequestCancellation.test.ts",
     "test:bridge-cancellation-terminal-phase": "node packages/core/dist/testing/runBridgeCancellationTerminalPhaseSmoke.js",
     "test:packaged-bridge-runtime": "node packages/core/dist/testing/runPackagedBridgeResolutionSmoke.js",
-    "test:map-streaming-contract": "node scripts/verify-map-streaming-native.mjs --fixture",
+    "test:map-streaming-contract": "node scripts/verify-map-streaming-fixtures.mjs",
     "test:dds-convert-writeback": "npm run test:dds-convert-writeback -w @soulforge/core",
     "test:param-field-mutation": "npm run test:param-field-mutation -w @soulforge/core",
     "test:me3-sekiro-session": "node scripts/verify-me3-sekiro-session.mjs",

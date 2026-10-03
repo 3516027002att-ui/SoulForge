@@ -12,6 +12,27 @@ import { planScript } from './verify/commandPlan.mjs';
 
 const runner = fileURLToPath(new URL('./check.mjs', import.meta.url));
 const compatibilityRunner = fileURLToPath(new URL('./verify.mjs', import.meta.url));
+test('public MAP fixtures stay selectable while real resource probes require a native environment', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const registry = discoverChecks(root, loadWorkspaces(root));
+  for (const name of ['test:map-streaming-native', 'test:workspace-readiness-native']) {
+    assert.equal(registry.get(name)?.tier, 'native', name);
+    assert.ok(registry.get(name)?.requirements.includes('native-env'), name);
+  }
+  assert.equal(registry.get('test:map-streaming-contract')?.tier, 'unit');
+  assert.equal(registry.get('test:map-streaming-contract')?.requirements.includes('native-env'), false);
+  assert.ok(registry.get('test:map-streaming-contract')?.steps.some(step => step.args.some(arg => arg.endsWith('verify-map-streaming-fixtures.mjs'))));
+});
+test('public MAP fixture forwarding preserves help and unknown-argument refusal', () => {
+  const entry = fileURLToPath(new URL('./verify-map-streaming-fixtures.mjs', import.meta.url));
+  const invalid = spawnSync(process.execPath, [entry, '--bogus'], { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(invalid.status, 2, invalid.stderr);
+  assert.match(invalid.stderr, /SF_MAP_ARGS.*unknown argument/);
+  const help = spawnSync(process.execPath, [entry, '--help'], { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /Usage:.*--fixture/);
+  assert.doesNotMatch(help.stdout, /"pass":\s*true/);
+});
 test('list and audit inspect checks without claiming actual completion', () => {
   const root = mkdtempSync(join(tmpdir(), 'sf-check-static-completion-'));
   try {

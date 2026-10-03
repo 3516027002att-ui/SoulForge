@@ -63,6 +63,7 @@ if (cliArgs.includes('-h') || cliArgs.includes('--help')) {
 }
 
 const GAME_ROOT = process.env.SOULFORGE_SEKIRO_ROOT?.trim()
+  || process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim()
   || 'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro';
 const OVERLAY_ROOT = process.env.SOULFORGE_SEKIRO_MOD_ROOT?.trim() || join(GAME_ROOT, 'mods');
 const MAP_ID = process.env.SF_MAP_ID?.trim() || 'm11_00_00_00';
