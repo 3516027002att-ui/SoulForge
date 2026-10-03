@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import { runFiniteAgent } from './index.mjs';
 const response = (content='', toolCalls=[], usage={outputTokens:1}) => ({message:{role:'assistant',content,...(toolCalls.length?{toolCalls}:{})},finishReason:toolCalls.length?'tool_use':'stop',diagnostics:[],usage});
 const call = (id='call-1', name='read') => ({id,name,argumentsJson:'{}'});
@@ -138,4 +139,55 @@ test('a thrown read remains a redacted failure beside completed siblings; a thro
  assert.deepEqual(result.toolCalls.map(call=>call.ok),[true,false]);assert.equal(result.unresolvedCalls.length,0);assert.doesNotMatch(JSON.stringify(result),/fixture-secret/);
  const unknown=await run({tools:[{name:'mutate',permissionLevel:'commit'}],approvalRequiredLevels:[],model:async()=>response('',[call('uncertain','mutate')]),executeTool:async()=>{throw new Error('transport lost');}});
  assert.equal(unknown.state,'error');assert.equal(unknown.unresolvedCalls[0].retryable,false);
+});
+
+const credentialFixture='provider-credential-fixture-only';
+const redactArgumentFixture=text=>text.replaceAll(credentialFixture,'[REDACTED]').replace(/sk-[a-zA-Z0-9_-]{10,}/g,'[REDACTED]').replace(/api_key:\s*[A-Za-z0-9_-]+/g,'[REDACTED]');
+const argumentFixture=token=>` {\r\n  "resourceUri": "resource://text/fixture",\r\n  "newText": ${JSON.stringify(`${token}\napi_key: document_placeholder\n世界 e\u0301 ${credentialFixture}`)},\r\n  "expectedVersion": "cas-fixture-v1"\r\n}\t`;
+const proposalFixtureHash=call=>createHash('sha256').update(JSON.stringify([call.name,call.argumentsJson])).digest('hex');
+
+test('executor and approval hashes retain original argument bytes while history and events redact copies',async()=>{
+ const calls=['sk-'+'document_fixture_first','sk-'+'document_fixture_second'].map((token,index)=>({id:`patch-${index}`,name:'propose_text_patch',argumentsJson:argumentFixture(token)}));
+ const original=structuredClone(calls),events=[],records=[],modelMessages=[],approved=[],diffs=[],executed=[],allowed=[];let turns=0;
+ const result=await run({tools:[{name:'propose_text_patch',permissionLevel:'stage'}],limits:{maxSteps:3,timeoutMs:1000},redact:redactArgumentFixture,
+  model:async request=>{modelMessages.push(structuredClone(request.messages));return ++turns===1?response(credentialFixture,calls):response('reported');},
+  allowTool:call=>{allowed.push(structuredClone(call));return {ok:true};},
+  resolveApprovalDiff:async request=>{diffs.push({...request});return {targetPath:'fixture.txt',unifiedDiff:`+${credentialFixture}\n+${JSON.parse(request.argumentsJson).newText}`,addedLines:1,removedLines:0,newFile:false};},
+  requestApproval:async request=>{approved.push(structuredClone(request));return {decision:'once'};},
+  executeTool:async call=>{executed.push(structuredClone(call));return {ok:true,content:JSON.stringify({text:JSON.parse(call.argumentsJson).newText})};},
+  recordMessage:message=>records.push(structuredClone(message)),onEvent:event=>events.push(event)});
+ assert.equal(result.state,'completed');assert.equal(executed.length,2);assert.equal(approved.length,2);
+ for(let index=0;index<calls.length;index++) {
+  assert.deepEqual(Buffer.from(executed[index].argumentsJson,'utf8'),Buffer.from(original[index].argumentsJson,'utf8'));
+  assert.equal(allowed[index].argumentsJson,original[index].argumentsJson);assert.equal(diffs[index].argumentsJson,original[index].argumentsJson);
+  assert.equal(approved[index].proposalHash,proposalFixtureHash(original[index]));
+  assert.equal(approved[index].argumentsJson,redactArgumentFixture(original[index].argumentsJson));
+ }
+ assert.notEqual(approved[0].proposalHash,approved[1].proposalHash);
+ assert.equal(result.messages.find(message=>message.role==='assistant').toolCalls[0].argumentsJson,result.messages.find(message=>message.role==='assistant').toolCalls[1].argumentsJson);
+ assert.deepEqual(calls,original,'observability must not mutate the provider completion');
+ const visible=JSON.stringify({messages:result.messages,diagnostics:result.diagnostics,approvals:result.approvals,records,events,modelMessages});
+ assert.equal(visible.includes(credentialFixture),false);assert.doesNotMatch(visible,/sk-document_fixture|api_key: document_placeholder/);assert.match(visible,/\[REDACTED\]/);
+ assert.deepEqual(events.filter(event=>event.event.type==='approval-requested').map(event=>event.event.proposalHash),original.map(proposalFixtureHash));
+});
+
+test('explicit full grant keeps raw argument order without adding approval prompts',async()=>{
+ const calls=['sk-'+'document_fixture_first','sk-'+'document_fixture_second'].map((token,index)=>({id:`full-${index}`,name:'propose_text_patch',argumentsJson:argumentFixture(token)}));
+ const executed=[];let turns=0,asked=0;
+ const result=await run({permissionMode:'full',approvalRequiredLevels:[],tools:[{name:'propose_text_patch',permissionLevel:'stage'}],redact:redactArgumentFixture,
+  model:async()=>++turns===1?response('',calls):response('reported'),requestApproval:async()=>{asked++;return {decision:'reject'};},
+  executeTool:async call=>{executed.push(Buffer.from(call.argumentsJson,'utf8'));return {ok:true,content:'{}'};}});
+ assert.equal(result.state,'completed');assert.equal(asked,0);assert.equal(result.approvals.length,0);
+ assert.deepEqual(executed,calls.map(call=>Buffer.from(call.argumentsJson,'utf8')));
+ assert.equal(JSON.stringify(result.messages).includes(credentialFixture),false);
+});
+
+test('parked approval exposes only a redacted display copy with a hash of the original proposal',async()=>{
+ const proposed={id:'pending-raw',name:'propose_text_patch',argumentsJson:argumentFixture('sk-'+'document_fixture_pending')};let executed=0;
+ const result=await run({tools:[{name:'propose_text_patch',permissionLevel:'stage'}],redact:redactArgumentFixture,
+  model:async()=>response('',[proposed]),executeTool:async()=>{executed++;return {ok:true,content:'{}'};}});
+ assert.equal(result.state,'waiting');assert.equal(executed,0);
+ assert.equal(result.pendingApproval.proposalHash,proposalFixtureHash(proposed));
+ assert.equal(result.pendingApproval.call.argumentsJson,redactArgumentFixture(proposed.argumentsJson));
+ assert.equal(JSON.stringify(result).includes(credentialFixture),false);assert.doesNotMatch(JSON.stringify(result),/sk-document_fixture|api_key: document_placeholder/);
 });

@@ -105,8 +105,9 @@ export async function runFiniteAgent(options) {
                 }
             }
             modelAttempt = 0;
-            const message = { ...completion.message, content: redact(completion.message.content), ...(completion.message.toolCalls ? { toolCalls: completion.message.toolCalls.map(call => ({ ...call, argumentsJson: redact(call.argumentsJson) })) } : {}) };
-            const calls = message.toolCalls ?? [];
+            // Operational calls retain the provider's exact argument bytes.
+            // Redacted copies belong only to history and observation surfaces.
+            const calls = completion.message.toolCalls?.map(call => ({ ...call })) ?? [];
             if (calls.length > limits.maxToolCallsPerTurn) {
                 finish('partial', 'tool_call_budget');
                 break;
@@ -125,6 +126,7 @@ export async function runFiniteAgent(options) {
                 break;
             }
             for (const id of turnCallIds) seenCallIds.add(id);
+            const message = { ...completion.message, content: redact(completion.message.content), ...(completion.message.toolCalls ? { toolCalls: calls.map(call => ({ ...call, argumentsJson: redact(call.argumentsJson) })) } : {}) };
             append(message);
             if(options.emitCompletedMessage!==false && message.content)emit({type:'agent-message-delta',step:steps,text:message.content});
             if(completion.finishReason==='length'){
@@ -181,7 +183,7 @@ export async function runFiniteAgent(options) {
                         }
                         emit({type:'approval-requested',...request});
                         if(!options.requestApproval) {
-                            pendingApproval={call:{...call},proposalHash:request.proposalHash,step:steps};finish('waiting','approval_required');break;
+                            pendingApproval={call:{...call,argumentsJson:redact(call.argumentsJson)},proposalHash:request.proposalHash,step:steps};finish('waiting','approval_required');break;
                         }
                         try {
                             const response=await boundedAwait(options.requestApproval(request),controller.signal);
@@ -189,7 +191,7 @@ export async function runFiniteAgent(options) {
                         }catch(error){
                             if(controller.signal.aborted)throw error;
                             if(error.code==='AGENT_APPROVAL_PENDING') {
-                                pendingApproval={call:{...call},proposalHash:request.proposalHash,step:steps};finish('waiting','approval_required');break;
+                                pendingApproval={call:{...call,argumentsJson:redact(call.argumentsJson)},proposalHash:request.proposalHash,step:steps};finish('waiting','approval_required');break;
                             }
                             throw Object.assign(new Error('Host approval request failed; no proposed calls were executed.'),{code:'AGENT_APPROVAL_REQUEST_FAILED'});
                         }
