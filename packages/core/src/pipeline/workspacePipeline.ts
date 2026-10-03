@@ -1,4 +1,4 @@
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import type { BridgeCommand } from '../bridge/runBridge.js';
 import type { BridgeResult, Diagnostic, IndexedFile, ResourceKind, SymbolBundle } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
@@ -82,9 +82,18 @@ export interface AnalyzeWorkspaceResult {
  */
 export async function analyzeWorkspace(options: AnalyzeWorkspaceOptions): Promise<AnalyzeWorkspaceResult> {
   const diagnostics: Diagnostic[] = [];
-  const scan = options.files
+  let suppliedFilesWorkspaceId: string | undefined;
+  if (options.files) {
+    try {
+      suppliedFilesWorkspaceId = makeWorkspaceId(await realpath(options.workspaceRoot));
+    } catch {
+      // Let the scanner return its structured root diagnostic. Supplied files
+      // cannot authorize analysis when the selected root is unavailable.
+    }
+  }
+  const scan = options.files && suppliedFilesWorkspaceId
     ? {
-        workspaceId: makeWorkspaceId(options.workspaceRoot),
+        workspaceId: suppliedFilesWorkspaceId,
         workspaceRoot: options.workspaceRoot,
         files: [...options.files],
         diagnostics: []

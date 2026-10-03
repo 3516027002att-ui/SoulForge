@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -63,9 +63,15 @@ describe('readHksSource', () => {
     await withOverlay(async (overlayRoot) => {
       const file = join(overlayRoot, 'bytecode.hks');
       await writeFile(file, Buffer.from([0x1b, 0x4c, 0x75, 0x61, 0x50, 0x00]));
+      // Windows temporary roots may use an 8.3 alias or different casing.
+      // Native reads must receive the physical path, while the resource URI
+      // keeps its logical overlay identity.
+      const physicalFile = await realpath(file);
       let requestFile = '';
+      let requestUri = '';
       const nativeReader: HksNativeReader = async (request) => {
         requestFile = request.filePath;
+        requestUri = request.resourceUri;
         return {
           parseStatus: 'ok',
           diagnostics: [],
@@ -80,7 +86,10 @@ describe('readHksSource', () => {
         assert.equal(result.sourceText, 'return 7\n');
         assert.equal(result.sourceHash, 'native-source-hash');
         assert.equal(result.encoding, 'utf8');
-        assert.equal(requestFile, file);
+        assert.equal(requestFile, physicalFile);
+        assert.equal(result.sourcePath, physicalFile);
+        assert.equal(requestUri, 'file://bytecode.hks');
+        assert.equal(result.sourceUri, requestUri);
         assert.equal('writeSupported' in result, false);
       }
     });
