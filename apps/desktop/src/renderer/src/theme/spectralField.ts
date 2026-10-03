@@ -209,6 +209,15 @@ export interface SpectralFieldHandle {
   dispose: () => void;
 }
 
+function ambientPixelBudget(context: WebGLRenderingContext): number {
+  const debug = context.getExtension('WEBGL_debug_renderer_info');
+  const renderer = String(context.getParameter(debug?.UNMASKED_RENDERER_WEBGL ?? context.RENDERER));
+  // The ambient noise shader otherwise consumes whole-window CPU raster work on
+  // software adapters. Keep its animation, scaling a bounded texture to the canvas.
+  return /swiftshader|llvmpipe|softpipe|software|basic render driver|\bwarp\b/i.test(renderer)
+    ? 65_536 : 1_500_000;
+}
+
 /** Owns only the ambient canvas. It never changes editor layout or scene cameras. */
 export function createSpectralField(canvas: HTMLCanvasElement, initial: SpectralManifest): SpectralFieldHandle {
   const root = document.documentElement;
@@ -244,6 +253,7 @@ export function createSpectralField(canvas: HTMLCanvasElement, initial: Spectral
     });
     if (!gl) throw new Error('WebGL unavailable');
     const context = gl;
+    const pixelBudget = ambientPixelBudget(context);
     for (const [type, source] of [[context.VERTEX_SHADER, VERTEX_SHADER], [context.FRAGMENT_SHADER, FRAGMENT_SHADER]] as const) {
       const shader = context.createShader(type);
       if (!shader) throw new Error('Shader unavailable');
@@ -295,8 +305,11 @@ export function createSpectralField(canvas: HTMLCanvasElement, initial: Spectral
     };
     paint = (): void => {
       const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
-      const width = Math.max(1, Math.round(canvas.clientWidth * pixelRatio));
-      const height = Math.max(1, Math.round(canvas.clientHeight * pixelRatio));
+      const targetWidth = Math.max(1, Math.round(canvas.clientWidth * pixelRatio));
+      const targetHeight = Math.max(1, Math.round(canvas.clientHeight * pixelRatio));
+      const scale = Math.min(1, Math.sqrt(pixelBudget / (targetWidth * targetHeight)));
+      const width = Math.min(pixelBudget, Math.max(1, Math.floor(targetWidth * scale)));
+      const height = Math.min(Math.floor(pixelBudget / width), Math.max(1, Math.floor(targetHeight * scale)));
       if (canvas.width !== width || canvas.height !== height) {
         canvas.width = width; canvas.height = height;
         context.viewport(0, 0, width, height);

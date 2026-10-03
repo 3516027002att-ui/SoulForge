@@ -130,12 +130,16 @@ async function measureScroll(window, stepPx, durationMs) {
     let last = null;
     const startedScrollTop = el.scrollTop;
     const containerRect = el.getBoundingClientRect();
+    const startedAt = performance.now();
+    const visibility = { start: document.visibilityState, hiddenSamples: 0, unfocusedSamples: 0 };
     return await new Promise((resolve) => {
       let rafId = 0;
       const tick = () => {
         const now = performance.now();
         if (last !== null) frames.push(now - last);
         last = now;
+        if (document.hidden) visibility.hiddenSamples += 1;
+        if (!document.hasFocus()) visibility.unfocusedSamples += 1;
         // 露白：可视区内行覆盖的下沿（不早于容器顶）到容器下沿的未覆盖高度。
         let maxBottom = containerRect.top;
         for (const row of el.querySelectorAll('.wb-virtual-row')) {
@@ -155,11 +159,92 @@ async function measureScroll(window, stepPx, durationMs) {
           frames,
           blank,
           scrolled: el.scrollTop - startedScrollTop,
-          samples: blank.length
+          samples: blank.length,
+          elapsedMs: performance.now() - startedAt,
+          visibility: { ...visibility, end: document.visibilityState }
         });
       }, durationMs);
     });
   }, { stepPx, durationMs });
+}
+
+/** The empty shell and loaded table distinguish host-wide slow frames from scroll work. */
+async function measureIdleFrames(window, durationMs = 1000) {
+  return window.evaluate((durationMs) => new Promise((resolve) => {
+    const frames = [];
+    const startedAt = performance.now();
+    const visibility = { start: document.visibilityState, hiddenSamples: 0, unfocusedSamples: 0 };
+    let last = null;
+    let samples = 0;
+    let rafId = 0;
+    const tick = () => {
+      const now = performance.now();
+      if (last !== null) frames.push(now - last);
+      last = now;
+      samples += 1;
+      if (document.hidden) visibility.hiddenSamples += 1;
+      if (!document.hasFocus()) visibility.unfocusedSamples += 1;
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    setTimeout(() => {
+      cancelAnimationFrame(rafId);
+      resolve({ frames, samples, elapsedMs: performance.now() - startedAt,
+        visibility: { ...visibility, end: document.visibilityState } });
+    }, durationMs);
+  }), durationMs);
+}
+
+async function readRuntimeDiagnostics(app, window) {
+  const runtime = await app.evaluate(async ({ app, BrowserWindow }) => {
+    let timeout;
+    let gpuInfo;
+    try {
+      const info = await Promise.race([
+        app.getGPUInfo('basic'),
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(new Error('GPU_DIAGNOSTIC_TIMEOUT')), 5000);
+        })
+      ]);
+      const fields = ['active', 'vendorId', 'deviceId', 'vendorString', 'deviceString', 'driverVendor', 'driverVersion'];
+      gpuInfo = { status: 'available', gpuDevice: (info?.gpuDevice ?? []).map((device) =>
+        Object.fromEntries(fields.filter((field) => field in device).map((field) => [field, device[field]]))) };
+    } catch (error) {
+      gpuInfo = { status: 'unavailable', code: 'GPU_DIAGNOSTIC_FAILED', message: String(error) };
+    } finally {
+      clearTimeout(timeout);
+    }
+    return {
+      platform: process.platform,
+      versions: { electron: process.versions.electron, chrome: process.versions.chrome },
+      ci: process.env.CI === 'true',
+      gpuFeatureStatus: app.getGPUFeatureStatus(),
+      gpuInfo,
+      windows: BrowserWindow.getAllWindows().map((window) => ({
+        visible: window.isVisible(), focused: window.isFocused(), minimized: window.isMinimized(),
+        bounds: window.getBounds(), backgroundThrottling: window.webContents.getBackgroundThrottling()
+      })),
+      processes: app.getAppMetrics().map(({ type, cpu }) => ({ type, cpu }))
+    };
+  });
+  const ambientField = await window.evaluate(() => {
+    const canvas = document.querySelector('#sf-ambient-field');
+    const ambient = document.documentElement.dataset.ambient;
+    const gl = ambient === 'shader' ? canvas?.getContext('webgl') : null;
+    const debug = gl?.getExtension('WEBGL_debug_renderer_info');
+    return {
+      ambient, renderer: gl ? String(gl.getParameter(debug?.UNMASKED_RENDERER_WEBGL ?? gl.RENDERER)) : null,
+      drawWidth: canvas?.width, drawHeight: canvas?.height, devicePixelRatio: window.devicePixelRatio
+    };
+  });
+  return { ...runtime, ambientField };
+}
+
+function frameSummary(run) {
+  const sorted = [...run.frames].sort((a, b) => a - b);
+  return { samples: run.samples, elapsedMs: run.elapsedMs,
+    maxMs: sorted.at(-1) ?? 0, p95Ms: percentile(sorted, 95), visibility: run.visibility,
+    ...(run.blank ? { worstGapPx: Math.max(0, ...run.blank), scrolledPx: run.scrolled } : {}) };
 }
 
 function percentile(sorted, p) {
@@ -168,17 +253,16 @@ function percentile(sorted, p) {
   return sorted[index];
 }
 
-test.describe.configure({ mode: 'serial' });
-
 test.beforeEach(({ }, testInfo) => {
   test.skip(!hasBuild, 'renderer 未构建：先运行 npm run build -w @soulforge/desktop');
   void testInfo;
 });
 
-test('大表（5275 行 / 221 字段）：打开即出行，且选中行后快速下拉不卡顿', async () => {
+test('大表（5275 行 / 221 字段）：打开即出行，且选中行后快速下拉不卡顿', async ({}, testInfo) => {
   // SF_TEST_LARGE_PARAM 只能由本条自己打开（默认 fixture 3 张表，本测试没有对象）。
   test.setTimeout(180_000);
-  const { window, cleanup } = await launchApp({ SF_TEST_LARGE_PARAM: '1' });
+  const { app, window, cleanup } = await launchApp({ SF_TEST_LARGE_PARAM: '1' });
+  const emptyIdle = await measureIdleFrames(window);
   await openFixtureWorkspace(window);
   await openParamContainer(window);
   const hint = await openLargeParam(window);
@@ -197,6 +281,18 @@ test('大表（5275 行 / 221 字段）：打开即出行，且选中行后快�
   const jank = await measureScroll(window, 240, 1000);
   // 甩滚：2200px/帧（整窗换新 ≈100 行/帧），跑 ~1.2s（约 72 帧样本）。
   const fling = await measureScroll(window, 2200, 1200);
+
+  // Sample loaded idle after scrolling so diagnostics do not warm up the measured workload.
+  const loadedIdle = await measureIdleFrames(window);
+  const runtime = await readRuntimeDiagnostics(app, window);
+  const diagnostics = { emptyIdle, jank, fling, loadedIdle, runtime };
+  await testInfo.attach('param-performance-diagnostics', {
+    body: JSON.stringify(diagnostics, null, 2), contentType: 'application/json'
+  });
+  console.log('PARAM_PERF_DIAGNOSTICS', JSON.stringify({
+    emptyIdle: frameSummary(emptyIdle), jank: frameSummary(jank),
+    fling: frameSummary(fling), loadedIdle: frameSummary(loadedIdle), runtime
+  }));
 
   for (const [label, run] of [['jank', jank], ['fling', fling]]) {
     const sorted = [...run.frames].sort((a, b) => a - b);
