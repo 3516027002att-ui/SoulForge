@@ -163,27 +163,39 @@ export function useTextDocumentController(options: TextDocumentOptions) {
   }
   async function submitFmgEntry(mutation: TextPanelMutation): Promise<void> {
     if (!ownsDocument()) return;
+    const warn = (message: string) => {
+      setStatus(message);
+      pushToast(message, 'warn');
+    };
     if (!fmgLive || !selectedFile) {
-      setStatus('当前 FMG 未实时加载，不能写入；请先选中可解析资源。');
+      warn('当前 FMG 未实时加载，不能写入；请先选中可解析资源。');
       return;
     }
     if (!bridge || typeof bridge.applyFmgMutation !== 'function') {
-      setStatus('FMG 写入通道不可用。');
+      warn('FMG 写入通道不可用。');
       return;
     }
     // Main retains the original hash concurrency check and container table routing.
     const kind = mutation.kind === 'fmg_entry_delete' ? 'delete' : mutation.kind === 'fmg_entry_add' ? 'add' : 'upsert';
-    const result = await bridge.applyFmgMutation(selectedFile.sourceUri, fmgSourceHash ?? '', {
-      kind, id: mutation.id, ...(mutation.text !== undefined ? { text: mutation.text } : {})
-    }, mutation.tableId);
+    let result: RendererSaveResult;
+    try {
+      result = await bridge.applyFmgMutation(selectedFile.sourceUri, fmgSourceHash ?? '', {
+        kind, id: mutation.id, ...(mutation.text !== undefined ? { text: mutation.text } : {})
+      }, mutation.tableId);
+    } catch (error) {
+      if (!ownsDocument()) return;
+      warn(`FMG 写入异常：${error instanceof Error ? error.message : '写入通道返回未知异常。'}`);
+      return;
+    }
     if (!ownsDocument()) return;
     if (result.ok) {
       setStatus(mutation.kind === 'fmg_entry_delete' ? '条目已删除。' : '已保存。');
       pushToast(mutation.kind === 'fmg_entry_delete' ? '条目已删除' : '已保存');
       await readbackAfterCommit(result, selectedFile.sourceUri);
     } else {
-      const message = result.diagnostics?.[0]?.message ?? 'FMG 写入失败。';
-      setStatus(`FMG 写入失败：${message}`);
+      const diagnostic = result.diagnostics?.[0];
+      const code = diagnostic?.code ? `[${diagnostic.code}] ` : '';
+      warn(`FMG 写入失败：${code}${diagnostic?.message ?? 'FMG 写入失败。'}`);
     }
   }
   return { fmgEntries, fmgSourceHash, fmgLive, setFmgEntries, setFmgSourceHash,

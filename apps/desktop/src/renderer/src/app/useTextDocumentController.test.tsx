@@ -422,3 +422,48 @@ it('a current staged offscreen target retains caller hash/table routing without 
   assert.equal(result.ok, true); assert.deepEqual(writes, [[file('b').sourceUri, 'hash-b', { kind: 'delete', id: 12 }, 'table-b']]);
   assert.equal(h.current().fmgSourceHash, 'hash-a'); assert.equal(p.reads.length, 1);
 });
+
+it('panel native rejection publishes its code and human diagnostic without readback or replay', async () => {
+  const p = ports(), h = await mount(p.options);
+  const diagnostics = [{ severity: 'error' as const, code: 'ORIGINAL_CHANGED_DURING_STAGING', message: '目标已被外部修改；未写入任何内容。' }];
+  const receipt = { ok: false, changedFiles: [], diagnostics }; let writes = 0;
+  p.options.bridge!.applyFmgMutation = async () => { writes++; return receipt; };
+  await act(async () => h.current().submitFmgEntry({ kind: 'fmg_entry_upsert', id: 12, text: 'draft' }));
+  assert.match(p.toasts.at(-1)?.[0] ?? '', /ORIGINAL_CHANGED_DURING_STAGING.*目标已被外部修改/);
+  assert.equal(p.toasts.at(-1)?.[1], 'warn'); assert.equal(p.statuses.at(-1), p.toasts.at(-1)?.[0]);
+  assert.equal(writes, 1); assert.equal(p.reads.length, 1); assert.equal(receipt.diagnostics, diagnostics);
+});
+it('panel native exceptions publish visible warnings without claiming a commit or starting readback', async () => {
+  const p = ports(), h = await mount(p.options); let writes = 0;
+  p.options.bridge!.applyFmgMutation = async () => { writes++; throw new Error('owned bridge failure'); };
+  await act(async () => h.current().submitFmgEntry({ kind: 'fmg_entry_upsert', id: 12, text: 'draft' }));
+  assert.match(p.toasts.at(-1)?.[0] ?? '', /FMG 写入异常.*owned bridge failure/);
+  assert.equal(p.toasts.at(-1)?.[1], 'warn'); assert.equal(p.statuses.at(-1), p.toasts.at(-1)?.[0]);
+  assert.equal(writes, 1); assert.equal(p.reads.length, 1);
+});
+it('panel unavailable-document and unavailable-writer failures are visible and do not start a write', async () => {
+  for (const unavailable of ['document', 'writer'] as const) {
+    const p = ports(); let writes = 0;
+    if (unavailable === 'document') p.options.bridge!.readFmgDocument = async () => ({ ok: false });
+    p.options.bridge!.applyFmgMutation = async () => { writes++; return { ok: true, changedFiles: [], diagnostics: [] }; };
+    const h = await mount(p.options);
+    if (unavailable === 'writer') delete (p.options.bridge as Partial<TextDocumentBridge>).applyFmgMutation;
+    await act(async () => h.current().submitFmgEntry({ kind: 'fmg_entry_upsert', id: 12, text: 'draft' }));
+    assert.match(p.toasts.at(-1)?.[0] ?? '', unavailable === 'document' ? /未实时加载/ : /写入通道不可用/);
+    assert.equal(p.toasts.at(-1)?.[1], 'warn'); assert.equal(writes, 0);
+  }
+});
+it('obsolete panel native rejections and exceptions cannot publish warnings into the next document', async () => {
+  for (const failure of ['receipt', 'exception'] as const) {
+    const p = ports(), h = await mount(p.options), pending = deferred<Awaited<ReturnType<TextDocumentBridge['applyFmgMutation']>>>();
+    p.options.bridge!.applyFmgMutation = () => pending.promise;
+    let saving!: Promise<void>; await act(async () => { saving = h.current().submitFmgEntry({ kind: 'fmg_entry_upsert', id: 12, text: 'draft' }); });
+    await h.update({ ...p.options, selectedFile: file('b') });
+    await act(async () => {
+      if (failure === 'receipt') pending.resolve({ ok: false, changedFiles: [], diagnostics: [{ severity: 'error', code: 'STALE_FAILURE', message: 'old document failure' }] });
+      else pending.reject(new Error('old document failure'));
+      await saving;
+    });
+    assert.deepEqual(p.toasts, []); assert.equal(h.current().fmgSourceHash, 'hash-b'); assert.equal(p.reads.length, 2);
+  }
+});

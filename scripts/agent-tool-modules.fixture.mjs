@@ -8,7 +8,7 @@ test('domain tool modules own unique complete declarations projected by the defa
  const root='packages/core/src/ai/tools';assert.equal(existsSync(root),true);
  const expected=createDefaultToolRegistry().list();
  const declarations=[];
- for(const name of readdirSync(root).filter(name=>name.endsWith('.ts'))){
+ for(const name of readdirSync(root).filter(name=>name.endsWith('.ts') && !name.endsWith('.test.ts'))){
   const module=await import(pathToFileURL(resolve('packages/core/dist/ai/tools',name.replace(/\.ts$/u,'.js'))).href);
   const factories=Object.values(module).filter(value=>typeof value==='function');assert.equal(factories.length,1);
   const descriptor=factories[0]();assert.equal(typeof descriptor.run,'function');declarations.push(descriptor);

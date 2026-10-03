@@ -2,11 +2,16 @@ import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspa
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { BridgeDaemonClient, BridgeDaemonError } from '../bridge/bridgeDaemonClient.js';
 
 async function main(): Promise<void> {
+  const hostRid = `${process.platform === 'win32' ? 'win' : process.platform === 'darwin' ? 'osx' : process.platform}-${process.arch}`;
+  const apphost = `SoulForge.Bridge${process.platform === 'win32' ? '.exe' : ''}`;
   const executable = resolve(
-    process.argv[2] ?? '../../bridge/SoulForge.Bridge/bin/Debug/net10.0/win-x64/SoulForge.Bridge.exe'
+    process.argv[2] ?? process.env.SOULFORGE_BRIDGE_EXE ?? fileURLToPath(new URL(
+      `../../../../bridge/SoulForge.Bridge/bin/Release/net10.0/${hostRid}/publish/${apphost}`, import.meta.url
+    ))
   );
   const root = await mkdtemp(join(tmpdir(), 'soulforge-bridge-crash-'));
   const eventDirectory = join(root, 'event');

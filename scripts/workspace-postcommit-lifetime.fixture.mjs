@@ -7,7 +7,7 @@ import {pathToFileURL} from 'node:url';
 import test from 'node:test';
 
 test('actual EMEVD submit keeps a settled old commit while preserving the new workspace cache and index',async()=>{
- const root=await mkdtemp(join(tmpdir(),'sf-late-emevd-commit-'));const core=resolve('packages/core/dist/index.js');
+ const root=await mkdtemp(join(tmpdir(),'sf-late-emevd-commit-'));const core=pathToFileURL(resolve('packages/core/dist/index.js')).href;
  const key=Symbol.for('sf.fixture.late-emevd-commit');let settle,entered;
  const state={wait:new Promise(resolve=>{settle=resolve;}),enter:()=>entered(),replacements:[],refreshes:0,compileRequests:[]};globalThis[key]=state;
  const started=new Promise(resolve=>{entered=resolve;});
@@ -15,9 +15,9 @@ test('actual EMEVD submit keeps a settled old commit while preserving the new wo
   const output=join(root,'event.mjs');
   await build({entryPoints:[resolve('apps/desktop/src/main/ipc/event.ts')],outfile:output,bundle:true,platform:'node',format:'esm',external:['node:*'],
    plugins:[{name:'transaction-settlement-seam',setup(builder){
-    builder.onResolve({filter:/^\//},args=>args.path===core?{path:core,external:true}:undefined);
+    builder.onResolve({filter:/^file:/},args=>args.path===core?{path:core,external:true}:undefined);
     builder.onResolve({filter:/^@soulforge\/core$/},()=>({path:'fixture-core',namespace:'fixture'}));
-    builder.onResolve({filter:/^@soulforge\/shared$/},()=>({path:resolve('packages/shared/dist/index.js'),external:true}));
+    builder.onResolve({filter:/^@soulforge\/shared$/},()=>({path:pathToFileURL(resolve('packages/shared/dist/index.js')).href,external:true}));
     builder.onResolve({filter:/bridgeRoots\.js$/},()=>({path:'fixture-roots',namespace:'fixture'}));
     builder.onLoad({filter:/.*/,namespace:'fixture'},args=>({loader:'js',contents:args.path==='fixture-roots'
      ?'export async function prepareBridgeRoots(){return {ok:true,allowedRoots:["/old"],writableRoots:["/old"]}}'

@@ -11,9 +11,8 @@
  * 空白、引号、括号（半角/全角）、中文标点即结束 —— 路径内的汉字
  * （D:\游戏\mods\a.fmg）不终止，中文标点（。，、；：！？）终止。
  *
- * 打码的是本机路径形态（盘符绝对路径 / UNC / 设备路径 / 盘符 file URI）；
- * 工作区相对 URI（file:///workspace/a.fmg）不含盘符，不匹配任何规则，
- * 原样保留 —— 它是逻辑地址不是本机路径。
+ * 打码 Windows、POSIX 与物理 file URI；保留相对资源 URI 和显式支持的
+ * file:///workspace 逻辑命名空间，但不能通过编码或 .. 逃逸该命名空间。
  */
 
 /** 本机路径占位符（各端共用同一文案，UI 里也按它做特殊显示）。 */
@@ -25,8 +24,28 @@ const WINDOWS_DRIVE_PATH = /(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s'"()（）\[\]「�
 /** UNC / 设备路径：\\host\share\x、\\?\UNC\host\share\x、\\.\device\x。 */
 const UNC_OR_DEVICE_PATH = /\\\\(?:[?.]\\)?[^\\/\s]+[\\/][^\s'"()（）\[\]「」『』，。、；：！？]*/g;
 
-/** 盘符 file URI：file:///D:/x（无盘符的工作区 URI 不匹配）。 */
-const ABSOLUTE_FILE_URI = /file:\/\/\/[A-Za-z]:\/[^\s'"()（）\[\]「」『』，。、；：！？]*/gi;
+/** Match a whole URI before looking for slash paths within it. */
+const URI = /[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s'"()（）\[\]「」『』，。、；！？]*/;
+const POSIX_PATH = /(?<![A-Za-z0-9_./:%\\-])\/[^\s'"()（）\[\]「」『』，。、；：！？]+/;
+const URI_OR_PATH = new RegExp(
+  [URI.source, WINDOWS_DRIVE_PATH.source, UNC_OR_DEVICE_PATH.source, POSIX_PATH.source].join('|'), 'g'
+);
+
+function isLogicalFileUri(value: string): boolean {
+  if (/^file:\/\/(?:[A-Za-z]:|(?:localhost|127\.0\.0\.1|\[::1\])(?:[/:?#]|$))/i.test(value)) return false;
+  if (!/^file:\/\/\//i.test(value)) return true; // file://chr/... is workspace-relative.
+  if (!/^file:\/\/\/workspace(?:\/|$)/i.test(value)) return false;
+  let decoded = value;
+  try {
+    for (let depth = 0; depth < 4; depth += 1) {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    }
+  } catch { return false; }
+  return !decoded.includes('\\') && !/%[0-9a-f]{2}/i.test(decoded)
+    && !decoded.split('/').some(segment => segment === '.' || segment === '..');
+}
 
 /**
  * 把字符串里的本机路径片段替换为占位符，上下文原样保留。
@@ -34,11 +53,11 @@ const ABSOLUTE_FILE_URI = /file:\/\/\/[A-Za-z]:\/[^\s'"()（）\[\]「」『』�
  */
 export function maskPathFragments(text: string): string {
   if (typeof text !== 'string' || text.length === 0) return text;
-  // Every supported path pattern requires a colon or backslash. Preserve the
-  // existing replacements for possible matches without scanning ordinary names.
-  if (!text.includes(':') && !text.includes('\\')) return text;
-  return text
-    .replace(ABSOLUTE_FILE_URI, MASKED_PATH_PLACEHOLDER)
-    .replace(WINDOWS_DRIVE_PATH, MASKED_PATH_PLACEHOLDER)
-    .replace(UNC_OR_DEVICE_PATH, MASKED_PATH_PLACEHOLDER);
+  if (!text.includes(':') && !text.includes('\\') && !text.includes('/')) return text;
+  return text.replace(URI_OR_PATH, value => {
+    if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)) {
+      return !/^file:/i.test(value) || isLogicalFileUri(value) ? value : MASKED_PATH_PLACEHOLDER;
+    }
+    return MASKED_PATH_PLACEHOLDER;
+  });
 }

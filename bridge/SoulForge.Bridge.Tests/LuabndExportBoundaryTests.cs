@@ -37,7 +37,7 @@ public sealed class LuabndExportBoundaryTests
         finally { Directory.Delete(root, true); }
     }
 
-    private static byte[] SyntheticScriptBinder()
+    internal static byte[] SyntheticScriptBinder()
     {
         var name = Encoding.UTF8.GetBytes("test.lua\0"); var payload = Encoding.UTF8.GetBytes("return 1\n");
         const int header = 0x40, entry = 0x24; var namesOffset = header + entry; var dataOffset = namesOffset + name.Length;

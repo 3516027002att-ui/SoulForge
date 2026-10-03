@@ -276,7 +276,7 @@ test('BND 外形文件自动进入容器工作台；命令面板可强制以 BND
   await app.close();
 });
 
-test('MSB 地图工作台三栏：对象列表↔viewport↔属性联动，deferred 无写入口', async () => {
+test('MSB 地图工作台三栏：对象列表、视图与属性联动，无常驻提交条', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
@@ -286,13 +286,13 @@ test('MSB 地图工作台三栏：对象列表↔viewport↔属性联动，defer
   await expect(window.getByLabel('MSB 地图工作台')).toBeVisible();
 
   // 三栏（§2.5，不用四栏模板：无 Tools 空栏）。
-  await expect(window.getByRole('region', { name: 'Map Object List' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Viewport' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Properties' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '地图对象' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '视图', exact: true })).toBeVisible();
+  await expect(window.getByRole('region', { name: '属性', exact: true })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
 
   // 左栏对象列表由 fixture 合成 DTO 派生：Model/Event/Region/Part/Route 分组都有实体。
-  const objectList = window.getByRole('region', { name: 'Map Object List' });
+  const objectList = window.getByRole('region', { name: '地图对象' });
   await expect(objectList.getByText('c0000')).toBeVisible();
   await expect(objectList.getByText('e0000', { exact: true })).toBeVisible();
   await expect(objectList.getByText('r0000')).toBeVisible();
@@ -301,18 +301,20 @@ test('MSB 地图工作台三栏：对象列表↔viewport↔属性联动，defer
 
   // tree→inspector 联动：选中 part，右栏显示数值属性，viewport 报「已选择 part」。
   await objectList.getByRole('row', { name: /p0000/ }).click();
-  const properties = window.getByRole('region', { name: 'Properties' });
-  await expect(properties.getByRole('row', { name: /Position X/ })).toBeVisible();
-  await expect(window.getByTestId('msb-selected-summary')).toContainText('已选择 part：p0000');
+  const properties = window.getByRole('region', { name: '属性', exact: true });
+  await expect(properties.getByRole('row', { name: /位置 X/ })).toBeVisible();
+  await expect(window.getByTestId('msb-selected-summary')).toContainText('已选择 部件：p0000');
+  await expect(properties.getByRole('button', { name: '保存部件变换' })).toBeVisible();
 
   // tree→viewport 联动跟随：选中 region，summary 与右栏属性一起切换。
   await objectList.getByRole('row', { name: /r0001/ }).click();
-  await expect(window.getByTestId('msb-selected-summary')).toContainText('已选择 region：r0001');
-  await expect(properties).toContainText('Position Z');
+  await expect(window.getByTestId('msb-selected-summary')).toContainText('已选择 区域：r0001');
+  await expect(properties.getByRole('button', { name: '保存部件变换' })).toHaveCount(0);
+  await expect(properties).toContainText('位置 Z');
 
   // route 不制造 3D 节点，但必须保留原生 typeId/id 并在属性栏可见。
   await objectList.getByRole('row', { name: /route0000/ }).click();
-  await expect(properties.getByRole('row', { name: /Route ID/ })).toContainText('42');
+  await expect(properties.getByRole('row', { name: /路线编号/ })).toContainText('42');
 
   // 问题4-B：地图工作台整条 footer（Δ 微调 / transform 输入 / 实时模式 /
   // 三个提交按钮）已移除；Properties 栏保持只读属性表。
@@ -329,7 +331,7 @@ test('MSB 地图工作台三栏：对象列表↔viewport↔属性联动，defer
     for (const w of BrowserWindow.getAllWindows()) w.setSize(2880, 1200);
   });
   await window.waitForTimeout(200);
-  const resizer = window.getByRole('separator', { name: '调整Map Object List栏宽' });
+  const resizer = window.getByRole('separator', { name: '调整地图对象栏宽' });
   const widthBefore = await objectList.evaluate((el) => el.getBoundingClientRect().width);
   await resizer.focus();
   await window.keyboard.press('ArrowRight');
@@ -340,7 +342,7 @@ test('MSB 地图工作台三栏：对象列表↔viewport↔属性联动，defer
   await app.close();
 });
 
-test('FLVER 模型工作台三栏：树栈↔viewport↔属性联动，材质槽绑定 mesh，deferred 无写入口', async () => {
+test('FLVER 模型工作台三栏：树栈、视口与属性联动，材质槽绑定 mesh', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
@@ -352,7 +354,7 @@ test('FLVER 模型工作台三栏：树栈↔viewport↔属性联动，材质槽
   // 三栏（§2.5，不用四栏模板：无 Tools 空栏）。
   await expect(window.getByRole('region', { name: '模型层级' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Viewport' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Properties' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '属性', exact: true })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
 
   // 左树栈由 fixture 合成 envelope 的 pages 投影派生：网格/材质/纹理槽/骨骼四组。
@@ -364,9 +366,10 @@ test('FLVER 模型工作台三栏：树栈↔viewport↔属性联动，材质槽
 
   // tree→inspector 联动：选中 mesh，右栏显示数值属性，viewport summary 报已同步。
   await hierarchy.getByRole('row', { name: /mesh\[0\]/ }).click();
-  const properties = window.getByRole('region', { name: 'Properties' });
+  const properties = window.getByRole('region', { name: '属性', exact: true });
   await expect(properties).toContainText('顶点数');
   await expect(window.getByTestId('flver-viewport-summary')).toContainText('已选择 mesh[0]');
+  await expect(properties.getByRole('button', { name: '应用材质槽' })).toBeVisible();
 
   // 材质槽 → viewport 高亮同步：选中材质，viewport 切到第一个引用该材质的 mesh。
   await hierarchy.getByRole('row', { name: /mat_a/ }).click();
@@ -377,15 +380,13 @@ test('FLVER 模型工作台三栏：树栈↔viewport↔属性联动，材质槽
   await hierarchy.getByRole('row', { name: /a\.dds/ }).click();
   await expect(window.getByTestId('flver-viewport-summary')).toContainText('材质槽 a.dds 绑定 mesh[0]');
 
-  // deferred（只读预览）：无全局提交/保存/写入常驻动作，只有只读预览说明。
-  // S38 后写入口文案分两态：无 onMaterialSlotSet 时「写入口未开放」，有则
-  // 「材质槽修改…经 Patch Engine 提交」（材质槽「应用」在 Properties 栏按需
-  // 出现，不属全局提交条）。两种都算只读预览语义，不得再断言已删除的
-  // 旧的延期提示。
+  // The material-slot action belongs to mesh selection and clears for textures.
+  // It does not introduce a global submit/save bar or claim native write coverage.
   await expect(window.getByRole('button', { name: /提交|保存|写入/ })).toHaveCount(0);
-  const note = window.getByRole('note');
+  await expect(properties.getByRole('button', { name: '应用材质槽' })).toHaveCount(0);
+  const note = window.getByLabel('FLVER 模型工作台').getByRole('note');
   await expect(note).toBeVisible();
-  await expect(note).toContainText(/只读预览|材质槽修改/);
+  await expect(note).toContainText('点击“应用材质槽”保存材质引用。');
   await expect(window.getByText(/FLVER 编辑已延期至 V0\.6/)).toHaveCount(0);
 
   // resize/keyboard：分隔条可聚焦，方向键调宽真实生效（量 DOM 宽度前后）。
@@ -418,23 +419,23 @@ test('Material 工作台三栏：File list → Material list → Properties/Valu
   await expect(window.getByLabel('Material 工作台')).toBeVisible();
 
   // 三栏（§2.5，无 viewport：不要发明 Preview 第四栏，无 Tools 空栏）。
-  await expect(window.getByRole('region', { name: 'File list' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Material list' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Properties / Values' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '文件列表' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '材质列表' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '属性与数值' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Preview' })).toHaveCount(0);
   await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
 
   // File list 栏列出材质文件，显示名去 .mtd。
-  const fileList = window.getByRole('region', { name: 'File list' });
+  const fileList = window.getByRole('region', { name: '文件列表' });
   await expect(fileList.getByText('materials')).toBeVisible();
 
   // Material list 栏：材质来自 fixture envelope 的 pages 投影（material/textureReferences）。
-  const materialList = window.getByRole('region', { name: 'Material list' });
+  const materialList = window.getByRole('region', { name: '材质列表' });
   await expect(materialList.getByText('m_test_material')).toBeVisible();
   await expect(materialList.getByText('tex/base.dds')).toBeVisible();
 
   // Properties / Values 栏：值类型与 unknown readonly（值可见但无任何编辑控件）。
-  const props = window.getByRole('region', { name: 'Properties / Values' });
+  const props = window.getByRole('region', { name: '属性与数值' });
   await expect(props.getByText('DiffuseIntensity')).toBeVisible();
   // known 属性值渲染为可编辑 input（MATERIAL-53C 写回），不再匹配 getByText——
   // 值断言走 input value（见下），这里保留类型标签断言。
@@ -512,7 +513,7 @@ test('行为工作台三栏：机器 → 状态 → 条件/转移选择链，par
   const targetInput = window.getByLabel('重定向目标偏移');
   await expect(targetInput).toHaveValue('0x28');
   await targetInput.fill('0x50');
-  await window.getByRole('button', { name: '提交转移目标' }).click();
+  await window.getByRole('button', { name: '保存跳转目标' }).click();
   await expect(window.getByTestId('esd-transition-submit-notice')).toContainText('已提交转移目标并重读验证');
   // 提交后 详细信息 的目标状态偏移随 fixture stub 就地更新重读为 0x50。
   await expect(inspector.getByText('0x50')).toBeVisible();
@@ -617,7 +618,7 @@ test('问题4-D：动作工作台动画长列表全量渲染，栏内可滚到�
   const left = window.getByRole('region', { name: '动画' });
   await expandTaeAnimationGroup(window, 'a999');
   // 栏头 hint 报真实总数（213 animations），不是被砍掉的 200。
-  await expect(left.getByText('213 animations')).toBeVisible();
+  await expect(left.getByText('213 个动画')).toBeVisible();
   // 全量渲染：Animations 栏里 213 个动画行都进 DOM，不许 slice(0, 200)。
   await expect(left.getByRole('row')).toHaveCount(213);
   // 行主标签是完整 hkx 茎（a999_000000…），不是裁成首字母的 `a`。
@@ -674,44 +675,45 @@ test('VFX 工作台三栏：Effect / Particle list → 真实预览空态 → In
   await expect(window.getByLabel('VFX 工作台')).toBeVisible();
 
   // 三栏（§10.5，无 Tools 空栏）。
-  await expect(window.getByRole('region', { name: 'Effect / Particle list' })).toBeVisible();
-  await expect(window.getByRole('region', { name: '真实预览' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Inspector' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '效果与粒子' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '预览', exact: true })).toBeVisible();
+  await expect(window.getByRole('region', { name: '检查信息' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
 
   // Effect 节点树由 fixture envelope 的 effect 页投影派生（不按 sfx 目录分类）。
-  const left = window.getByRole('region', { name: 'Effect / Particle list' });
-  await expect(left.getByRole('row', { name: /type 2000/ })).toBeVisible();
-  await expect(left.getByRole('row', { name: /type 2200/ })).toBeVisible();
+  const left = window.getByRole('region', { name: '效果与粒子' });
+  await expect(left.getByRole('row', { name: /类型 2000/ })).toBeVisible();
+  await expect(left.getByRole('row', { name: /类型 2200/ })).toBeVisible();
 
   // known/unknown：未知类型节点（9999）明确标出，不给假数据。
   await expect(left.getByText('未知类型').first()).toBeVisible();
-  await expect(left.getByRole('row', { name: /type 9999/ })).toBeVisible();
+  await expect(left.getByRole('row', { name: /类型 9999/ })).toBeVisible();
 
   // 真实预览是诚实空态（preview isolation + no fake graph）：预览区无 canvas。
   // （P6 裁定后全窗口有 AmbientField 流光 canvas，断言必须收窄到预览区内，
   //   不能再数 window 级 canvas。）
-  const preview = window.getByRole('region', { name: '真实预览' });
+  const preview = window.getByRole('region', { name: '预览', exact: true });
   await expect(preview.getByTestId('vfx-preview-empty')).toContainText('没有可用的实时预览渲染器');
   await expect(preview.locator('canvas')).toHaveCount(0);
 
   // selection chain：选中已知节点 → Inspector 显示节点结构字段。
-  await left.getByRole('row', { name: /type 2000/ }).click();
-  const inspector = window.getByRole('region', { name: 'Inspector' });
-  await expect(inspector.getByText('typeId')).toBeVisible();
+  await left.getByRole('row', { name: /类型 2000/ }).click();
+  const inspector = window.getByRole('region', { name: '检查信息' });
+  await expect(inspector.getByText('类型编号', { exact: true })).toBeVisible();
   await expect(inspector.getByText('已知类型')).toBeVisible();
-  await expect(inspector.getByText('childCount')).toBeVisible();
+  await expect(inspector.getByText('子节点数')).toBeVisible();
 
   // 选中未知节点 → Inspector 明确标 blocked，不给字段含义假数据。
-  await left.getByRole('row', { name: /type 9999/ }).click();
-  await expect(inspector.getByTestId('vfx-unknown-node-block')).toContainText('未识别');
-  await expect(inspector.getByText('未知类型（未识别，不给字段含义假数据）')).toBeVisible();
+  await left.getByRole('row', { name: /类型 9999/ }).click();
+  await expect(left.getByTestId('vfx-unknown-node')).toHaveAttribute('aria-selected', 'true');
+  await expect(inspector.getByText('未知类型', { exact: true })).toBeVisible();
+  await expect(inspector.locator('[data-testid^="vfx-value-input-"]')).toHaveCount(0);
 
   // preview isolation：选择节点后预览栏仍是诚实空态（不出现假预览）。
   await expect(preview.getByTestId('vfx-preview-empty')).toContainText('没有可用的实时预览渲染器');
 
   // Particles（host）：未知 host 也标出。
-  await expect(left.getByRole('row', { name: /host 7777/ })).toBeVisible();
+  await expect(left.getByRole('row', { name: /粒子宿主 7777/ })).toBeVisible();
 
   // partial 缺口必须可见，不伪装成完整解析。
   await expect(window.getByTestId('vfx-partial-gaps')).toContainText('未解析区间 4 项');
@@ -719,19 +721,21 @@ test('VFX 工作台三栏：Effect / Particle list → 真实预览空态 → In
   // VFX-54C field write：选中 known host（host 0）出现值编辑行 +「写回」按钮。
   // 文档是 partial（含 unknown-type gap），known-layout 门未满 → 编辑控件为禁用态，
   // 不做假写回（fail-closed，镜像 C# EnsureKnownLayout）。
-  await left.getByRole('row', { name: /^host 0/ }).click();
+  await left.getByRole('row', { name: /^粒子宿主 0/ }).click();
   await expect(window.getByTestId('vfx-known-host')).toHaveAttribute('aria-selected', 'true');
   // Inspector 顶部 hint 也显示 selection.label（host 0），group-label 与 hint 文案相同，
   // getByText 会 strict 违规——精确匹配 group 标签。
-  await expect(inspector.locator('.wb-list__group-label').filter({ hasText: /^host 0$/ })).toBeVisible();
+  await expect(inspector.locator('.wb-list__group-label').filter({ hasText: /^粒子宿主 0$/ })).toBeVisible();
   const vfxValueInput = window.locator('[data-testid^="vfx-value-input-"]').first();
   await expect(vfxValueInput).toBeVisible();
   await expect(vfxValueInput).toBeDisabled();
   await expect(window.locator('[data-testid^="vfx-value-submit-"]').first()).toBeDisabled();
   await expect(window.getByTestId('vfx-write-blocked')).toBeVisible();
   // unknown host（7777）选中：明确标 blocked，无任何编辑控件。
-  await left.getByRole('row', { name: /host 7777/ }).click();
-  await expect(window.getByTestId('vfx-unknown-host-block')).toBeVisible();
+  await left.getByRole('row', { name: /粒子宿主 7777/ }).click();
+  await expect(left.getByTestId('vfx-unknown-host')).toHaveAttribute('aria-selected', 'true');
+  await expect(inspector.getByText('未知类型', { exact: true })).toBeVisible();
+  await expect(inspector.getByTestId('vfx-write-blocked')).toBeVisible();
   await expect(window.locator('[data-testid^="vfx-value-input-"]')).toHaveCount(0);
 
   await window.screenshot({ path: 'test-results/19-vfx-workbench.png' });
@@ -1135,14 +1139,14 @@ test('模型服务高级选项：默认收起，展开可配置采样参数并�
   await app.close();
 });
 
-test('2-A/2-D/2-E：composer 用 effort 下拉、无离线计划按钮；模型设置自动保存', async () => {
+test('2-A/2-D/2-E：composer 用思考强度下拉、无离线计划按钮；模型设置自动保存', async () => {
   const { app, window } = await launchApp();
 
-  // composer 底部工具行：effort 下拉（官方档），不再是 Think/思考强度。
+  // composer 底部工具行：思考强度下拉仍选择官方 effort 档。
   const composer = window.locator('.agent__composer');
-  await expect(composer.getByLabel('effort')).toBeVisible();
-  // 2-D：可见标签是 effort（全小写），不是 Think。
-  await expect(composer.locator('.composer-tool-label')).toHaveText('effort');
+  await expect(composer.getByLabel('思考强度')).toBeVisible();
+  // 可见标签与实际中文界面一致，选择仍作用于下一次任务。
+  await expect(composer.locator('.composer-tool-label')).toHaveText('思考强度');
   // 2-E：底栏「离线计划」模型按钮已删除；composer 不含该文案。
   await expect(composer.locator('.composer-model-btn')).toHaveCount(0);
   await expect(composer).not.toContainText('离线计划');
@@ -1609,6 +1613,11 @@ test('主题 ambient：流光层不拦截指针，reduced-motion 下不持续动
   if (ambient.mode === 'shader') {
     expect(ambient.canvasPointer).toBe('none');
     expect(Number(ambient.canvasZ)).toBe(0);
+    // Observe rendered pixels: a motion marker can lag Chromium's CDP media override.
+    const movingPixels = await window.locator('#sf-ambient-field').evaluate(canvas => canvas.toDataURL());
+    await expect.poll(async () =>
+      (await window.locator('#sf-ambient-field').evaluate(canvas => canvas.toDataURL())) !== movingPixels
+    ).toBe(true);
   } else {
     expect(ambient.beforePointer).toBe('none');
     expect(ambient.beforeZ).toBe('0');
@@ -1618,14 +1627,22 @@ test('主题 ambient：流光层不拦截指针，reduced-motion 下不持续动
   }
 
   await window.emulateMedia({ reducedMotion: 'reduce' });
-  // emulateMedia resolve ≠ 渲染器已应用 reduced-motion：shader 分支要在下一帧 rAF draw
-  // 里才写 canvas.dataset.ambientMotion，css 分支要等样式 recalc。直接读会抢到旧值
-  //（实测 shader 3/3 翻车，css 分支同样概率性失败），先等条件成立再断言。
+  await expect.poll(() => window.evaluate(() =>
+    matchMedia('(prefers-reduced-motion: reduce)').matches
+  )).toBe(true);
   const reducedMode = await window.evaluate(() => document.documentElement.dataset.ambient ?? 'css');
   if (reducedMode === 'shader') {
-    await expect.poll(() =>
-      window.evaluate(() => document.getElementById('sf-ambient-field')?.dataset.ambientMotion ?? null)
-    ).toBe('off');
+    // Allow the already scheduled paint to settle, then prove the actual field stays frozen.
+    await window.waitForTimeout(500);
+    const frozenPixels = await window.locator('#sf-ambient-field').evaluate(canvas => canvas.toDataURL());
+    await window.waitForTimeout(500);
+    expect(await window.locator('#sf-ambient-field').evaluate(canvas => canvas.toDataURL())).toBe(frozenPixels);
+    // Restoring the preference must resume the same canvas, rather than leaving a dead field.
+    await window.emulateMedia({ reducedMotion: 'no-preference' });
+    await expect.poll(async () =>
+      (await window.locator('#sf-ambient-field').evaluate(canvas => canvas.toDataURL())) !== frozenPixels
+    ).toBe(true);
+    await window.emulateMedia({ reducedMotion: 'reduce' });
   } else {
     await expect.poll(() =>
       window.evaluate(() => {
@@ -1753,118 +1770,60 @@ test('主题表面：普通 pane/数据行/主工作台去卡片化，无圆角�
 });
 
 /*
- * 大工作区：分页与截断说明。
- *
- * 默认 fixture 只有 22 个文件，低于分页页大小（200）与搜索上限（60），所以这两条
- * 行为在默认套件里根本不出现。SF_TEST_LARGE_WORKSPACE=1 让 fixture 返回 482 个
- * 合成条目，跨过两个阈值。
- *
- * 断言的是**用户能看到什么**：DOM 里真的只有一页节点、翻页真的换内容、说明里的
- * 数字与真实总数一致。只断言「pager 存在」不够——一个点了不换页的 pager 也满足。
- *
- * 问题 14 后置：这两条测的是 Files 域的物理浏览分页（`[data-panel-id="explorer"]`
- * 的 search-box / pager / page-range），而该浏览的顶栏入口已被移除（「文件」不再
- * 出现在顶栏）。开始侧栏资源树与 Ctrl+K 都只会选文件、不落进 Files 物理浏览，
- * 所以两条用例在当前壳层里没有可到达的入口路径。按任务约束不得把「文件」加回
- * 顶栏来迁就测试，故改为 skip 并保留正文，待接入 Files 物理浏览的新入口后恢复。
+ * Large workspace navigation uses the reachable Ctrl+K resource search.
+ * The former 200-row file pager and 60-result truncation controls were removed;
+ * current command search renders all matches and scrolls them independently.
  */
-test.skip('大工作区：文件列表分页，且标题栏与导航报出真实规模', async () => {
-  const { app, window, pageErrors, consoleErrors } = await launchApp({
-    SF_TEST_LARGE_WORKSPACE: '1'
-  });
+test('大工作区：Ctrl+K 列出全部地图资源，末尾结果可滚动到达', async () => {
+  const { app, window, pageErrors, consoleErrors } = await launchApp({ SF_TEST_LARGE_WORKSPACE: '1' });
   await openFixtureWorkspace(window);
-
-  // 一次只建一页 DOM：这是硬约束 17 的实质，不是「有个 pager 控件」。
-  const items = window.locator('.file-item');
-  await expect(items).toHaveCount(200);
-
-  const pager = window.locator('[data-testid="file-list-pager"]');
-  await expect(pager).toBeVisible();
-
-  // 位置文案必须报出区间与真实总数（482 = 22 基础 + 460 合成；EVENT-30B 加了
-  // event/menu.emevd 基础样本从 12 变 13，SCRIPT-41 加 script/m25_00_00_00.luabnd.dcx
-  // 从 13 变 14，MAP-50B 加 map/m10.msb.dcx 从 14 变 15，MODEL-51B 加 chr/c1000.flver
-  // 从 15 变 16，TEXTURE-52B 加 menu/start.tpf.dcx 与 menu/broken.tpf.dcx 从 16 变 18，
-  // MATERIAL-53B 加 material/materials.mtd、BEHAVIOR-55B 加 ai/m10.esd 从 18 变 20，
-  // VFX-54B 加 sfx/f0000.fxr 从 20 变 21，T3 加 chr/c5030.anibnd.dcx 从 21 变 22）。
-  const range = window.locator('[data-testid="file-list-page-range"]');
-  await expect(range).toContainText('1–200');
-  await expect(range).toContainText('482');
-  await expect(range).toContainText('第 1/3 页');
-
-  // 标题栏在超过一页时要说明「本页显示多少」，否则 200 与 479 长得一样。
-  // SHELL-09 §3.3：数量带语义单位（文件 N 个）。
-  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('文件 482 个');
-  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('本页 200');
-
-  // 翻页必须真的换内容：记下首项，翻页后应不同且区间前移。
-  const firstBefore = await items.first().innerText();
-  await window.getByRole('button', { name: '下一页' }).first().click();
-  await expect(range).toContainText('201–400');
-  await expect(range).toContainText('第 2/3 页');
-  const firstAfter = await items.first().innerText();
-  expect(firstAfter).not.toBe(firstBefore);
-
-  // 末页只剩余数条，且「下一页」到底后禁用。
-  await window.getByRole('button', { name: '下一页' }).first().click();
-  await expect(range).toContainText('401–482');
-  await expect(items).toHaveCount(82);
-  await expect(window.getByRole('button', { name: '下一页' }).first()).toBeDisabled();
-
-  // 回到第一页：上一页可用且内容复原。
-  await window.getByRole('button', { name: '上一页' }).first().click();
-  await window.getByRole('button', { name: '上一页' }).first().click();
-  await expect(range).toContainText('1–200');
-  await expect(window.getByRole('button', { name: '上一页' }).first()).toBeDisabled();
-
-  await window.screenshot({ path: 'test-results/11-file-list-pagination.png' });
+  await window.keyboard.press('Control+k');
+  const dialog = window.getByRole('dialog', { name: '命令面板' });
+  await dialog.getByRole('textbox', { name: '输入命令或搜索资源' }).fill('.msb');
+  const matches = dialog.locator('.cmdk-item');
+  // 460 synthetic maps plus the original map fixture; no silent 60/200 cutoff.
+  await expect(matches).toHaveCount(461);
+  await expect(matches.filter({ hasText: 'map/m0000.msb.dcx' })).toHaveCount(1);
+  const last = matches.filter({ hasText: 'map/m0459.msb.dcx' });
+  await expect(last).toHaveCount(1);
+  const list = dialog.locator('.cmdk__list');
+  const metrics = await list.evaluate(element => ({ scroll: element.scrollHeight, client: element.clientHeight }));
+  expect(metrics.scroll).toBeGreaterThan(metrics.client);
+  await last.scrollIntoViewIfNeeded();
+  await expect(last).toBeInViewport();
+  expect(await list.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+  await window.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
   expect(pageErrors).toEqual([]);
   expect(consoleErrors).toEqual([]);
   await app.close();
 });
 
-// 问题 14 后置：同样测 Files 物理浏览（search-box/pager/page-range），入口已随
-// 「文件」顶栏移除而不可达，skip 保留正文（见上方「大工作区：分页与截断说明」）。
-test.skip('大工作区：过滤后页码复位，且搜索结果显式说明被截断', async () => {
+test('大工作区：Ctrl+K 过滤可缩小与恢复，末尾资源可打开', async () => {
   const { app, window } = await launchApp({ SF_TEST_LARGE_WORKSPACE: '1' });
   await openFixtureWorkspace(window);
-
-  const range = window.locator('[data-testid="file-list-page-range"]');
-  await window.locator('[data-panel-id="explorer"] .search-box input').fill('m0');
-  await window.getByRole('button', { name: '下一页' }).first().click();
-  await window.getByRole('button', { name: '下一页' }).first().click();
-  await expect(range).toContainText('第 3/3 页');
-
-  /*
-   * 改过滤词后必须回到第 1 页。
-   *
-   * 过滤词刻意选仍然跨页的 'msb'（460 命中 / 3 页）：若换成命中不足一页的词，
-   * pager 会整体消失，断言就只能塞进 if 分支——而那个分支在「复位被移除」时
-   * 照样通过。实测确认过：用 'm03'（100 命中）时本条负向扰动不报红。
-   * 正向与负向不能共用 if/else。
-   */
-  await window.locator('[data-panel-id="explorer"] .search-box input').fill('msb');
-  await expect(window.locator('[data-testid="file-list-pager"]')).toBeVisible();
-  await expect(range).toContainText('第 1/3 页');
-  await expect(range).toContainText('1–200');
-  await expect(window.getByRole('button', { name: '上一页' }).first()).toBeDisabled();
-
-  // 搜索面板：命中远超 60 条上限，必须出现带真实数字的截断说明。
-  // 必须先切到搜索视图——搜索面板与资源浏览器共用侧栏槽位，未激活时输入框不可见。
-  await window.locator('[data-panel-id="explorer"] .search-box input').fill('');
-  // 用 .ab-item 限定活动栏按钮：面板内也有一个名为「搜索」的按钮，
-  // getByRole('button', {name:'搜索'}) 会先命中那个，导致视图始终切不过去。
-  await window.locator('.ab-item[aria-label="搜索"]').click();
-  await window.locator('[data-panel-id="search"] .search-box input').fill('.msb');
-  const note = window.locator('[data-testid="search-truncation"]');
-  await expect(note).toBeVisible();
-  // 460 合成 mXXXX.msb.dcx + MAP-50B 基础 map/m10.msb.dcx = 461 命中。
-  await expect(note).toContainText('461');
-  await expect(note).toContainText('60');
-  // 未显示数必须报出来，否则用户要自己做减法。
-  await expect(note).toContainText('401');
-
-  await window.screenshot({ path: 'test-results/12-search-truncation.png' });
+  await window.keyboard.press('Control+k');
+  const dialog = window.getByRole('dialog', { name: '命令面板' });
+  const query = dialog.getByRole('textbox', { name: '输入命令或搜索资源' });
+  const matches = dialog.locator('.cmdk-item');
+  await query.fill('.msb');
+  await expect(matches).toHaveCount(461);
+  await query.fill('m0459.msb.dcx');
+  await expect(matches).toHaveCount(1);
+  await expect(matches).toContainText('map/m0459.msb.dcx');
+  await query.fill('fixture-no-matching-resource');
+  await expect(matches).toHaveCount(0);
+  await expect(dialog.getByText('无匹配命令或资源。')).toBeVisible();
+  await query.fill('.msb');
+  await expect(matches).toHaveCount(461);
+  await query.fill('m0459.msb.dcx');
+  await expect(matches).toHaveCount(1);
+  await window.keyboard.press('Enter');
+  await expect(dialog).toBeHidden();
+  // The synthetic map is intentionally unsupported, but selection must reach
+  // the requested resource and expose its failure rather than lose the result.
+  await expect(window.getByRole('tab', { name: /m0459.*关闭 map\/m0459\.msb\.dcx/ })).toBeVisible();
+  await expect.poll(async () => (await ipcCalls(app))['resource.readMsbDocument'] ?? 0).toBeGreaterThan(0);
   await app.close();
 });
 
@@ -2181,8 +2140,8 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   });
   expect(scrollHosts.every((value) => value === 'auto' || value === 'hidden')).toBe(true);
 
-  // T5-4 + 问题 4 工具条：新建行/复制当前行/删除当前行 + 导出行/导入行/导出备注/
-  // 导入备注 七个真实按钮；未选表时全部禁用（没有可操作的表格目标）。不再有
+  // T5-4 + 问题 4 工具条：新建行/复制当前行/删除当前行 + 导出行/导入行/导出行名/
+  // 导入行名 七个真实按钮；未选表时全部禁用（没有可操作的表格目标）。不再有
   // 「Game Parameters · 1 library · N tables」crumb、类型名、行大小。
   const toolbarButtons = window.getByLabel('PARAM 工作台')
     .locator('.workbench__toolbar .toolbar-button, .pane-toolbar .toolbar-button');
@@ -2192,8 +2151,8 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   await expect(toolbarButtons.nth(2)).toHaveText('删除当前行');
   await expect(toolbarButtons.nth(3)).toHaveText('导出行');
   await expect(toolbarButtons.nth(4)).toHaveText('导入行');
-  await expect(toolbarButtons.nth(5)).toHaveText('导出备注');
-  await expect(toolbarButtons.nth(6)).toHaveText('导入备注');
+  await expect(toolbarButtons.nth(5)).toHaveText('导出行名');
+  await expect(toolbarButtons.nth(6)).toHaveText('导入行名');
   // 未选表：全部禁用（真实功能的禁用态，不是 §7.6 的假按钮）。
   await expect(toolbarButtons.nth(0)).toBeDisabled();
   await expect(toolbarButtons.nth(2)).toBeDisabled();
@@ -2253,19 +2212,19 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   // T5-4/T5-6：CSV 工具条四个按钮真实触发 bridge（fixture 不真开对话框/不写盘，
   // 只回成功诊断）。S28 起反馈走 toast：诊断的首条 info/error message 上浮。
   const feedback = window.locator('.wb-toast--ok');
-  await window.locator('.workbench__toolbar .toolbar-button', { hasText: '导出行' }).click();
+  await window.getByLabel('PARAM 工作台').getByRole('button', { name: '导出行', exact: true }).click();
   await expect(feedback).toContainText('fixture 导出 ActionGuideParam（4 行）行数据。');
   await expect.poll(async () => (await ipcCalls(app))['param.exportRowsCsv'] ?? 0).toBeGreaterThan(0);
 
-  await window.locator('.workbench__toolbar .toolbar-button', { hasText: '导出备注' }).click();
+  await window.getByLabel('PARAM 工作台').getByRole('button', { name: '导出行名', exact: true }).click();
   await expect(feedback).toContainText('fixture 导出 ActionGuideParam（4 行）行名。');
   await expect.poll(async () => (await ipcCalls(app))['param.exportNamesCsv'] ?? 0).toBeGreaterThan(0);
 
-  await window.locator('.workbench__toolbar .toolbar-button', { hasText: '导入行' }).click();
+  await window.getByLabel('PARAM 工作台').getByRole('button', { name: '导入行', exact: true }).click();
   await expect(feedback).toContainText('fixture 导入 ActionGuideParam（4 行）行数据完成。');
   await expect.poll(async () => (await ipcCalls(app))['param.importRowsCsv'] ?? 0).toBeGreaterThan(0);
 
-  await window.locator('.workbench__toolbar .toolbar-button', { hasText: '导入备注' }).click();
+  await window.getByLabel('PARAM 工作台').getByRole('button', { name: '导入行名', exact: true }).click();
   await expect(feedback).toContainText('fixture 导入 ActionGuideParam（4 行）行名完成。');
   await expect.poll(async () => (await ipcCalls(app))['param.importNamesCsv'] ?? 0).toBeGreaterThan(0);
 
@@ -2357,7 +2316,7 @@ test('GPARAM 工作台五区：bank→group→field→value 选择链、父选�
 
   // Toolbar 栏只给诚实空态：只读说明存在，无假写入按钮。
   const toolbarColumn = window.locator('.workbench__column[aria-label="操作"]');
-  await expect(toolbarColumn).toContainText('暂无已接通的工具');
+  await expect(toolbarColumn).toContainText('当前没有可用的字段写入操作');
   expect(await toolbarColumn.locator('button').count()).toBe(0);
 
   // 打开时默认选中当前文件：Groups 栏出现 LightSet ParamEditor。
@@ -2387,7 +2346,7 @@ test('GPARAM 工作台五区：bank→group→field→value 选择链、父选�
   // 父选区清理（bank 级）：切到 m11 bank 后 group 与 field 选择全部清空。
   await window.locator('.wb-list .wb-row', { hasText: 'm11_00' }).click();
   await expect(window.locator('.wb-list .wb-row', { hasText: 'Camera ParamEditor' })).toBeVisible();
-  await expect(window.locator('.wb-empty', { hasText: '先在中栏选择一个 group。' })).toBeVisible();
+  await expect(window.locator('.wb-empty', { hasText: '先在组栏选择一个组。' })).toBeVisible();
 
   // 局部失败：broken bank 保留在 Files 栏并标记失败，Groups 栏给出结构化原因。
   await window.locator('.wb-list .wb-row', { hasText: 'broken' }).click();
@@ -2418,8 +2377,8 @@ test('GPARAM typed 写回：值行编辑 → Toolbar 保存 → 重读新值，�
   await expect(inputs.nth(1)).toHaveValue('0.5');
 
   // 未修改时 Toolbar 栏无保存按钮（诚实空态）。
-  const toolbarColumn = window.locator('.workbench__column[aria-label="Toolbar"]');
-  await expect(toolbarColumn).toContainText('暂无已接通的工具');
+  const toolbarColumn = window.locator('.workbench__column[aria-label="操作"]');
+  await expect(toolbarColumn).toContainText('当前没有可用的字段写入操作');
   expect(await toolbarColumn.locator('button').count()).toBe(0);
 
   // 修改第一个分量 → Toolbar 栏出现保存入口，行标记为已编辑。
@@ -2468,10 +2427,10 @@ test('TPF 工作台四栏：container→texture 选择链、预览与元数据�
   // Texture 工作台自身。
   const textureWorkbench = window.locator('.workbench[aria-label="Texture 工作台"]');
   await expect(textureWorkbench).toBeVisible();
-  await expect(textureWorkbench.getByRole('region', { name: 'Containers' })).toBeVisible();
-  await expect(textureWorkbench.getByRole('region', { name: 'Textures' })).toBeVisible();
-  await expect(textureWorkbench.getByRole('region', { name: 'Viewer' })).toBeVisible();
-  await expect(textureWorkbench.getByRole('region', { name: 'Properties' })).toBeVisible();
+  await expect(textureWorkbench.getByRole('region', { name: '容器', exact: true })).toBeVisible();
+  await expect(textureWorkbench.getByRole('region', { name: '纹理', exact: true })).toBeVisible();
+  await expect(textureWorkbench.getByRole('region', { name: '预览', exact: true })).toBeVisible();
+  await expect(textureWorkbench.getByRole('region', { name: '属性', exact: true })).toBeVisible();
 
   // 11-C：工作台可见文本不含「Texture · N containers」crumb；负向清单：
   // 无物理路径（可见文本里）。领域栏上的「纹理」tab 不属于工作台，不受影响。
@@ -2492,11 +2451,11 @@ test('TPF 工作台四栏：container→texture 选择链、预览与元数据�
   // 预览尺寸（受界下采样：256×256 不缩，原始尺寸相等时不重复显示「原始」）。
   await expect(window.locator('.tpf-viewer')).toContainText('预览 256×256');
   // Properties 栏：条目表格式与真实 DDS 封装分开显示，尺寸/元数据齐备。
-  const propertiesColumn = window.getByRole('region', { name: 'Properties' });
+  const propertiesColumn = textureWorkbench.getByRole('region', { name: '属性', exact: true });
   await expect(propertiesColumn).toContainText('BC4');
   await expect(propertiesColumn).toContainText('ATI1');
   await expect(propertiesColumn).toContainText('256×256');
-  await expect(propertiesColumn).toContainText('Mip Levels');
+  await expect(propertiesColumn).toContainText('Mip 层数');
   // TEXTURE-52C replace 入口：替换控件已接线（源来自工作区 DDS 文件，无文件对话框）。
   // fixture 工作区没有 DDS 文件 → 源选择与提交按钮为禁用态，诚实不给假替换。
   await expect(propertiesColumn.locator('.tpf-replace')).toBeVisible();
@@ -2540,7 +2499,7 @@ test('TPF 工作台四栏：container→texture 选择链、预览与元数据�
 
 async function openEventWorkbench(window, fileName) {
   await selectFileItem(window, fileName);
-  const workbench = window.locator('[aria-label="Event 源码工作台"]');
+  const workbench = window.locator('[aria-label="事件源码工作台"]');
   await expect(workbench.locator('[data-editor-engine="codemirror"] .cm-editor')).toBeVisible();
   return workbench;
 }
@@ -2850,7 +2809,7 @@ test('EVENT-30B：快速切换 common → menu，旧请求被取消且不覆盖 
     'fixture://event/common.emevd(cancelled)'
   ]);
 
-  const workbench = window.locator('[aria-label="Event 源码工作台"]');
+  const workbench = window.locator('[aria-label="事件源码工作台"]');
   await expect(workbench.locator('[data-editor-engine="codemirror"] .cm-editor')).toBeVisible();
   const content = workbench.locator('.esw-source__host .cm-content');
 
@@ -2940,15 +2899,15 @@ test('S16 脚本 IDE：容器 Files|Source 两栏，明文/反编译可编辑，
   await expect(window.getByLabel('脚本容器工作台')).toBeVisible();
 
   // 两栏（不用三栏/四栏模板：无 Container、Metadata、Tools/Symbols）。
-  await expect(window.getByRole('region', { name: 'Files' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Source' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '条目', exact: true })).toBeVisible();
+  await expect(window.getByRole('region', { name: '源码', exact: true })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Container / Files' })).toHaveCount(0);
   await expect(window.getByRole('region', { name: 'Metadata' })).toHaveCount(0);
   await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
 
   // 明文条目：可编辑源码 + 形态明示。
   await window.getByRole('row', { name: /goal_list\.lua/ }).click();
-  const source = window.getByRole('region', { name: 'Source' });
+  const source = window.getByRole('region', { name: '源码', exact: true });
   await expect(source).toContainText('goal_list.lua');
   await expect(source).toContainText('明文源码');
   await expect(source).toContainText('goal = { name = "合成目标"');
@@ -2981,9 +2940,9 @@ test('S16 脚本 IDE：独立 .hks 单 Source，打开即反编译，Ctrl+S 应�
   // 独立脚本文件（.hks）：单 Source 栏，不落容器分页。
   await selectFileItem(window, 'script/c0000_common.hks');
   await expect(window.getByLabel('脚本编辑')).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Files' })).toHaveCount(0);
+  await expect(window.getByRole('region', { name: '条目', exact: true })).toHaveCount(0);
 
-  const source = window.getByRole('region', { name: 'Source' });
+  const source = window.getByRole('region', { name: '源码', exact: true });
   await expect(source).toContainText('c0000_common.hks');
   await expect(source).toContainText('反编译源码');
   await expect(source).toContainText('BEH_ADD_NONE = 0');
@@ -3202,7 +3161,7 @@ test('S14/S15：事件失败读取给 code + 人话 + 下一步，无假 resourc
 
   // 打开 KRAK 失败样本（fixture 模拟「未挂原版」的 KRAK 可行动句）。
   await selectFileItem(window, 'event/krak.emevd.dcx');
-  const workbench = window.locator('[aria-label="Event 源码工作台"]');
+  const workbench = window.locator('[aria-label="事件源码工作台"]');
   await expect(workbench.locator('[data-editor-engine="codemirror"] .cm-editor')).toBeVisible();
 
   // S14：没有橙色眉题 / 黄条 / 只读标签 / 编译并提交按钮。
@@ -3254,11 +3213,11 @@ test('S-FILE-ROLLBACK：审计面板文件级回滚 UI 走 rollbackFile 通道�
   await expect(firstFiles.nth(1)).toContainText('menu.fmg');
   await expect(firstFiles.nth(1).getByRole('button', { name: '回滚此文件' })).toBeVisible();
 
-  // 第二条：路径未脱敏映射 → 只显示提示，不提供回滚按钮。
+  // 第二条：隐藏的本机路径保留占位文本，不提供回滚按钮。
   const secondFiles = entries.nth(1).locator('.audit-entry__file');
   await expect(secondFiles).toHaveCount(1);
   await expect(secondFiles.getByRole('button', { name: '回滚此文件' })).toHaveCount(0);
-  await expect(secondFiles.locator('.audit-entry__file-hint')).toHaveText('路径未脱敏映射，不可单文件回滚');
+  await expect(secondFiles.locator('.audit-entry__file-path')).toHaveText('[本机路径已隐藏]');
 
   // 点击第一项第一文件的「回滚此文件」→ 成功反馈（toast）。
   await firstFiles.nth(0).getByRole('button', { name: '回滚此文件' }).click();

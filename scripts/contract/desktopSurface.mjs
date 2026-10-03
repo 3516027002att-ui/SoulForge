@@ -20,7 +20,7 @@
  *    那些仍由 verify-desktop-security.mjs 与 Electron 内 e2e harness 负责。
  *  - 桩只提供加载期与注册期需要的最小面；handler 内部真实执行仍需真机语料。
  */
-import { registerHooks } from 'node:module';
+import { createRequire, registerHooks } from 'node:module';
 import { existsSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
@@ -29,8 +29,11 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 export const repoRoot = resolve(here, '..', '..');
 
-export const MAIN_BUNDLE = join(repoRoot, 'apps', 'desktop', 'out', 'main', 'index.js');
-export const PRELOAD_BUNDLE = join(repoRoot, 'apps', 'desktop', 'out', 'preload', 'index.cjs');
+const bundleRoot = process.env.SOULFORGE_CONTRACT_BUNDLE_ROOT
+  ? resolve(process.env.SOULFORGE_CONTRACT_BUNDLE_ROOT)
+  : join(repoRoot, 'apps', 'desktop', 'out');
+export const MAIN_BUNDLE = join(bundleRoot, 'main', 'index.js');
+export const PRELOAD_BUNDLE = join(bundleRoot, 'preload', 'index.cjs');
 
 const STUB_URL = 'soulforge-contract-stub:electron';
 
@@ -49,6 +52,7 @@ const ELECTRON_EXPORT_NAMES = Object.freeze([
 ]);
 
 let hooksRegistered = false;
+let observationFaulted = false;
 /**
  * 每次观测换一个 stub URL。ESM 按 URL 缓存模块，若 main 与 preload 共用同一个
  * stub URL，先加载者会把桩定格，后加载者拿到的是别人的桩——两次观测互相污染，
@@ -61,15 +65,25 @@ const observedBundles = new Set();
 function ensureElectronStubHooks() {
   if (hooksRegistered) return;
   hooksRegistered = true;
+  // Loading the real main entry also installs its application error loggers.
+  // A CLI contract failure must still exit nonzero when those loggers consume
+  // an uncaught exception or rejection instead of terminating the process.
+  const markObservationFailed = () => { observationFaulted = true; process.exitCode = 1; };
+  process.on('uncaughtExceptionMonitor', markObservationFailed);
+  process.on('unhandledRejection', markObservationFailed);
   registerHooks({
     resolve(specifier, context, next) {
       if (specifier === 'electron') {
-        return { url: `${STUB_URL}?session=${stubSession}`, shortCircuit: true, format: 'module' };
+        const format = context.conditions.includes('require') ? 'commonjs' : 'module';
+        return { url: `${STUB_URL}?session=${stubSession}&format=${format}`, shortCircuit: true, format };
       }
       return next(specifier, context);
     },
     load(url, context, next) {
       if (url.startsWith(STUB_URL)) {
+        if (new URL(url).searchParams.get('format') === 'commonjs') {
+          return { format: 'commonjs', shortCircuit: true, source: 'module.exports = globalThis.__soulforgeElectronStub;' };
+        }
         const lines = ELECTRON_EXPORT_NAMES.map(
           (name) => `export const ${name} = globalThis.__soulforgeElectronStub[${JSON.stringify(name)}];`
         );
@@ -231,7 +245,7 @@ export async function observeMainSurface() {
  * 这是原先「preload.includes('applyMsbMutation')」无法表达的断言：文本存在
  * 不等于 contextBridge 真的暴露了它，更不等于它连到了正确的 channel。
  */
-export async function observePreloadSurface() {
+export async function observePreloadSurface({ invokeResult = null } = {}) {
   const exposures = [];
   const invocations = [];
   beginObservation(PRELOAD_BUNDLE, {
@@ -241,7 +255,7 @@ export async function observePreloadSurface() {
     ipcRenderer: {
       invoke(channel, ...args) {
         invocations.push({ channel, args });
-        return Promise.resolve(null);
+        return Promise.resolve(invokeResult);
       },
       on(channel) { invocations.push({ channel, args: [], listener: true }); },
       send(channel, ...args) { invocations.push({ channel, args, send: true }); }
@@ -250,7 +264,10 @@ export async function observePreloadSurface() {
       .filter((name) => name !== 'contextBridge' && name !== 'ipcRenderer')
       .map((name) => [name, {}]))
   });
-  await import(pathToFileURL(PRELOAD_BUNDLE).href);
+  // Load the CJS artifact through the synchronous loader. Node's ESM-to-CJS
+  // translator can reuse the main observation's cached Electron module and
+  // bypass the require hooks, leaving preload with the wrong stub instance.
+  createRequire(import.meta.url)(PRELOAD_BUNDLE);
   if (exposures.length !== 1) {
     throw new Error(`PRELOAD_EXPOSURE_UNEXPECTED: 期望恰好 1 次 exposeInMainWorld，实测 ${exposures.length}`);
   }
@@ -293,7 +310,7 @@ export async function observePreloadSurface() {
       channelByMethod.set(method, { error: error instanceof Error ? error.message : String(error) });
     }
   }
-  return { exposedKey: key, methods, channelByMethod };
+  return { exposedKey: key, methods, channelByMethod, api: value };
 }
 
 /**
@@ -401,6 +418,7 @@ export function createAssertions(label) {
     get passedCount() { return passed; },
     /** 有失败则以结构化诊断退出 1；不吞异常、不打印半通过。 */
     finish(payload) {
+      if (observationFaulted) this.check(false, 'CONTRACT_OBSERVATION_RUNTIME_ERROR: production main consumed an uncaught test failure');
       if (failures.length > 0) {
         console.error(JSON.stringify({
           ok: false,

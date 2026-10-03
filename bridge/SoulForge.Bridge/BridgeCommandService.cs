@@ -3645,8 +3645,10 @@ internal sealed class BridgeCommandService
             if (dispatchProbe) return BoundDispatchResult(file, command);
             try
             {
-                var childSelector = options.TryGetProperty("childPath", out var childPathEl) ? childPathEl.GetString() : null;
-                var entryIndex = options.TryGetProperty("entryIndex", out var idxEl) && idxEl.ValueKind == JsonValueKind.Number ? idxEl.GetInt32().ToString() : null;
+                if (options.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Object))
+                    throw new InvalidDataException("BRIDGE_OPTIONS_INVALID: LUABND options must be a JSON object.");
+                var childSelector = OptionNullableString("childPath");
+                var entryIndex = OptionNullableInt("entryIndex")?.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 var selector = childSelector ?? entryIndex;
                 if (string.IsNullOrWhiteSpace(selector))
                 {
@@ -3654,19 +3656,17 @@ internal sealed class BridgeCommandService
                 }
 
                 var doc = LuabndNativeDocument.Read(file, oodleRuntimeRoot);
-                if (options.TryGetProperty("expectedContainerHash", out var expContHash)
-                    && expContHash.ValueKind == JsonValueKind.String
-                    && !string.IsNullOrWhiteSpace(expContHash.GetString())
-                    && !doc.SourceHash.Equals(expContHash.GetString(), StringComparison.OrdinalIgnoreCase))
+                var expectedContainerHash = OptionNullableString("expectedContainerHash");
+                if (expectedContainerHash is not null
+                    && !doc.SourceHash.Equals(expectedContainerHash, StringComparison.OrdinalIgnoreCase))
                 {
                     return BridgeResult<object>.Failed(file, "script", "LUABND_CONTAINER_HASH_MISMATCH", "luabnd 容器 expectedContainerHash 不匹配。");
                 }
 
                 var script = doc.ReadScript(selector);
-                if (options.TryGetProperty("expectedChildHash", out var expChildHash)
-                    && expChildHash.ValueKind == JsonValueKind.String
-                    && !string.IsNullOrWhiteSpace(expChildHash.GetString())
-                    && !script.ContentHash.Equals(expChildHash.GetString(), StringComparison.OrdinalIgnoreCase))
+                var expectedChildHash = OptionNullableString("expectedChildHash");
+                if (expectedChildHash is not null
+                    && !script.ContentHash.Equals(expectedChildHash, StringComparison.OrdinalIgnoreCase))
                 {
                     return BridgeResult<object>.Failed(file, "script", "LUABND_CHILD_HASH_MISMATCH", "脚本 expectedChildHash 不匹配。");
                 }
@@ -3727,8 +3727,13 @@ internal sealed class BridgeCommandService
 
             try
             {
+                if (options.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Object))
+                    throw new InvalidDataException("BRIDGE_OPTIONS_INVALID: LUABND options must be a JSON object.");
+                if (optionsIsObject && options.TryGetProperty("includeMetadataJson", out var jsonEl)
+                    && jsonEl.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                    throw new InvalidDataException("BRIDGE_OPTIONS_INVALID: options.includeMetadataJson must be a boolean.");
+                var includeJson = OptionBool("includeMetadataJson", true);
                 var doc = LuabndNativeDocument.Read(file, oodleRuntimeRoot);
-                var includeJson = !options.TryGetProperty("includeMetadataJson", out var jsonEl) || jsonEl.GetBoolean();
                 var result = doc.ExportAll(exportDir, includeJson);
                 return BridgeResult<object>.Ok(file, "script", result);
             }

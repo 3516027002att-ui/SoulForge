@@ -69,7 +69,7 @@ export function operationKey(operation) {
   return createHash('sha256').update(JSON.stringify([
     operation.cwd, operation.command, operation.args,
     Object.entries(operation.env ?? {}).sort(([a], [b]) => a.localeCompare(b)),
-    operation.kind
+    operation.kind, operation.validation ?? (operation.kind === 'test')
   ])).digest('hex').slice(0, 20);
 }
 
@@ -83,8 +83,8 @@ function isDirectNodeScript(tokens) {
 
 export function planScript(repoRoot, workspaces, scriptName, { args = [], env = {}, workspace = null } = {}) {
   const stack = new Set();
-  const operation = (cwd, command, commandArgs, owner, kind) => {
-    const value = { cwd: resolve(repoRoot, cwd), command, args: commandArgs, env, owner, kind };
+  const operation = (cwd, command, commandArgs, owner, kind, validation = kind === 'test') => {
+    const value = { cwd: resolve(repoRoot, cwd), command, args: commandArgs, env, owner, kind, validation };
     return { ...value, key: operationKey(value) };
   };
   const walk = (name, dir, scripts, extraArgs = []) => {
@@ -93,9 +93,11 @@ export function planScript(repoRoot, workspaces, scriptName, { args = [], env = 
     if (typeof scripts[name] !== 'string') throw new Error(`Missing npm script: ${id}`);
     // Builds, generators and lifecycle scripts may mutate the inputs of earlier
     // tests. Keep them as barriers; do not reuse test evidence across them.
-    const kind = name.startsWith('test')
+    const kind = name.startsWith('test') || name.startsWith('bridge:verify:')
       ? 'test' : name === 'typecheck' ? 'prepare' : 'barrier';
-    const opaque = () => [operation(dir, 'npm', ['run', name, '--silent', ...(extraArgs.length ? ['--', ...extraArgs] : [])], id, 'barrier')];
+    // Cache invalidation and assertion evidence are separate: an opaque test
+    // still needs strict execution evidence, while a silent build does not.
+    const opaque = () => [operation(dir, 'npm', ['run', name, '--silent', ...(extraArgs.length ? ['--', ...extraArgs] : [])], id, 'barrier', kind === 'test')];
     const segments = tokenizeCommands(scripts[name]);
     if (scripts[`pre${name}`] || scripts[`post${name}`] || !segments
       || (extraArgs.length > 0 && segments.length !== 1) || kind === 'barrier') return opaque();

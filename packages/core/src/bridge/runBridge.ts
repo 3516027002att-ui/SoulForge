@@ -19,6 +19,7 @@ import {
   createBridgeTransportTimingCollector,
   type BridgeTransportTimingCollector
 } from './bridgeTransportTiming.js';
+import { prepareBridgeSourceBuild } from './bridgeSourceBuild.js';
 
 export type BridgeCommand = Exclude<BridgeCommandName, 'capabilities' | 'health'>;
 
@@ -112,6 +113,7 @@ interface BridgeLaunch {
   args: string[];
   cwd?: string;
   packaged?: boolean;
+  sourceBuildArgs?: string[];
 }
 
 /**
@@ -266,6 +268,15 @@ async function runBridgeWithPool<T = unknown>(
   let leasedClient: BridgeDaemonClient | undefined;
   let acquiredLease: BridgeClientLease | undefined;
   try {
+    if (launch.sourceBuildArgs) {
+      await prepareBridgeSourceBuild({
+        executable: launch.executable,
+        args: launch.sourceBuildArgs,
+        cwd: dirname(bridgeProjectPath),
+        ...(options.signal ? { signal: options.signal } : {}),
+        ...(options.onProgress ? { onProgress: options.onProgress } : {})
+      });
+    }
     const poolScope = transportTiming?.begin('poolAcquireMs') ?? null;
     const lease = await getOrCreateClient(poolKey, {
       executable: launch.executable,
@@ -768,6 +779,11 @@ function resolveBridgeLaunch(
 
   return {
     executable: resolveDotnetPath(options.dotnetPath),
+    ...(linuxX64 ? { sourceBuildArgs: [
+      'build', bridgeProjectPath, '--runtime', runtimeIdentifier,
+      '-p:SelfContained=false', '-p:PublishSingleFile=false',
+      '-p:UseSharedCompilation=false', '--disable-build-servers', '-nodeReuse:false', '--nologo'
+    ] } : {}),
     args: [
       'run', '--project', bridgeProjectPath, '--no-launch-profile',
       ...(linuxX64 ? [

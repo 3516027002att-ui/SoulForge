@@ -9,7 +9,7 @@ import vm from 'node:vm';
 import { describe, it } from 'node:test';
 import { transformSync } from 'esbuild';
 
-const source = readFileSync(new URL('../apps/desktop/src/renderer/src/workbench/WorkbenchLayout.tsx', import.meta.url), 'utf8');
+const source = readFileSync(new URL('../apps/desktop/src/renderer/src/workbench/WorkbenchLayout.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 function section(start, end) {
   const from = source.indexOf(start);
   const to = source.indexOf(end, from);

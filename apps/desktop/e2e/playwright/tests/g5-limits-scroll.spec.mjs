@@ -81,9 +81,9 @@ test('ESD 长列表：260 个状态组全量渲染，栏可滚到最后一条，
   const { app, window } = await launchApp();
   await openWorkspace(window);
   await openEsdFile(window);
-  await expect(window.getByLabel('Behavior 工作台')).toBeVisible();
+  await expect(window.getByLabel('行为工作台')).toBeVisible();
 
-  const left = window.getByRole('region', { name: 'Files / Machines / States' });
+  const left = window.getByRole('region', { name: '文件 / 状态机 / 状态' });
   const body = left.locator('.workbench__column-body');
 
   // 1) 无截断说明。

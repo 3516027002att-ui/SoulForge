@@ -4,6 +4,7 @@ import React, { act } from 'react';
 import TestRenderer, { type ReactTestRenderer } from 'react-test-renderer';
 import type { AnalyzeWorkspaceSummary, RendererWorkspaceScanResult } from '../../../main/ipc.js';
 import { useWorkspaceController, type WorkspaceController, type WorkspaceOptions } from './useWorkspaceController.js';
+import { useChangeOperationsController, type ChangeOperationsController, type ChangeOperationsOptions } from './useChangeOperationsController.js';
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const mounted: ReactTestRenderer[] = [];
 afterEach(async () => { while (mounted.length) { const renderer = mounted.pop()!; await act(async () => renderer.unmount()); } });
@@ -31,6 +32,57 @@ function ports() {
   onSearchActivated: () => { searches++; }, onAnalysisLoaded: value => analyses.push(value), refreshOperationHistory: async () => { histories++; } };
   return { options, scans, installations, remounts, remountArgs, statuses, toasts, desktop, analyses, histories: () => histories, searches: () => searches };
 }
+async function mountWorkspaceAndHistory(options: WorkspaceOptions, oldAnalysis?: ReturnType<typeof deferred<AnalyzeWorkspaceSummary>>) {
+  let workspace!: WorkspaceController;
+  let changes!: ChangeOperationsController;
+  let reads = 0;
+  function Host() {
+    const changeCommands = React.useRef<ChangeOperationsController | null>(null);
+    workspace = useWorkspaceController({ ...options,
+      onWorkspaceInstalled: () => changeCommands.current?.resetChangeWorkspaceState(),
+      refreshOperationHistory: async () => changeCommands.current?.refreshOperationHistory() });
+    const changeOptions: ChangeOperationsOptions = {
+      bridge: { listOperations: async () => { reads++; return [{ opId: 'current-history', title: 'owned', author: 'user',
+        mode: 'normal', status: 'committed', createdAt: 'now', fileCount: 0, changedPaths: [] }]; },
+        rollbackOperation: async () => { throw new Error('not used'); }, rollbackFile: async () => { throw new Error('not used'); },
+        applyParamMutation: async () => { throw new Error('not used'); } },
+      workspace: workspace.workspace, selectedFile: null, editDirty: false, fmgSourceHash: null, paramSourceHash: null,
+      applyTextResourceAndReload: async () => { throw new Error('not used'); },
+      applyFmgMutationAndReload: async () => { throw new Error('not used'); },
+      applyParamFieldMutationFromPanel: async () => { throw new Error('not used'); }, reloadParamRowsFromSource: async () => {},
+      onRollbackCommitted: async () => {}, setStatus: options.setStatus, pushToast: options.pushToast,
+      announceDesktopOnly: options.announceDesktopOnly, describeBridgeAbsence: () => 'unavailable'
+    };
+    // Production's bridge identity is stable across renders.
+    const historyBridge = React.useRef(changeOptions.bridge).current;
+    changes = useChangeOperationsController({ ...changeOptions, bridge: historyBridge });
+    changeCommands.current = changes;
+    return <span>{workspace.workspace?.workspaceSessionId}:{changes.lastOperation?.opId}</span>;
+  }
+  if (oldAnalysis) options.bridge!.analyzeWorkspace = () => oldAnalysis.promise;
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<Host />); });
+  mounted.push(renderer);
+  return { workspace: () => workspace, changes: () => changes, reads: () => reads };
+}
+it('an immediately completed workspace analysis loads real history after the new change owner is admitted', async () => {
+  const p = ports(), h = await mountWorkspaceAndHistory(p.options);
+  await act(async () => h.workspace().mountWorkspace('instant', undefined, 'manual'));
+  assert.equal(h.reads(), 1);
+  assert.equal(h.changes().lastOperation?.opId, 'current-history');
+  assert.equal(h.workspace().analysis, analysis);
+});
+it('late analysis from a replaced mount cannot refresh history in the newly admitted workspace', async () => {
+  const p = ports(), old = deferred<AnalyzeWorkspaceSummary>(), h = await mountWorkspaceAndHistory(p.options, old);
+  await act(async () => h.workspace().mountWorkspace('old', undefined, 'manual'));
+  p.options.bridge!.analyzeWorkspace = async () => analysis;
+  await act(async () => h.workspace().mountWorkspace('new', undefined, 'manual'));
+  assert.equal(h.reads(), 1);
+  await act(async () => old.resolve({ ...analysis, parsedFiles: 999 }));
+  assert.equal(h.reads(), 1);
+  assert.equal(h.workspace().workspace?.workspaceSessionId, 'new');
+  assert.equal(h.workspace().analysis?.parsedFiles, analysis.parsedFiles);
+});
 async function mount(options: WorkspaceOptions) {
   let current!: WorkspaceController;
   function Host({ options }: { options: WorkspaceOptions }) { current = useWorkspaceController(options); return <span>{current.workspace?.workspaceLabel}</span>; }

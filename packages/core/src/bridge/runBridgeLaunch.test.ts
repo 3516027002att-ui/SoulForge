@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -39,6 +40,7 @@ describe('Bridge launch selection on a Linux host', { skip: process.platform !==
     const root = join(scratch, label);
     const project = join(root, 'bridge', 'SoulForge.Bridge', 'SoulForge.Bridge.csproj');
     const receipt = join(root, 'launch.json');
+    const buildReceipt = join(root, 'build.json');
     const source = join(root, 'sample.bin');
     await mkdir(dirname(project), { recursive: true });
     await writeFile(project, '<Project Sdk="Microsoft.NET.Sdk" />');
@@ -50,7 +52,9 @@ describe('Bridge launch selection on a Linux host', { skip: process.platform !==
 
     const executable = async (path: string, marker: string) => {
       await mkdir(dirname(path), { recursive: true });
-      await writeFile(path, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ marker: ${JSON.stringify(marker)}, args: process.argv.slice(2) }));\nprocess.exit(1);\n`);
+      const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+      const script = `const args = process.argv.slice(1); const build = args[0] === 'build'; require('node:fs').writeFileSync(build ? ${JSON.stringify(buildReceipt)} : ${JSON.stringify(receipt)}, JSON.stringify({ marker: ${JSON.stringify(marker)}, args })); if (build) console.log('compiler output is not NDJSON'); process.exit(build ? 0 : 1);`;
+      await writeFile(path, `#!/bin/sh\nexec ${quote(process.execPath)} --input-type=commonjs -e ${quote(script)} "$@"\n`);
       await chmod(path, 0o755);
       return path;
     };
@@ -86,7 +90,11 @@ describe('Bridge launch selection on a Linux host', { skip: process.platform !==
       await assert.rejects(readFile(receipt), { code: 'ENOENT' });
       return undefined;
     }
-    return JSON.parse(await readFile(receipt, 'utf8')) as { marker: string; args: string[] };
+    assert.ok(existsSync(receipt), JSON.stringify(result.diagnostics));
+    const recorded = JSON.parse(await readFile(receipt, 'utf8')) as { marker: string; args: string[]; buildArgs?: string[] };
+    try { recorded.buildArgs = JSON.parse(await readFile(buildReceipt, 'utf8')).args; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    return recorded;
   }
 
   for (const nativeBuild of ['publish', 'release', 'debug'] as const) {
@@ -103,6 +111,9 @@ describe('Bridge launch selection on a Linux host', { skip: process.platform !==
     assert.equal(args[args.indexOf('--runtime') + 1], 'linux-x64');
     assert.ok(args.includes('-p:SelfContained=false'));
     assert.ok(args.includes('-p:PublishSingleFile=false'));
+    assert.equal(actual.buildArgs?.[0], 'build');
+    assert.ok(actual.buildArgs?.includes('linux-x64'));
+    assert.ok(actual.buildArgs?.includes('--disable-build-servers'));
     assert.deepEqual(args.slice(-2), ['--', 'daemon']);
   });
   it('does not compile or restore while starting the Linux NDJSON daemon', async () => {

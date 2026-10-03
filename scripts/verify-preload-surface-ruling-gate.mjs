@@ -27,6 +27,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { rendererIdentifiers } from './contract/rendererSourceAnalysis.mjs';
 
 const LABEL = 'preload-surface-ruling';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -70,6 +71,14 @@ const RULED_FAMILY = Object.freeze({
   'format-read-primitive': [
     'readFmgPage', 'readFlverTextureSlots',
   ],
+  'compat-read-primitive': [
+    'readRawMetadata', 'scriptContainerEvidence', 'readScriptEntryPlaintext',
+    'readMapPartMesh', 'resolveChrbndPreview', 'readParamPage',
+  ],
+  'compat-semantic-write': ['applyEmevdMutation', 'applyMsbMutation'],
+  'first-party-metadata-compat': ['getParamMetadataTrustState', 'setParamMetadataTrust'],
+  'agent-backend-primitive': ['buildAiSidebarDraft', 'getMutterStatus', 'embedWorkspaceRag', 'searchWorkspaceEvidence'],
+  'pose-sampling-unverified': ['sampleTaeAnimationPose'],
 });
 
 /**
@@ -90,6 +99,59 @@ const RULED_FAMILY = Object.freeze({
  * 会报 PRELOAD_RULING_FAMILY_ORPHAN / PRELOAD_RULING_FAMILY_MISSING。
  */
 const RULED_NOT_YET_WIRED = Object.freeze({
+  // These retained APIs have no current renderer call. The owner has ruled
+  // their compatibility/backend scope; this records the gap without claiming
+  // that the alternate workflow verifies each primitive or finishes its UI.
+  readRawMetadata:
+    'editors/HexEditorPanel.tsx defines optional onLoadMetadata but callers do not wire it; '
+    + 'TpfWorkbenchPanel.tsx uses readRawRange for bytes. Full raw metadata/hash UI remains unwired; '
+    + 'a future metadata action must connect the bounded reader and display deferred hash diagnostics.',
+  scriptContainerEvidence:
+    'editors/ScriptContainerPanel.tsx uses listScriptContainerEntriesPage for its current catalog; '
+    + 'the lower-level evidence probe remains a compatibility surface. A dedicated evidence action must '
+    + 'display its diagnostics before this method can be called renderer-wired.',
+  readScriptEntryPlaintext:
+    'editors/ScriptContainerPanel.tsx calls readScriptSource, whose result carries encoding/revision identity; '
+    + 'the older plaintext primitive is retained for compatibility and requires its own explicit read-only caller.',
+  applyEmevdMutation:
+    'app/useEventDocumentController.ts submits submitEmevdDslPlan through the typed DSL/native/PatchIR path; '
+    + 'the low-level mutation API is retained, with no current direct UI. Any new caller must preserve that typed validation and transaction boundary.',
+  applyMsbMutation:
+    'editors/MsbScenePanel.tsx calls executeMapTransaction for semantic scene edits; '
+    + 'the older mutation API is retained for compatibility. A direct caller would require the same source revision and transaction checks.',
+  sampleTaeAnimationPose:
+    'editors/TaeWorkbenchPanel.tsx reads readTaeAnimationClip and samples through its renderer clip sampler; '
+    + 'main/services/actionService.ts also exposes the unused pose primitive. Real HKX pose acceptance remains unverified; '
+    + 'a dedicated native pose caller and real-corpus fidelity verification are still required.',
+  readMapPartMesh:
+    'editors/MsbScenePanel.tsx marks readMapPartMesh deprecated and calls readMapStaticGeometry with bounded cursor/session/request state; '
+    + 'the old mesh primitive is retained for compatibility. It needs an explicit bounded caller if reused.',
+  resolveChrbndPreview:
+    'editors/TaeWorkbenchPanel.tsx currently calls readTaeChrbndPreview; main/services/characterPreviewService.ts '
+    + 'retains resolveChrbndPreview as a lower-level resolver. A separate resolver UI must expose diagnostics and stable logical resource identity before wiring.',
+  getParamMetadataTrustState:
+    'main/services/paramService.ts resolves immutable first-party metadata and projects fieldDefsTrusted; '
+    + 'editors/ParamDefPanel.tsx gates on first-party origin. The old trust-state query has no current caller; '
+    + 'a metadata inspection action must preserve the first-party matching authority.',
+  setParamMetadataTrust:
+    'main/services/paramService.ts rejects external schema/trust overrides for production PARAM; '
+    + 'the setter is retained as a compatibility boundary, with no trust-override UI. A future caller cannot bypass immutable first-party validation.',
+  readParamPage:
+    'app/useParamDocumentController.ts calls openParamSession/readParamIndexPage/readParamRows; '
+    + 'main/services/paramService.ts retains readParamPage for compatibility. A dedicated caller must maintain bounded paging and row/source identity checks.',
+  buildAiSidebarDraft:
+    'agent/AgentSessionControls.tsx distinguishes the old plan-draft controls from the real agent; '
+    + 'app/useAgentUiController.ts calls runAiAgent with configured service identity. No draft-generation action is currently wired; '
+    + 'reconnecting it requires an explicit non-agent draft workflow and accurate service labeling.',
+  getMutterStatus:
+    'agent/MutterBanner.tsx calls getMutterNext for the existing banner. The standalone status query has no current caller; '
+    + 'a diagnostic status action must distinguish actual status from delivered banner text.',
+  embedWorkspaceRag:
+    'main/services/semanticRefreshService.ts schedules internal RAG embedding; app/useRuntimeSettingsController.ts '
+    + 'only queries getRagLocalModelStatus. Manual embedding remains unwired and would require asynchronous progress/cancellation plus workspace revision checks.',
+  searchWorkspaceEvidence:
+    'main/services/agentEvidenceService.ts owns the evidence search; app/useAgentUiController.ts requests runAiAgent with useRagSearch. '
+    + 'There is no standalone renderer search action. A new action must preserve source references, scope filtering and bounded evidence reads.',
   // ── editor-document-facade（DOCSTORE-04 typed facade，§14.4）──
   openEditorDocument:
     'DOCSTORE-04 typed DocumentStore facade 已封存，main handler 在 ipc.ts:1479。'
@@ -168,11 +230,11 @@ if (exposed.length === 0) {
 let rendererSources;
 try {
   const files = execSync('git ls-files apps/desktop/src/renderer', { cwd: root, encoding: 'utf8' })
-    .trim().split('\n').filter((line) => line.length > 0);
+    .trim().split('\n').filter((line) => /\.(?:ts|tsx|js|jsx)$/.test(line) && !/\.(?:test|fixture)\./.test(line));
   if (files.length === 0) throw new Error('renderer 文件列表为空');
   // 每个文件独立剥离，避免一个文件内的引号/模板字面量状态跨文件吞掉后续
   // renderer。源码文本仍用于同一套词法剥离规则，边界只负责防止误入状态泄漏。
-  rendererSources = files.map((file) => readFileSync(join(root, file), 'utf8'));
+  rendererSources = files.map((file) => ({ file, source: readFileSync(join(root, file), 'utf8') }));
 } catch (error) {
   report({
     ok: false, gate: LABEL, status: 'failed', code: 'RENDERER_SOURCE_UNREADABLE',
@@ -197,88 +259,8 @@ try {
  * 漏判引用（判成未接线 → 要求登记），那是安全方向；剥不足会造成误判已接线，
  * 所以宁可多剥。
  */
-function stripCommentsAndStrings(source) {
-  let out = '';
-  let i = 0;
-  const n = source.length;
-  while (i < n) {
-    const c = source[i];
-    const next = source[i + 1];
-    // 行注释
-    if (c === '/' && next === '/') {
-      while (i < n && source[i] !== '\n') i += 1;
-      continue;
-    }
-    // 块注释
-    if (c === '/' && next === '*') {
-      i += 2;
-      while (i < n && !(source[i] === '*' && source[i + 1] === '/')) i += 1;
-      i += 2;
-      continue;
-    }
-    /*
-     * 字符串与模板字面量。模板串里的 ${...} 是真代码，保留其内容。
-     *
-     * ── 单/双引号不得跨行(2026-08-10 修)──
-     *
-     * 此前不设行边界，于是**正则字面量里的引号**会被当成字符串开头。实测
-     * threeSceneController.ts:695 有 `/(?:^|["'\s])…/` —— 字符类里的 `"`
-     * 让剥离器进入「字符串中」状态直到文件末尾都找不到配对，
-     * 结果把该文件之后拼接的**所有** renderer 文件内容一并吞掉。
-     *
-     * 后果是静默漏判：`git ls-files` 按字典序拼接，排在 scene/ 之后的
-     * staging/、utils/、workbench/ 里的任何接线都看不见，于是已接线的方法被
-     * 判成「renderer 零引用」，判据 1 逼人去登记一个其实已经用上的方法。
-     * 实测正是这样发现的 —— ParamWorkbench 里 4 处真实调用命中数为 0。
-     *
-     * 真代码里的单/双引号字符串不跨物理行（跨行要用模板串或显式续行）。
-     * 因此遇到换行即判定为「误入」，回退到把这个引号当普通字符：宁可少剥
-     * （可能漏判引用 → 要求登记，安全方向），也不能让一个引号吞掉半个代码库。
-     */
-    if (c === '"' || c === "'" || c === '`') {
-      const quote = c;
-      if (quote !== '`') {
-        const lineEnd = source.indexOf('\n', i + 1);
-        const closing = source.indexOf(quote, i + 1);
-        if (closing < 0 || (lineEnd >= 0 && closing > lineEnd)) {
-          // 本行内找不到配对：不是字符串（极可能是正则字符类里的引号）。
-          out += c;
-          i += 1;
-          continue;
-        }
-      }
-      i += 1;
-      while (i < n && source[i] !== quote) {
-        if (source[i] === '\\') { i += 2; continue; }
-        if (quote === '`' && source[i] === '$' && source[i + 1] === '{') {
-          let depth = 1;
-          i += 2;
-          const start = i;
-          while (i < n && depth > 0) {
-            if (source[i] === '{') depth += 1;
-            else if (source[i] === '}') depth -= 1;
-            if (depth > 0) i += 1;
-          }
-          out += ` ${source.slice(start, i)} `;
-          i += 1;
-          continue;
-        }
-        i += 1;
-      }
-      i += 1;
-      out += ' ';
-      continue;
-    }
-    out += c;
-    i += 1;
-  }
-  return out;
-}
-
-const rendererCode = rendererSources.map((source) => stripCommentsAndStrings(source)).join('\n');
-const referenced = new Set(
-  exposed.filter((name) => new RegExp(`\\b${name}\\b`).test(rendererCode))
-);
+const rendererNames = new Set(rendererSources.flatMap(({ file, source }) => [...rendererIdentifiers(source, file)]));
+const referenced = new Set(exposed.filter((name) => rendererNames.has(name)));
 const orphaned = exposed.filter((name) => !referenced.has(name));
 
 const findings = [];

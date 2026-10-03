@@ -11,6 +11,7 @@ export function selectCheckTier(name, sources, requirements) {
   if (/^(?:test:)?(?:release|installer|portable-packaging|cross-machine)/u.test(name)
     || paths.some(path => /\/(?:verify-(?:release|installer|portable-packaging|cross-machine)|run(?:Release|Installer))[^/]*\./u.test(path))) return 'release';
   if (paths.some(path => /\/scripts\/(?:check\.fixture|verify-(?:verify-entrypoint|scheduling|ci-change-scope)-fixtures)\.mjs$/u.test(path))) return 'governance';
+  if (requirements.includes('packaged-app')) return 'release';
   if (requirements.includes('native-env')) return 'native';
   if (requirements.includes('dotnet')) return 'synthetic';
   return 'unit';
@@ -24,7 +25,7 @@ function testFiles(root) {
       if (['node_modules','dist','.git','output','bin','obj','.local-validation'].includes(item.name)) continue;
       const path = resolve(directory,item.name);
       if (item.isDirectory()) walk(path);
-      else if (/\.(?:fixture|test)\.(?:mjs|ts)$/u.test(item.name) || /^verify-.*fixtures\.mjs$/u.test(item.name)
+      else if (/\.(?:fixture|test)\.(?:mjs|tsx?)$/u.test(item.name) || /^verify-.*fixtures\.mjs$/u.test(item.name)
         || /^run.*Smoke\.ts$/u.test(item.name)) files.push(path);
     }
   };
@@ -70,6 +71,16 @@ export function discoverChecks(repoRoot, workspaces) {
     const path = relative(repoRoot,file).replaceAll('\\','/');
     const analysis = analyze(file);
     const name = `file:${path}`;
+    // Desktop TypeScript is noEmit. Its source runner bundles every main and
+    // renderer test (including TSX) and reports the actual assertions. Keep
+    // each file selectable while reusing that identical completed operation.
+    if (/^apps\/desktop\/src\/(?:main\/|renderer\/src\/).*\.test\.tsx?$/u.test(path)
+      && existsSync(resolve(repoRoot, 'scripts/run-renderer-unit-tests.mjs'))) {
+      const operation = {cwd:resolve(repoRoot),command:'node',args:['scripts/run-renderer-unit-tests.mjs'],kind:'test',validation:true,env:{},owner:name};
+      suites.set(name,{scriptName:name,tier:selectCheckTier(name,[file],analysis.requirements),
+        requirements:analysis.requirements,steps:[{...operation,key:operationKey(operation)}],origin:'file',source:path});
+      continue;
+    }
     const workspaceDir = file.endsWith('.ts') ? [...workspaces.byDir.keys()].find(dir => path.startsWith(`${dir}/src/`)) : undefined;
     const executionPath = workspaceDir ? path.replace(`${workspaceDir}/src/`,`${workspaceDir}/dist/`).replace(/\.ts$/u,'.js') : path;
     const isNodeTest = /\.(?:fixture|test)\./u.test(path);

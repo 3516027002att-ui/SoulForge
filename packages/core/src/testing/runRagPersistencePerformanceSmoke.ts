@@ -638,7 +638,9 @@ function assertFtsRowidMigration(workspaceRoot: string): void {
   const workspaceId = 'rag-persistence-legacy-rowid';
   const chunk = makeChunk(1);
   let legacyMainRowId = 0;
-  const legacy = openMigratedDatabase(databasePath, SQLITE_MIGRATIONS.slice(0, -1));
+  // This fixture exercises migration 15, regardless of migrations added later.
+  const legacyMigrations = SQLITE_MIGRATIONS.filter((migration) => migration.id < 15);
+  const legacy = openMigratedDatabase(databasePath, legacyMigrations);
   try {
     const now = new Date().toISOString();
     legacy.prepare(`
@@ -677,7 +679,7 @@ function assertFtsRowidMigration(workspaceRoot: string): void {
   // pre-existing temporary table makes migration 15 fail before it can drop
   // either authoritative virtual table; the next legacy open proves the
   // migration ledger and historical rowids are still intact.
-  const rollbackSetup = openMigratedDatabase(databasePath, SQLITE_MIGRATIONS.slice(0, -1));
+  const rollbackSetup = openMigratedDatabase(databasePath, legacyMigrations);
   rollbackSetup.exec(`
     CREATE TABLE rag_chunks_fts_rowid_v15 (rowid INTEGER, chunk_id TEXT);
   `);
@@ -690,7 +692,7 @@ function assertFtsRowidMigration(workspaceRoot: string): void {
     migrationFailed = true;
   }
   if (!migrationFailed) throw new Error('FTS rowid migration did not fail closed on a conflicting temp table.');
-  const rolledBack = openMigratedDatabase(databasePath, SQLITE_MIGRATIONS.slice(0, -1));
+  const rolledBack = openMigratedDatabase(databasePath, legacyMigrations);
   try {
     const rolledBackIndexes = rolledBack.prepare("PRAGMA index_list('rag_chunks')").all() as Array<{ name?: unknown }>;
     if (rolledBackIndexes.some((index) => index.name === 'idx_rag_chunks_workspace_chunk')) {
@@ -712,7 +714,7 @@ function assertFtsRowidMigration(workspaceRoot: string): void {
   // Also fail after the first virtual table has been rebuilt.  This proves
   // that a later trigram-stage error rolls back the earlier Unicode rename,
   // the lookup index, and the migration ledger as one transaction.
-  const secondStageSetup = openMigratedDatabase(databasePath, SQLITE_MIGRATIONS.slice(0, -1));
+  const secondStageSetup = openMigratedDatabase(databasePath, legacyMigrations);
   secondStageSetup.exec(`
     CREATE TABLE rag_chunks_fts_trigram_rowid_v15 (rowid INTEGER, chunk_id TEXT);
   `);
@@ -727,7 +729,7 @@ function assertFtsRowidMigration(workspaceRoot: string): void {
   if (!secondStageMigrationFailed) {
     throw new Error('FTS rowid migration did not fail closed at the trigram stage.');
   }
-  const secondStageRolledBack = openMigratedDatabase(databasePath, SQLITE_MIGRATIONS.slice(0, -1));
+  const secondStageRolledBack = openMigratedDatabase(databasePath, legacyMigrations);
   try {
     const secondStageIndexes = secondStageRolledBack.prepare("PRAGMA index_list('rag_chunks')")
       .all() as Array<{ name?: unknown }>;

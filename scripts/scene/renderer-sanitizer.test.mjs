@@ -72,7 +72,7 @@ test('sensitive fields are removed and source text remains distinct from diagnos
   assert.equal(JSON.stringify(input), before);
 });
 
-test('shared path masking and existing logical URI/POSIX string behavior are preserved', () => {
+test('physical Windows and POSIX paths are masked while logical and relative addresses survive', () => {
   for (const [value, expected] of [
     ['目标 D:\\游戏\\mods\\a.fmg。请重试', '目标 [本机路径已隐藏]。请重试'],
     ['占用（\\\\?\\UNC\\host\\share\\b.fmg）', '占用（[本机路径已隐藏]）'],
@@ -80,7 +80,11 @@ test('shared path masking and existing logical URI/POSIX string behavior are pre
     ['FILE:///d:/game/a.fmg', '[本机路径已隐藏]'],
     ['file://map/logical.msb', 'file://map/logical.msb'],
     ['file:///workspace/a.fmg', 'file:///workspace/a.fmg'],
-    ['/owned/example', '/owned/example'],
+    ['/owned/example', '[本机路径已隐藏]'],
+    ['file://localhost/home/user/a.fmg', '[本机路径已隐藏]'],
+    ['file://D:/Users/user/a.fmg', '[本机路径已隐藏]'],
+    ['relative/example', 'relative/example'],
+    ['https://example.com/docs/a', 'https://example.com/docs/a'],
     ['ordinary', 'ordinary'], ['', '']
   ]) assert.equal(api.sanitizeRendererValue({ message: value }).message, expected);
 });

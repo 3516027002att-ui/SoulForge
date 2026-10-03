@@ -133,7 +133,10 @@ test('reader rejects mutation and restart reopens both connections after writer 
   assert.equal(failure.code, 'DATABASE_UTILITY_OUTCOME_UNKNOWN');
   assert.equal(failure.transaction.opId, 'slow-op');
   release(control);
+  assert.equal((await client.reader.health()).ready, true, 'reader remains independently available');
+  await assert.rejects(client.health(), /数据库后台进程不可用/);
   await client.restart();
+  assert.equal((await client.health()).ready, true, 'restart restores writer readiness');
   assert.equal(await client.get('slow-op'), undefined);
   await client.record({ ...operation(workspaceId), opId: 'restarted-op' });
   assert.equal((await client.get('restarted-op')).status, 'committed');
@@ -144,4 +147,16 @@ test('writer initializes generation zero before the read-only snapshot connectio
   const snapshot = await client.loadKnowledgeSnapshot({ workspaceId, rootPath: client.activeWorkspace.rootPath, game: 'sekiro' });
   assert.ok(snapshot?.current, 'initial knowledge generation must be durably queryable');
   assert.equal(snapshot.generations.length, 1);
+});
+
+test('reader exit keeps committed history, RAG and knowledge reads available through the writer', async t => {
+  const { client, workspaceId, children } = await setup(t);
+  await client.record({ ...operation(workspaceId), opId: 'committed-before-reader-exit' });
+  await children[1].terminate();
+  assert.equal((await client.health()).ready, true);
+  assert.equal((await client.get('committed-before-reader-exit')).status, 'committed');
+  assert.deepEqual(await client.forWorkspace(workspaceId).loadRagChunks(), []);
+  assert.ok((await client.loadKnowledgeSnapshot({ workspaceId, rootPath: client.activeWorkspace.rootPath, game: 'sekiro' }))?.current);
+  await client.record({ ...operation(workspaceId), opId: 'written-after-reader-exit' });
+  assert.equal((await client.get('written-after-reader-exit')).status, 'committed');
 });

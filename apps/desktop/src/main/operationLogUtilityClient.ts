@@ -558,7 +558,9 @@ export class OperationLogUtilityClient implements OperationLogStore {
     method: Method,
     payload: OperationLogUtilityPayloadMap[Method]
   ): Promise<OperationLogUtilityResultMap[Method]> {
-    if (this.role === 'writer' && this.reader && isDatabaseReadMethod(method)) return this.reader.request(method, payload);
+    // Health is specific to the owning process. A live reader cannot prove
+    // that this writer is still available after an unknown write outcome.
+    if (this.role === 'writer' && this.reader?.process && method !== 'health' && isDatabaseReadMethod(method)) return this.reader.request(method, payload);
     const child = this.process;
     if (!child) return Promise.reject(new Error('数据库后台进程不可用。'));
     return this.requestOn(child, method, payload);

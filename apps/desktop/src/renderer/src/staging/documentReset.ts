@@ -182,6 +182,7 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   setChangeResetEpoch: '暂存/历史命令的工作区归属代次，由 workspace 安装废弃旧未开始请求，不是资源文档内容',
   setRollbackInFlight: '回滚请求锁由回滚函数的 finally 清理，不属于资源文档态',
   setAnalysis: '索引摘要，openWorkspace 自己赋值',
+  setAnalysisRequest: '工作区安装后的后台分析请求；由 mountWorkspace 替换，mount generation、bridge lifetime、session identity 和 effect cleanup 拒绝旧任务，切换资源选择无需复位',
   setTools: 'AI 工具清单，与资源无关',
   setSelectedFile: '选中文件本身，不是文档态',
   setPreview: '通用预览，非资源族专属',

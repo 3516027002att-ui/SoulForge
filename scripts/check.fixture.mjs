@@ -279,3 +279,89 @@ test('failed aggregate does not hide reachable workspace-tail tests from indepen
     assert.ok(report.results.some(r=>r.scriptName === 'workspace:@test/a:test:tail' && r.status==='passed'),JSON.stringify(report.results));
   }finally{rmSync(root,{recursive:true,force:true});}
 });
+
+test('desktop noEmit tests retain independently selectable entries routed through the actual source runner', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const registry = discoverChecks(root, loadWorkspaces(root));
+  const renderer = registry.get('test:renderer-unit');
+  assert.ok(renderer);
+  for (const source of [
+    'apps/desktop/src/main/pathSanitizerConsistency.test.ts',
+    'apps/desktop/src/renderer/src/theme/editorWelcome.test.ts',
+    'apps/desktop/src/renderer/src/editors/TaeWorkbenchPanel.test.tsx'
+  ]) {
+    const entry = registry.get(`file:${source}`);
+    assert.ok(entry, source);
+    assert.equal(entry.buildInput, undefined, source);
+    assert.deepEqual(entry.steps.map(step => step.key), renderer.steps.map(step => step.key), source);
+    assert.ok(entry.steps.some(step => step.args.includes('scripts/run-renderer-unit-tests.mjs')), source);
+  }
+});
+
+test('a silent successful build cannot make executed assertion steps unavailable', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sf-check-silent-build-'));
+  try {
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: {
+      build: 'node build.mjs', 'test:assertion': 'npm run build && node assertion.mjs'
+    } }));
+    writeFileSync(join(root, 'build.mjs'), 'process.exitCode = 0;');
+    writeFileSync(join(root, 'assertion.mjs'), 'console.log(JSON.stringify({ok:true, assertions:1}));');
+    const result = spawnSync(process.execPath, [runner, '--suite', 'test:assertion', '--require-executed'], {cwd:root, encoding:'utf8'});
+    const report = JSON.parse(result.stdout);
+    assert.equal(result.status, 0, JSON.stringify(report));
+    assert.equal(report.results[0].status, 'passed');
+    assert.deepEqual(report.results[0].skippedLegs, []);
+    assert.equal(report.completionVerified, true);
+    writeFileSync(join(root, 'build.mjs'), 'process.exitCode = 9;');
+    const failed = spawnSync(process.execPath, [runner, '--suite', 'test:assertion'], {cwd:root, encoding:'utf8'});
+    const failedReport = JSON.parse(failed.stdout);
+    assert.equal(failed.status, 1);
+    assert.equal(failedReport.results[0].status, 'failed');
+    assert.equal(failedReport.results[0].steps.length, 1, 'a failed preparation keeps the assertion tail unexecuted');
+  } finally { rmSync(root, {recursive:true, force:true}); }
+});
+
+test('opaque test commands keep strict skip and empty-output semantics despite being cache barriers', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sf-check-opaque-assertions-'));
+  try {
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: {
+      'pretest:opaque': 'node before.mjs', 'test:opaque': 'node assertion.mjs',
+      'prebridge:verify:opaque': 'node before.mjs', 'bridge:verify:opaque': 'node assertion.mjs'
+    } }));
+    writeFileSync(join(root, 'before.mjs'), 'process.exitCode = 0;');
+    for (const body of ['', 'console.log(JSON.stringify({status:"skipped",reason:"missing native fixture"}));']) {
+      writeFileSync(join(root, 'assertion.mjs'), body);
+      for (const suite of ['test:opaque', 'bridge:verify:opaque']) {
+        const result = spawnSync(process.execPath, [runner, '--suite', suite, '--require-executed'], {cwd:root, encoding:'utf8'});
+        const report = JSON.parse(result.stdout);
+        assert.equal(result.status, 1, suite);
+        assert.equal(report.results[0].status, 'unavailable', suite);
+        assert.equal(report.completionVerified, false, suite);
+      }
+    }
+  } finally { rmSync(root, {recursive:true, force:true}); }
+});
+
+test('native oracle inputs and packaged payload reads determine their tiers without named check rows', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sf-check-input-tiers-'));
+  try {
+    mkdirSync(join(root, 'scripts'), {recursive:true});
+    writeFileSync(join(root, 'package.json'), JSON.stringify({scripts:{
+      'test:any-capture': 'node scripts/capture.test.mjs',
+      'test:any-native-source': 'node scripts/action.test.mjs',
+      'test:any-product-oracle': 'node scripts/product.test.mjs',
+      'test:any-payload': 'node scripts/payload.test.mjs'
+    }}));
+    writeFileSync(join(root, 'scripts/capture.test.mjs'), 'console.log(process.env.SOULFORGE_MSB_FIELDS);');
+    writeFileSync(join(root, 'scripts/action.test.mjs'), 'console.log(process.env.SF_REAL_TAE_SOURCE);');
+    writeFileSync(join(root, 'scripts/product.test.mjs'), 'import {readFileSync} from "node:fs"; readFileSync(`${process.env.SOULFORGE_TPF_PRODUCT_ROOT}/apps/desktop/out/main/index.js`);');
+    writeFileSync(join(root, 'scripts/payload.test.mjs'), 'import {readFileSync} from "node:fs"; readFileSync("apps/desktop/release/win-unpacked/resources/app.asar");');
+    const registry = discoverChecks(root, loadWorkspaces(root));
+    for (const name of ['test:any-capture', 'test:any-native-source', 'test:any-product-oracle']) {
+      assert.equal(registry.get(name).tier, 'native', name);
+      assert.ok(registry.get(name).requirements.includes('native-env'), name);
+    }
+    assert.equal(registry.get('test:any-payload').tier, 'release');
+    assert.ok(registry.get('test:any-payload').requirements.includes('packaged-app'));
+  } finally { rmSync(root, {recursive:true, force:true}); }
+});

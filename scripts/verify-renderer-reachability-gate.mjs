@@ -32,8 +32,8 @@
  * 已裁定条目写在 RULED 里，每条必须写明依据与解除条件；空理由等于「先放着」，
  * 而那正是本门禁要消除的状态。
  */
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const LABEL = 'renderer-reachability';
@@ -95,11 +95,17 @@ if (!existsSync(APP)) {
   }, 1);
 }
 
-const source = readFileSync(APP, 'utf8');
+// App delegates its views and document controllers to app/. Scan those real
+// production modules too; tests and synthetic renderer inputs cannot prove UI wiring.
+const appRoot = join(dirname(APP), 'app');
+const sources = [APP, ...readdirSync(appRoot)
+  .filter((name) => /\.(?:ts|tsx)$/.test(name) && !/\.(?:test|fixture)\./.test(name))
+  .sort().map((name) => join(appRoot, name))]
+  .map((path) => ({ path, source: readFileSync(path, 'utf8') }));
 
 /** 已知的空常量名（在 App.tsx 顶部定义、内容为空的那些）。 */
 const emptyConstNames = new Set(
-  [...source.matchAll(/^const (EMPTY_[A-Z0-9_]+)[^=]*=\s*(\[\]|\{)/gm)].map((m) => m[1])
+  sources.flatMap(({ source }) => [...source.matchAll(/^const (EMPTY_[A-Z0-9_]+)[^=]*=\s*(\[\]|\{)/gm)].map((m) => m[1]))
 );
 if (emptyConstNames.size === 0) {
   report({
@@ -122,17 +128,18 @@ const findings = [];
 
 // 形态 A：三元 props，两个分支都不可用。
 // 只匹配单行、无嵌套三元的简单形态——复杂表达式交给人读，不做启发式猜测。
-const ternaryProps = [...source.matchAll(
+const ternaryProps = sources.flatMap(({ path, source }) => [...source.matchAll(
   /^\s*([a-zA-Z][\w]*)=\{([^{}?]+)\?([^{}:?]+):([^{}?]+)\}\s*$/gm
-)];
+)].map((match) => Object.assign(match, { source, path })));
 for (const match of ternaryProps) {
   const [, prop, , left, right] = match;
   if (!isUnusable(left) || !isUnusable(right)) continue;
-  const line = source.slice(0, match.index).split('\n').length;
+  const line = match.source.slice(0, match.index).split('\n').length;
   if (prop in RULED) continue;
   findings.push({
     code: 'RENDERER_PROP_UNREACHABLE_BOTH_BRANCHES',
     prop,
+    file: relative(root, match.path),
     line,
     message: `${prop} 的三元表达式两个分支都是不可用值（${left.trim()} / ${right.trim()}）。`
       + ' 无论走哪支，接收该 prop 的面板都拿不到数据，功能对用户不可达。'
@@ -141,14 +148,16 @@ for (const match of ternaryProps) {
 }
 
 // 形态 B：恒定传字面空值。
-const constProps = [...source.matchAll(/^\s*([a-zA-Z][\w]*)=\{(null|\[\s*\])\}\s*$/gm)];
+const constProps = sources.flatMap(({ path, source }) => [...source.matchAll(/^\s*([a-zA-Z][\w]*)=\{(null|\[\s*\])\}\s*$/gm)]
+  .map((match) => Object.assign(match, { source, path })));
 for (const match of constProps) {
   const [, prop, value] = match;
   if (prop in RULED) continue;
-  const line = source.slice(0, match.index).split('\n').length;
+  const line = match.source.slice(0, match.index).split('\n').length;
   findings.push({
     code: 'RENDERER_PROP_CONSTANT_EMPTY',
     prop,
+    file: relative(root, match.path),
     line,
     message: `${prop} 恒定传 ${value.trim()}，接收方永远拿不到数据。`
   });
@@ -200,6 +209,7 @@ report({
   status: 'passed',
   message: 'renderer 无未登记的「所有分支都不可达」功能入口。',
   scannedTernaryProps: ternaryProps.length,
+  scannedSources: sources.map(({ path }) => relative(root, path)),
   emptyConstants: [...emptyConstNames],
   ruledKnownBreakpoints: Object.keys(RULED),
   nonClaim: '本门禁只做单行、无嵌套三元的静态判定，不做类型推断、不跨文件追踪'

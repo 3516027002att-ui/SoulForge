@@ -20,11 +20,17 @@ function main(): void {
   const ipcRoot = resolve(root, 'apps/desktop/src/main/ipc');
   const ipc = [
     readFileSync(resolve(root, 'apps/desktop/src/main/ipc.ts'), 'utf8'),
+    readFileSync(resolve(root, 'apps/desktop/src/main/workspaceStorage.ts'), 'utf8'),
     ...readdirSync(ipcRoot)
       .filter((name) => name.endsWith('.ts') && !name.endsWith('.test.ts'))
       .sort()
-      .map((name) => readFileSync(resolve(ipcRoot, name), 'utf8'))
+      .map((name) => readFileSync(resolve(ipcRoot, name), 'utf8')),
+    ...readdirSync(resolve(root, 'apps/desktop/src/main/services'))
+      .filter((name) => name.endsWith('.ts') && !name.endsWith('.test.ts'))
+      .sort()
+      .map((name) => readFileSync(resolve(root, 'apps/desktop/src/main/services', name), 'utf8'))
   ].join('\n');
+  const paramService = readFileSync(resolve(root, 'apps/desktop/src/main/services/paramService.ts'), 'utf8');
   const bridgeStaging = readFileSync(
     resolve(root, 'packages/core/src/editing/bridgeStaging.ts'),
     'utf8'
@@ -46,8 +52,9 @@ function main(): void {
   // 2026-08-10 实测**已不成立**（BridgeCommandService 的 optionsIsObject 守卫，
   // commit 5b669c6 修掉了那个 crash）。保留显式空对象仍然对，但理由是不依赖
   // 对端缺省行为，不是躲一个已经不存在的异常。
-  if (!ipc.includes('commandOptions: {}') || !ipc.includes('typeof row.dataBase64 === \'string\'')) {
-    throw new Error('readParamPage must send empty commandOptions and stay payload-null-safe');
+  if (!/commandOptions:\s*loadAll\s*\?\s*\{\s*includeAllPayloads:\s*true\s*\}\s*:\s*\{\s*\}/.test(paramService)
+    || !paramService.includes('typeof row.dataBase64 === \'string\'')) {
+    throw new Error('readParamPage must send empty default commandOptions, explicitly request load-all payloads, and stay payload-null-safe');
   }
   /*
    * 当页字节读取不可缺失。
@@ -67,7 +74,7 @@ function main(): void {
    * 因为全表读取仍在。所以必须另立一条锚在 rowPageSize 下传上，否则这次修复
    * 可以被静默移除而门禁全绿。
    */
-  if (!ipc.includes('rowPage: bridgePage') || !ipc.includes('rowPageSize: window.size')) {
+  if (!paramService.includes('rowPage: bridgePage') || !paramService.includes('rowPageSize: window.size')) {
     throw new Error(
       'readParamPage must fetch the current page row bytes with explicit rowPage/rowPageSize;'
       + ' a full-table read alone never carries payloads (C# gates payloads per page)'
@@ -96,7 +103,7 @@ function main(): void {
 
   console.log(JSON.stringify({
     ok: true,
-    message: '桌面编辑后端契约验证通过（renderer UI 已移除，保留 IPC/preload/staging 边界）',
+    message: 'Desktop backend contract passed for split IPC/services, preload and staging.',
     paths: [
       'Sekiro-only native write gate',
       'stable LOCALAPPDATA staging root with cleanup',
@@ -104,7 +111,7 @@ function main(): void {
       'readParamPage: payload-null-safe rows + explicit per-page row byte fetch (rowPage/rowPageSize)',
       'listContainerChildrenPage: native BND4 full enumeration fallback for real containers'
     ],
-    rendererUi: 'removed',
+    rendererUi: 'verified-by-separate-renderer-suites',
     delegatedTo: 'npm run test:desktop-ipc-contract（分页 channel 注册 / preload 分页方法接线 / 双向对账，真实执行观测）'
   }, null, 2));
 }

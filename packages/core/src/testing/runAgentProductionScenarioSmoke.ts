@@ -387,7 +387,8 @@ async function runScenario(root: string): Promise<{
   const advertisedNames = new Set(readBridge.tools.map((tool) => tool.name));
   for (const name of REQUIRED_TOOL_NAMES) assert.ok(advertisedNames.has(name), `生产 bridge 未暴露工具 ${name}。`);
   assert.ok(readBridge.tools.find((tool) => tool.name === 'search_text_entries')?.supportsParallel === true);
-  assert.ok(readBridge.tools.find((tool) => tool.name === 'search_param_rows')?.supportsParallel === true);
+  assert.equal(readBridge.tools.find((tool) => tool.name === 'search_param_rows')?.supportsParallel, false,
+    'PARAM row discovery must settle before its same-turn consumers.');
   assert.ok(readBridge.tools.find((tool) => tool.name === 'search_param_fields')?.supportsParallel === true);
   assert.ok(readBridge.tools.find((tool) => tool.name === 'mutate_param_fields')?.supportsParallel === false);
 

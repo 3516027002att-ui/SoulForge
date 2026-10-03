@@ -370,7 +370,9 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, op
       clearTimeout(timer);
       const { outcome, skippedLegs } = timedOut
         ? { outcome: OUTCOME.FAILED, skippedLegs: [] }
-        : classifyOutcome(exitCode, stdout, stderr, operation?.command === 'tsc' ? 'typecheck' : scriptName);
+        : operation?.validation === false
+          ? { outcome: exitCode === 0 ? OUTCOME.PASSED : OUTCOME.FAILED, skippedLegs: [] }
+          : classifyOutcome(exitCode, stdout, stderr, operation?.command === 'tsc' ? 'typecheck' : scriptName);
       resolvePromise({
         scriptName,
         outcome,
@@ -404,14 +406,15 @@ export async function runPlannedSuite({ repoRoot, entry, timeoutMs, cache, injec
     }
     steps.push({ key: operation.key, command: operation.command, args: operation.args, cwd: operation.cwd,
       outcome: result.outcome, execution: cached ? 'reused' : 'executed',
+      validation: operation.validation ?? (operation.kind !== 'prepare'),
       durationMs: cached ? 0 : result.durationMs, ...(cached ? { reusedFrom: cached.reusedFrom } : {}) });
     outputs.push(result);
     if (result.exitCode !== 0 || result.timedOut) break;
   }
   const failed = outputs.find((r) => r.outcome === OUTCOME.FAILED);
-  const skipped = outputs.filter((r) => r.outcome === OUTCOME.SKIPPED);
-  const partial = outputs.some((r) => r.outcome === OUTCOME.PARTIAL);
-  const testOutputs = outputs.filter((_, i) => entry.steps[i].kind !== 'prepare');
+  const testOutputs = outputs.filter((_, i) => entry.steps[i].validation ?? (entry.steps[i].kind !== 'prepare'));
+  const skipped = testOutputs.filter((r) => r.outcome === OUTCOME.SKIPPED);
+  const partial = testOutputs.some((r) => r.outcome === OUTCOME.PARTIAL);
   const allSkipped = testOutputs.length > 0 && testOutputs.every((r) => r.outcome === OUTCOME.SKIPPED);
   return {
     scriptName: entry.scriptName,
@@ -419,7 +422,7 @@ export async function runPlannedSuite({ repoRoot, entry, timeoutMs, cache, injec
       : skipped.length || partial ? OUTCOME.PARTIAL : OUTCOME.PASSED,
     exitCode: failed ? failed.exitCode : 0,
     durationMs: Date.now() - startedAt,
-    skippedLegs: outputs.flatMap((r, i) => r.outcome === OUTCOME.SKIPPED || r.outcome === OUTCOME.PARTIAL
+    skippedLegs: outputs.flatMap((r, i) => steps[i].validation && (r.outcome === OUTCOME.SKIPPED || r.outcome === OUTCOME.PARTIAL)
       ? [`${steps[i].key}:${r.skippedLegs.join(',') || r.outcome}`] : []),
     ...(failed?.timedOut ? { timedOut: true } : {}),
     ...(failed?.spawnError ? { spawnError: failed.spawnError } : {}),

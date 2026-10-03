@@ -88,6 +88,7 @@ jobs:
           path: |
             apps/desktop/e2e/playwright/playwright-report/
             apps/desktop/e2e/playwright/test-results/
+            .local-validation/public-renderer-e2e/
             output/verify-ci-*.json
           if-no-files-found: ignore
 
@@ -125,6 +126,8 @@ jobs:
           node scripts/check.mjs --tier release --filter portable-packaging --json-out output/verify-ci-portable.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/check.mjs --suite test:packaged-bridge-runtime --require-executed --json-out output/verify-ci-packaged-bridge.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/check.mjs --suite test:first-party-schema-package --require-executed --json-out output/verify-ci-schema-package.json
       - name: Installer lifecycle (execute mode)
         env:
           SOULFORGE_INSTALLER_LIFECYCLE_RUN: '1'

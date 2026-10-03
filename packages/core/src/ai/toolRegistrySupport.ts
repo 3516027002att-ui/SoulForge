@@ -10,7 +10,7 @@ import { rollbackOperation } from '../patch/rollback.js';
 import type { WorkspaceSession } from '../workspace/workspaceSession.js';
 import { buildGraphPatchFromProposal, summarizeGraphPatch } from '../patch/graphPatch.js';
 import { assessEditRisk, evaluateWriterGate, resolveWriterContract } from '../patch/writerContract.js';
-import type { RagChunkFamily, RagCorpus } from '@soulforge/shared';
+import type { RagChunk, RagChunkFamily, RagCorpus } from '@soulforge/shared';
 import { RAG_CHUNK_FAMILIES } from '@soulforge/shared';
 import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import type { KnowledgeRefreshResult } from '../indexing/knowledgeRefresh.js';
@@ -33,6 +33,8 @@ import { buildRagCorpus, mergeCatalogAndPersisted } from '../rag/chunkBuilder.js
 import { retrieveEvidence, type RagChunkExclusionMask } from '../rag/retrieve.js';
 import { attachLookupIndexAsync } from '../rag/lookupIndex.js';
 import { getRagStaleChunkMaskCached } from '../rag/freshness.js';
+import { isChunkEligible, normalizeRetrievalScope } from '../rag/retrievalScope.js';
+import { setImmediate as yieldRagGrouping } from 'node:timers/promises';
 import { type MemoryStore } from '../memory/memoryStore.js';
 import { EVENT_REFERENCE_SOURCE_URI, searchEventReference } from './eventReference.js';
 import { resolveChrLinkage } from '../references/chrLinkageResolver.js';
@@ -1086,6 +1088,39 @@ export function isWorkspaceContextCurrent(context: ToolContext): boolean {
         return false;
     }
 }
+/** Search-only action projection: original event chunks remain the evidence. */
+async function groupTaeRagActions(corpus: RagCorpus, families: readonly RagChunkFamily[],
+    excluded?: RagChunkExclusionMask, signal?: AbortSignal): Promise<{ corpus: RagCorpus; groups: Map<string, RagChunk[]> }> {
+    const scope = normalizeRetrievalScope({ workspaceId: corpus.workspaceId, families }, families, corpus.workspaceId);
+    const groups = new Map<string, RagChunk[]>();
+    let processed = 0;
+    for (const chunk of corpus.chunks) {
+        signal?.throwIfAborted();
+        if (chunk.family === 'tae_event' && isChunkEligible(chunk, scope) && !excluded?.has(chunk.chunkId)) {
+            const address = chunk.symbolUri.replace(/\/e\d+(?:[?#].*)?$/, '');
+            const key = JSON.stringify([chunk.sourceUri, address]);
+            const events = groups.get(key) ?? [];
+            events.push(chunk);
+            groups.set(key, events);
+        }
+        if (++processed % 128 === 0) await yieldRagGrouping();
+    }
+    const chunks: RagChunk[] = [];
+    for (const events of groups.values()) {
+        signal?.throwIfAborted();
+        const first = events[0]!;
+        const title = [...new Set(events.map(event => event.title))].join('\n');
+        const body = events.map(event => event.body).join('\n');
+        const numericIds = [...new Set(events.flatMap(event => event.numericIds))];
+        chunks.push({ ...first, chunkId: `${first.chunkId}:action-search`,
+            symbolUri: first.symbolUri.replace(/\/e\d+(?:[?#].*)?$/, ''), title, body, numericIds,
+            contentHash: createHash('sha256').update(JSON.stringify([title, body, numericIds])).digest('hex') });
+        if (chunks.length % 128 === 0) await yieldRagGrouping();
+    }
+    const byFamily = { ...corpus.stats.byFamily };
+    for (const family of RAG_CHUNK_FAMILIES) byFamily[family] = family === 'tae_event' ? chunks.length : 0;
+    return { corpus: { ...corpus, chunks, references: [], stats: { total: chunks.length, byFamily } }, groups };
+}
 export async function ragSearchFallback(context: ToolContext, query: string, families: readonly RagChunkFamily[], limit: number, toolName: string, paramNames?: readonly string[]): Promise<ToolResult<unknown>> {
     const isParamWarmingUp = families.includes('param_row')
         && context.workspaceIndex?.getParamSemanticState?.() === 'warming_up';
@@ -1125,15 +1160,26 @@ export async function ragSearchFallback(context: ToolContext, query: string, fam
                 : '目录级结构化候选也未命中；零命中不是资源不存在的证明。'
         });
     }
-    await prepareRagQueryLookup(corpus, context.signal);
+    const staleOptions = staleRagChunkOption(context, corpus);
+    // Apply the search budget to unique actions, before event siblings can
+    // consume retrieveEvidence's chunk limit (including its strict max of 32).
+    const taeActions = toolName === 'search_tae_events'
+        ? await groupTaeRagActions(corpus, families, staleOptions.excludeChunkMask, context.signal)
+        : undefined;
+    const searchCorpus = taeActions?.corpus ?? corpus;
+    await prepareRagQueryLookup(searchCorpus, context.signal);
     if (!isWorkspaceContextCurrent(context)) {
         return fail('RAG_CONTEXT_STALE', '工作区会话或 RAG 语料已切换，已丢弃旧检索结果；请重试。');
     }
-    const result = retrieveEvidence(corpus, query, {
+    const currentStaleOptions = staleRagChunkOption(context, corpus);
+    if (taeActions && currentStaleOptions.excludeChunkMask !== staleOptions.excludeChunkMask) {
+        return fail('RAG_CONTEXT_STALE', 'TAE sources changed while grouping action evidence.');
+    }
+    const result = retrieveEvidence(searchCorpus, query, {
         limit: Math.max(1, Math.min(100, Math.trunc(limit))),
         families,
         expandReferences: false,
-        ...staleRagChunkOption(context, corpus)
+        ...(taeActions ? {} : currentStaleOptions)
     });
     if (!result.ok) {
         if (result.code === 'RAG_UNAVAILABLE') {
@@ -1212,8 +1258,9 @@ export async function ragSearchFallback(context: ToolContext, query: string, fam
       if (!keys.has(key)) keys.set(key, { sourceUri: hit.chunk.sourceUri, address, score: hit.score });
     }
     const actions = [...keys.values()].slice(0, Math.max(1, limit)).map((action) => {
-      const events = corpus.chunks.filter((chunk) => chunk.family === 'tae_event'
+      const events = (taeActions?.groups.get(JSON.stringify([action.sourceUri, action.address])) ?? corpus.chunks.filter((chunk) => chunk.family === 'tae_event'
         && chunk.sourceUri === action.sourceUri && chunk.symbolUri.replace(/\/e\d+(?:[?#].*)?$/, '') === action.address)
+        ).slice()
         .sort((a, b) => Number(/\/e(\d+)/.exec(a.symbolUri)?.[1] ?? 0) - Number(/\/e(\d+)/.exec(b.symbolUri)?.[1] ?? 0));
       const size = Math.max(1, Math.min(16, Math.floor(20000 / Math.max(1, ...events.map((event) => Buffer.byteLength(JSON.stringify(event), 'utf8'))))));
       const nativeCounts = new Set(events.map(e => e.taeActionEventCount).filter((n): n is number => n !== undefined));

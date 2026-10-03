@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { pathToFileURL } from 'node:url';
 import { invalidateClaimClosure } from '../knowledge/claimGraph.js';
 import type { KnowledgeClaim } from '../knowledge/knowledgeTypes.js';
 
@@ -15,4 +16,4 @@ export function runKnowledgeInvalidationSmoke(): void {
   console.log(JSON.stringify({ ok: true, taskId: 'SF-23', suite: 'invalidation', layer: process.argv.includes('--layer') ? process.argv[process.argv.indexOf('--layer') + 1] : 'unit', executedCases: 6, production: ['invalidateClaimClosure'], message: 'F01 readerSchema失效闭包与无关claim保留通过' }));
 }
 
-if (import.meta.url === `file://${process.argv[1]?.replaceAll('\\', '/')}`) runKnowledgeInvalidationSmoke();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) runKnowledgeInvalidationSmoke();

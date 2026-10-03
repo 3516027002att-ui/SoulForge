@@ -7,8 +7,8 @@ import {pathToFileURL} from 'node:url';
 import test from 'node:test';
 
 const symbol=Symbol.for('sf.workspace-delayed-read');
-const core=resolve('packages/core/dist/index.js');
-const shared=resolve('packages/shared/dist/index.js');
+const core=pathToFileURL(resolve('packages/core/dist/index.js')).href;
+const shared=pathToFileURL(resolve('packages/shared/dist/index.js')).href;
 const event={sender:{id:17}};
 function gate(){let entered,release;return {entered:new Promise(resolve=>{entered=resolve;}),wait:new Promise(resolve=>{release=resolve;}),start:()=>entered(),release:()=>release()};}
 
@@ -20,7 +20,7 @@ async function bundle(domain,root){
    builder.onResolve({filter:/^@soulforge\/shared$/},()=>({path:shared,external:true}));
    builder.onResolve({filter:/^electron$/},()=>({path:'electron-seam',namespace:'electron-fixture'}));
    builder.onLoad({filter:/.*/,namespace:'electron-fixture'},()=>({contents:'export const dialog={showSaveDialog:async()=>({canceled:true})};',loader:'js'}));
-   builder.onResolve({filter:/^\//},args=>args.path===core?{path:core,external:true}:undefined);
+   builder.onResolve({filter:/^file:/},args=>args.path===core?{path:core,external:true}:undefined);
    builder.onLoad({filter:/.*/,namespace:'fixture'},()=>({contents:`
     export * from ${JSON.stringify(core)};
     const state=()=>globalThis[Symbol.for('sf.workspace-delayed-read')];

@@ -99,18 +99,18 @@ async function openParamContainer(window) {
   await window.locator('[data-domain="text"]').click();
   await window.locator('[data-domain="param"]').click();
   await closeAgentPanel(window);
-  await expect(window.getByRole('region', { name: 'Params' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Rows' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Fields' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '参数文件' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '行', exact: true })).toBeVisible();
+  await expect(window.getByRole('region', { name: '字段', exact: true })).toBeVisible();
 }
 
 /** 点左栏大表，等中栏首批行可见，返回中栏 hint 文本。 */
 async function openLargeParam(window) {
-  await window.getByRole('region', { name: 'Params' })
+  await window.getByRole('region', { name: '参数文件' })
     .locator('.wb-row', { hasText: 'BehaviorParam' })
     .click();
   await expect(window.locator('.wb-virtual-row').first()).toBeVisible();
-  return window.getByRole('region', { name: 'Rows' }).locator('.workbench__column-hint').innerText();
+  return window.getByRole('region', { name: '行', exact: true }).locator('.workbench__column-hint').innerText();
 }
 
 /**
@@ -191,7 +191,7 @@ test('大表（5275 行 / 221 字段）：打开即出行，且选中行后快�
   // 选中首行 → 右栏按大表自己的 221 字段定义渲染（fixture 开关开着才有
   // fieldDefs；回落默认 4 个就测不出字段栏成本）。
   await window.locator('.wb-virtual-row').first().click();
-  await expect(window.getByRole('region', { name: 'Fields' }).locator('.wb-prop')).toHaveCount(221);
+  await expect(window.getByRole('region', { name: '字段', exact: true }).locator('.wb-prop')).toHaveCount(221);
 
   // 平缓下拉：240px/帧（≈11 行/帧），跑 ~1s。
   const jank = await measureScroll(window, 240, 1000);
@@ -227,8 +227,8 @@ test('打开大表的等待期间：中栏给出加载反馈，而不是纯空�
   await openFixtureWorkspace(window);
   await openParamContainer(window);
 
-  const rowsRegion = window.getByRole('region', { name: 'Rows' });
-  await window.getByRole('region', { name: 'Params' })
+  const rowsRegion = window.getByRole('region', { name: '行', exact: true });
+  await window.getByRole('region', { name: '参数文件' })
     .locator('.wb-row', { hasText: 'BehaviorParam' })
     .click();
 

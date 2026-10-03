@@ -25,6 +25,9 @@ export function useWorkspaceController(options: WorkspaceOptions) {
   const [tools, setTools] = useState<ToolDescriptor[]>([]);
   const [files, setFiles] = useState<RendererIndexedFile[]>([]);
   const [allFiles, setAllFiles] = useState<RendererIndexedFile[]>([]);
+  const [analysisRequest, setAnalysisRequest] = useState<{
+    generation: number; result: RendererWorkspaceScanResult; restoredPrefix: string; baseLabel: string;
+  } | null>(null);
   const workspaceRef = useRef(workspace); workspaceRef.current = workspace;
   const mountGenerationRef = useRef(0);
   const manualMountRequestedRef = useRef(false);
@@ -42,6 +45,33 @@ export function useWorkspaceController(options: WorkspaceOptions) {
   function ownsMount(generation: number): boolean {
     return ownsBridge() && mountGenerationRef.current === generation;
   }
+  // Start only after the installed workspace and its document/history owners
+  // have committed. An already-resolved analysis must not outrun that commit.
+  useEffect(() => {
+    if (!bridge || !analysisRequest || !ownsMount(analysisRequest.generation)) return;
+    const { generation, result, restoredPrefix, baseLabel } = analysisRequest;
+    let cancelled = false;
+    const isCurrent = () => !cancelled && ownsMount(generation)
+      && workspaceRef.current?.workspaceSessionId === result.workspaceSessionId;
+    void (async () => {
+      try {
+        const nextAnalysis = await bridge.analyzeWorkspace();
+        if (!isCurrent()) return;
+        setAnalysis(nextAnalysis);
+        setTools(nextAnalysis?.tools ?? []);
+        onAnalysisLoaded(nextAnalysis);
+        await refreshOperationHistory();
+        if (!isCurrent()) return;
+        const parsed = nextAnalysis?.parsedFiles ?? 0;
+        const inspected = nextAnalysis?.inspectedFiles ?? 0;
+        setStatus(`${restoredPrefix}已就绪：已索引 ${result.files.length} 个文件，解析 ${parsed} 个文本/资源${baseLabel}`);
+        pushToast(`工作区符号与数据索引构建完成（已解析 ${parsed} 个，已检查 ${inspected} 个）`, 'ok');
+      } catch {
+        // 后台分析静默降级
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [bridge, analysisRequest]);
   async function mountWorkspace(
     overlaySelectionId: string,
     baseSelectionId: string | undefined,
@@ -78,27 +108,7 @@ export function useWorkspaceController(options: WorkspaceOptions) {
         'ok'
       );
 
-      // 后台静默构建深度分析与证据索引，不阻断主工作台展现与窗口交互
-      void (async () => {
-        try {
-          const nextAnalysis = await bridge.analyzeWorkspace();
-          if (!ownsMount(generation)) return;
-          setAnalysis(nextAnalysis);
-          setTools(nextAnalysis?.tools ?? []);
-          onAnalysisLoaded(nextAnalysis);
-          await refreshOperationHistory();
-          if (!ownsMount(generation)) return;
-          const parsed = nextAnalysis?.parsedFiles ?? 0;
-          const inspected = nextAnalysis?.inspectedFiles ?? 0;
-          setStatus(`${restoredPrefix}已就绪：已索引 ${result.files.length} 个文件，解析 ${parsed} 个文本/资源${baseLabel}`);
-          pushToast(
-            `工作区符号与数据索引构建完成（已解析 ${parsed} 个，已检查 ${inspected} 个）`,
-            'ok'
-          );
-        } catch {
-          // 后台分析静默降级
-        }
-      })();
+      setAnalysisRequest({ generation, result, restoredPrefix, baseLabel });
     } catch (error) {
       if (!ownsMount(generation)) return;
       const message = error instanceof Error ? error.message : String(error);

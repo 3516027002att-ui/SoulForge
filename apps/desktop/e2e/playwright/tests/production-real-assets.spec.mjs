@@ -34,7 +34,8 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
         ...process.env,
         NODE_ENV: 'production',
         SF_E2E_OVERLAY_ROOT: overlayRoot,
-        SF_E2E_BASE_ROOT: gameRoot
+        SF_E2E_BASE_ROOT: gameRoot,
+        SF_E2E_WORKSPACE_STORAGE_ROOT: join(testWorkspace().root, 'workspace-storage')
       }
     });
     await testWorkspace().registerApp(app);
@@ -83,6 +84,20 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
     const header = window.locator('.tae-animation-group__header').filter({ hasText: groupLabel }).first();
     await expect(header).toHaveCount(1, { timeout: 120_000 });
     if (await header.getAttribute('aria-expanded') !== 'true') await header.click();
+  }
+
+  async function loadActionPages(window) {
+    const animations = window.getByRole('region', { name: '动画' });
+    const loadMore = window.getByTestId('tae-load-more');
+    const countLoaded = async () => (await animations.locator('.tae-animation-group__count').allTextContents())
+      .reduce((total, text) => total + Number(text), 0);
+    for (let page = 0; page < 40 && await loadMore.count() > 0; page += 1) {
+      await expect(loadMore).toBeEnabled({ timeout: 30_000 });
+      const previousCount = await countLoaded();
+      await loadMore.click();
+      await expect.poll(countLoaded, { timeout: 30_000 }).toBeGreaterThan(previousCount);
+    }
+    await expect(loadMore).toHaveCount(0);
   }
 
   test('真实 ACTION 与 MAP 读取含完整网格/贴图，并能进入可视化工作台', async () => {
@@ -286,19 +301,19 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
       await openResource(window, 'msg/engus/item.msgbnd.dcx');
       const fmgPanel = window.getByRole('region', { name: 'FMG 本地化工作台' });
       await expect(fmgPanel).toBeVisible({ timeout: 120_000 });
-      await expect(fmgPanel.getByRole('region', { name: 'Text Categories' })).toBeVisible();
-      await expect(fmgPanel.getByRole('region', { name: 'Text Entries' })).toContainText(/\S/, { timeout: 120_000 });
+      await expect(fmgPanel.getByRole('region', { name: '文本分类' })).toBeVisible();
+      await expect(fmgPanel.getByRole('region', { name: '文本条目' })).toContainText(/\S/, { timeout: 120_000 });
 
       await openResource(window, 'param/gameparam/gameparam.parambnd.dcx');
       const paramPanel = window.getByLabel('PARAM 工作台');
       await expect(paramPanel).toBeVisible({ timeout: 120_000 });
-      const paramsColumn = paramPanel.getByRole('region', { name: 'Params' });
-      const rowsColumn = paramPanel.getByRole('region', { name: 'Rows' });
+      const paramsColumn = paramPanel.getByRole('region', { name: '参数文件' });
+      const rowsColumn = paramPanel.getByRole('region', { name: '行', exact: true });
       await expect(paramsColumn.locator('.wb-row').first()).toBeVisible({ timeout: 120_000 });
       await paramsColumn.locator('.wb-row').first().click();
       await expect(rowsColumn.locator('.wb-row').first()).toBeVisible({ timeout: 120_000 });
       await rowsColumn.locator('.wb-row').first().click();
-      await expect(paramPanel.getByRole('region', { name: 'Fields' })).toBeVisible();
+      await expect(paramPanel.getByRole('region', { name: '字段', exact: true })).toBeVisible();
 
       mkdirSync(resolve(repoRoot, 'output/playwright'), { recursive: true });
       await window.screenshot({ path: resolve(repoRoot, 'output/playwright/real-param-fmg-workbenches.png'), fullPage: false });
@@ -532,6 +547,7 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
       await openWorkspace(window);
       await openResource(window, 'chr/c0000.anibnd.dcx');
       await expect(window.getByRole('region', { name: '动画' })).toBeVisible();
+      await loadActionPages(window);
       for (const [animationName, prefix] of [
         ['a000_201802', 'c0000-a000-201802'],
         ['a000_201803', 'c0000-a000-201803'],
@@ -542,6 +558,7 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
 
       await openResource(window, 'chr/c1130.anibnd.dcx');
       await expect(window.getByRole('region', { name: '动画' })).toBeVisible();
+      await loadActionPages(window);
       for (const [animationName, prefix] of [
         ['a000_003000', 'c1130-a000-003000'],
         ['a000_003001', 'c1130-a000-003001'],

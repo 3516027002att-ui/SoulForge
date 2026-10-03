@@ -12,6 +12,22 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { maskPathFragments, MASKED_PATH_PLACEHOLDER } from './path-sanitizer.js';
 
+it('masks POSIX paths and physical file URLs while preserving surrounding text', () => {
+  for (const value of ['/home/user/mod/file', '/tmp/soulforge/a.fmg', '/workspace/relative/file', 'file:///home/user/a.fmg', 'file://localhost/home/user/a.fmg', 'file://D:/Users/user/a.fmg']) {
+    assert.equal(maskPathFragments(value), MASKED_PATH_PLACEHOLDER);
+  }
+  assert.equal(maskPathFragments('读取失败：/tmp/游戏/a.fmg（拒绝）'), `读取失败：${MASKED_PATH_PLACEHOLDER}（拒绝）`);
+  assert.equal(maskPathFragments('path "/home/user/a.fmg" failed'), `path "${MASKED_PATH_PLACEHOLDER}" failed`);
+  assert.equal(maskPathFragments('file:///workspace/../home/user/a.fmg'), MASKED_PATH_PLACEHOLDER);
+  assert.equal(maskPathFragments('file:///workspace/%2e%2e/home/user/a.fmg'), MASKED_PATH_PLACEHOLDER);
+});
+
+it('preserves logical resource addresses and relative paths', () => {
+  for (const value of ['file://chr/c0000.anibnd.dcx', 'file:///workspace/a.fmg', 'resource://owned/map', 'https://example.com/docs/a', 'chr/c0000.anibnd.dcx', './relative/a.fmg']) {
+    assert.equal(maskPathFragments(value), value);
+  }
+});
+
 describe('maskPathFragments（S13 片段打码）', () => {
   it('只打码路径片段，保留上下文（全角冒号前缀）', () => {
     assert.equal(
@@ -66,7 +82,7 @@ describe('maskPathFragments（S13 片段打码）', () => {
       return Reflect.apply(originalReplace, this, args);
     } as typeof originalReplace;
     try {
-      for (const text of ['m000010', 'MapPiece', '字段说明（中文）', '/workspace/relative/file']) {
+      for (const text of ['m000010', 'MapPiece', '字段说明（中文）']) {
         assert.equal(maskPathFragments(text), text);
       }
       assert.equal(regexCalls, 0);

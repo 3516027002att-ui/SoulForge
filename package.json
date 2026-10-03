@@ -218,7 +218,9 @@
     "ipc:public:check": "node scripts/generate-public-ipc.mjs --check",
     "test:public-ipc-contract": "node --test scripts/public-ipc-contract.fixture.mjs",
     "test:param-domain-service": "node --test scripts/param-domain-service.fixture.mjs",
-    "test:scene-contracts": "node --test scripts/scene/*.test.mjs && node scripts/run-scene-unit-tests.mjs"
+    "test:scene-contracts": "node --test scripts/scene/*.test.mjs && node scripts/run-scene-unit-tests.mjs",
+    "test:renderer-e2e:public": "npm run test:renderer-playwright:public -w @soulforge/desktop",
+    "test:blender-job-boundary": "node packages/core/dist/testing/runAuditBlenderJobSmoke.js --layer unit"
   },
   "devDependencies": {
     "@types/node": "^22.13.1",

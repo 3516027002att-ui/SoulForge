@@ -1,10 +1,10 @@
-import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
+import { createSmokeTemporaryDirectory } from './harness/smokeWorkspace.js';
 /**
  * PARAM Agent 门面：分组、字段编码、权限、禁止文本补丁打原生容器。
  * 不落盘到用户 mods，不声明 native authority。
  */
 import { readFileSync } from 'node:fs';
-import { access, mkdir, rm, stat } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -99,8 +99,10 @@ check('source/no-index-scan', !source.includes('index < 180'));
 // Cleanup contract fixture: concurrent reads get independent directories, a
 // transient remove failure retries once, and a persistent filesystem failure
 // becomes a structured warning instead of replacing the read/write result.
-const cleanupRoot = await mkdtemp(resolve(tmpdir(), 'soulforge-param-cleanup-smoke-'));
+const cleanupRoot = await createSmokeTemporaryDirectory(resolve(tmpdir(), 'soulforge-param-cleanup-smoke-'));
 try {
+  // Child handoffs mirror production's direct param-read-* directories. The
+  // enclosing smoke workspace already owns their restart cleanup.
   const concurrentDirs = await Promise.all(
     Array.from({ length: 4 }, async () => {
       const directory = await mkdtemp(resolve(cleanupRoot, 'param-read-'));
@@ -163,6 +165,17 @@ try {
   });
   check('cleanup/path-boundary', rejected?.code === 'PARAM_TEMP_CLEANUP_PATH_REJECTED', JSON.stringify(rejected));
   check('cleanup/path-boundary-no-io', !(await stat(cleanupRoot).then(() => false).catch(() => true)));
+  const nestedDirectory = resolve(failureDirectory, 'workspace');
+  await mkdir(nestedDirectory);
+  let rejectedRemoveAttempts = 0;
+  const nestedRejected = await cleanupParamTempDirectory({
+    stagingRoot: cleanupRoot,
+    tempDirectory: nestedDirectory,
+    containerPath: resolve(cleanupRoot, 'gameparam.parambnd.dcx'),
+    remove: async () => { rejectedRemoveAttempts += 1; }
+  });
+  check('cleanup/nested-path-rejected', nestedRejected?.code === 'PARAM_TEMP_CLEANUP_PATH_REJECTED');
+  check('cleanup/nested-path-no-io', rejectedRemoveAttempts === 0 && await stat(nestedDirectory).then(() => true));
 } finally {
   await rm(cleanupRoot, { recursive: true, force: true });
 }
