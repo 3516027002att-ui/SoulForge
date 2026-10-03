@@ -74,8 +74,14 @@ async function run() {
       '--which-module', 'better-sqlite3',
       '--sequential'
     ];
+    // Resolve with node-gyp's existing selection/validation before removing the
+    // caller's search paths. Python may be installed outside Windows itself.
+    const pythonExecutable = process.platform === 'win32'
+      ? await resolveWindowsRebuildPython() : undefined;
     const buildEnv = {
-      ...process.env,
+      ...(process.platform === 'win32'
+        ? createWindowsRebuildEnvironment(process.env, process.execPath, pythonExecutable)
+        : process.env),
       // @electron/rebuild resolves its header cache from os.homedir(). Keep
       // compiler/download caches local to this task, even on a restricted host.
       ...(process.platform === 'win32'
@@ -177,4 +183,27 @@ function appendFlag(value, flag) {
   const current = value?.trim() ?? '';
   const present = current.split(/\s+/).some((item) => item.toLowerCase() === flag.toLowerCase());
   return present ? current : `${current}${current ? ' ' : ''}${flag}`;
+}
+
+async function resolveWindowsRebuildPython() {
+  const { default: PythonFinder } = await import('node-gyp/lib/find-python.js');
+  return PythonFinder.findPython(process.env.npm_config_python);
+}
+
+function createWindowsRebuildEnvironment(env, nodeExecutable, pythonExecutable) {
+  const child = { ...env };
+  const systemRoot = Object.entries(env).find(([key]) => key.toUpperCase() === 'SYSTEMROOT')?.[1]
+    ?? Object.entries(env).find(([key]) => key.toUpperCase() === 'WINDIR')?.[1];
+  if (!systemRoot) throw new Error('ELECTRON_SQLITE_REBUILD_WINDOWS_ENV_MISSING: SystemRoot was not found.');
+  if (!pythonExecutable) throw new Error('ELECTRON_SQLITE_REBUILD_PYTHON_MISSING: node-gyp did not resolve a Python executable.');
+  // MSBuild's SQLite copy action invokes bare node. Give this owned child the
+  // actual runtime plus system supervision tools, avoiding cmd's PATH limit and
+  // duplicate case-insensitive PATH keys inherited from npm/developer shells.
+  for (const key of Object.keys(child)) {
+    if (['PATH', '__VSCMD_PREINIT_PATH'].includes(key.toUpperCase())) delete child[key];
+  }
+  child.PATH = [dirname(nodeExecutable), join(systemRoot, 'System32'), systemRoot,
+    join(systemRoot, 'System32/Wbem'), join(systemRoot, 'System32/WindowsPowerShell/v1.0')].join(';');
+  child.NODE_GYP_FORCE_PYTHON = pythonExecutable;
+  return child;
 }
