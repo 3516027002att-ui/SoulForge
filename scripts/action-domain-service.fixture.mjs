@@ -94,6 +94,7 @@ function harness(options = {}) {
   Object.assign(core, load(path.join(root, 'packages/core/src/character/characterAssembly.ts')),
     load(path.join(root, 'packages/core/src/action/motionIdentityCache.ts')));
   Object.assign(shared, load(path.join(root, 'packages/shared/src/flver-preview.ts')));
+  Object.assign(shared, load(path.join(root, 'packages/shared/src/animation-editor.ts')));
   const adapter = load(adapterPath);
   const deps = {
     handle: (name, callback) => handlers.set(name, (...args) => { if (options.deny) throw new Error('IPC_UNTRUSTED_SENDER'); return callback(...args); }),
