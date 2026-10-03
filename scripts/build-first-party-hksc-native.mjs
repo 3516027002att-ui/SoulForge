@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,10 +58,25 @@ function findVisualStudioDevCmd() {
     'C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat'
   ].filter(Boolean);
   const candidate = candidates.find((path) => existsSync(path));
-  if (!candidate) {
-    throw new Error('FIRST_PARTY_HKS_NATIVE_TOOLCHAIN_MISSING: 未找到 Visual Studio Build Tools。');
+  if (candidate) return candidate;
+  // Hosted images and local machines can have a newer Visual Studio layout.
+  // Ask the installer for an actual C++ toolchain instead of guessing its year.
+  const vswhere = [
+    process.env['ProgramFiles(x86)'] ? join(process.env['ProgramFiles(x86)'], 'Microsoft Visual Studio/Installer/vswhere.exe') : undefined,
+    process.env.ProgramFiles ? join(process.env.ProgramFiles, 'Microsoft Visual Studio/Installer/vswhere.exe') : undefined,
+    'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe'
+  ].filter(Boolean).find((path) => existsSync(path));
+  if (vswhere) {
+    try {
+      const installations = execFileSync(vswhere, [
+        '-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+        '-property', 'installationPath'
+      ], { encoding: 'utf8', windowsHide: true, timeout: 30_000 }).trim().split(/\r?\n/).filter(Boolean);
+      const discovered = installations.map((path) => join(path, 'Common7/Tools/VsDevCmd.bat')).find((path) => existsSync(path));
+      if (discovered) return discovered;
+    } catch { /* Preserve the structured missing-toolchain diagnosis below. */ }
   }
-  return candidate;
+  throw new Error('FIRST_PARTY_HKS_NATIVE_TOOLCHAIN_MISSING: Visual Studio C++ Build Tools were not found.');
 }
 
 async function main() {

@@ -314,3 +314,33 @@ receipts, with no unmatched, duplicate or contradictory terminal groups:
 artifact ID `350ddce57f6384fa3d3877a9ab8612df0d9bb5dbf1289431cb4208af8cfa6d28`.
 This cancellation run intentionally ends before normal full-load responsiveness
 measurement and cannot substitute for that measurement.
+
+
+The 20 unavailable resources were subsequently checked using Smithbox's own
+unmodified reader, built from official clean source
+`vawser/Smithbox cbd477a8fd6d436b3e011c8548e1de8fd8876918`.
+All 37 FLVER payloads (the 17 objects' main and _S entries, plus the three
+characters) match the pinned source/payload hashes and have zero meshes.
+A direct header check at the mature reader's declared mesh, vertex-buffer and
+face-set count fields also finds zeros. Positive controls read 13 meshes from
+c1130 and one from o000100; this is not an always-empty decoder result.
+The actual overlay contains none of these 20 binders; the separate local c1000
+overlay is byte-identical to the selected base source. All three characters' MSB references have
+CharaInitID=-1. The three skeletons contain only 3/4/4 nodes, including the
+wide-area illusion dummy. This does not prove their complete game/FX purpose.
+
+Smithbox's ModelLocator selects the same character/object model entries, and
+MeshRenderableProxy tests actual child index data before calling geometry
+renderable. DSMapStudio explicitly constructs a debug marker when there is no
+renderable geometry. SoulForge's existing wireframe placeholders remain
+consistent with this path. No additional mesh
+assembly or native parser replacement was justified for these fixed inputs.
+The separate DSMapStudio source path was reviewed as an additional routing
+comparison. Shared SoulsFormats ancestry remains a limitation, and Smithbox GUI,
+game rendering and external visual acceptance were not run.
+
+The private owned comparison is `.local-validation/smithbox-model-validation.json`,
+SHA-256 `62e1e4012cce250ee7cebdd131ccb4d6e2bea21f7ee407a3a061c5b478189da4`;
+the library hash is `2a167620c5e93065b24e8b1532e670dd6188f26df3a781db54fa428927b0c4f4`.
+Only provenance and bounded results are recorded here; game payloads, codec and
+external source/binaries remain outside the product and public CI artifacts.
