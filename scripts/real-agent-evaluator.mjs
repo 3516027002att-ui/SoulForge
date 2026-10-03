@@ -70,10 +70,30 @@ function evaluateParamGoal(goal, result, treeEvidence = undefined) {
     : result?.ok && Array.isArray(resultData?.record?.fields)
       ? resultData.record.fields
       : [];
-  const field = fields.find((candidate) => (
+  const matches = fields.filter((candidate) => (
     Number(candidate?.rowId) === goal.rowId
     && String(candidate?.fieldId ?? '').toLocaleLowerCase() === goal.fieldId.toLocaleLowerCase()
   ));
+  // rowId is logical, while entryIndex/rowIndex identify distinct native rows.
+  // This goal contract does not select a physical row; neither the first value
+  // nor a partial page can establish that its target is unique.
+  const incomplete = [resultData, resultData?.record].some((data) => {
+    const pagination = data?.pagination;
+    return pagination?.hasMore === true
+      || (typeof pagination?.nextCursor === 'string' && pagination.nextCursor.trim().length > 0)
+      || (Number.isSafeInteger(pagination?.offset) && pagination.offset > 0)
+      || (Number.isSafeInteger(pagination?.totalCount) && pagination.totalCount > fields.length)
+      || data?.evidence?.complete === false || data?.evidence?.status === 'partial'
+      || data?.scan?.status === 'partial' || data?.execution?.status === 'partial' || data?.page?.status === 'partial';
+  });
+  const identityIssue = result?.ok === true && matches.length > 1 ? {
+    reason: 'param-identity-ambiguous', code: 'PARAM_GOAL_IDENTITY_AMBIGUOUS',
+    message: `Goal ${goal.goalId} matches ${matches.length} native PARAM fields. Its logical rowId/fieldId does not select a unique entry/physical row.`
+  } : result?.ok === true && incomplete ? {
+    reason: 'param-identity-incomplete', code: 'PARAM_GOAL_IDENTITY_INCOMPLETE',
+    message: `Goal ${goal.goalId} has an incomplete native PARAM field window. A unique logical rowId/fieldId target was not established.`
+  } : null;
+  const field = identityIssue === null && matches.length === 1 ? matches[0] : undefined;
   const sourceHashPresent = typeof field?.sourceHash === 'string' && field.sourceHash.length > 0;
   const sourceIdentity = resolveNativeSourceUri(result, {
     workspaceRoot: treeEvidence?.root,
@@ -84,7 +104,8 @@ function evaluateParamGoal(goal, result, treeEvidence = undefined) {
   });
   const sourceUriPresent = sourceIdentity !== null;
   const valueMatches = Boolean(result?.ok === true && field && sameValue(field.value, goal.expectedValue));
-  const outcome = evaluateNativeGoalOutcome({ nativeReadOk: result?.ok === true, assertionOk:valueMatches,
+  const outcome = identityIssue ? { verified: false, status: 'unverified', reason: identityIssue.reason }
+    : evaluateNativeGoalOutcome({ nativeReadOk: result?.ok === true, assertionOk:valueMatches,
     proofOk:sourceHashPresent && sourceUriPresent, resourceChanged:goalChangedInOverlay(goal, treeEvidence),
     requireMutation:goal.requireMutation === true, unavailable:isVerificationUnavailable(result), mutationEvidenceAvailable:goalMutationEvidenceBound(goal, treeEvidence) });
   return {
@@ -103,7 +124,9 @@ function evaluateParamGoal(goal, result, treeEvidence = undefined) {
           sourceUris: sourceIdentity ? [sourceIdentity.sourceUri] : []
         }]
       : [],
-    diagnostics: result?.ok === false
+    diagnostics: identityIssue
+      ? [{ severity: 'error', code: identityIssue.code, message: identityIssue.message, matchingFields: matches.length }]
+      : result?.ok === false
       ? result?.error ?? null
       : sourceUriPresent ? null : [{
           severity: 'error',

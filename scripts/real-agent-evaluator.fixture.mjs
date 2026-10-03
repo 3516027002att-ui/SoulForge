@@ -107,3 +107,72 @@ test('independently observed wrong values fail even when required mutation evide
  const composite=await verifyGoalsThroughNativeTool(async()=>nativeValue(81),[{goalId:'parent',kind:'composite',requireMutation:true,checks:[goal]}],tree);
  assert.equal(composite.evaluations[0].status,'failed');
 });
+
+test('duplicate logical PARAM rows cannot verify whichever physical row appears first',async()=>{
+  for(const values of [[80,81],[81,80],[80,80]]) {
+    for(const nested of [false,true]) {
+      const fields=values.map((value,index)=>({...nativeValue(value).data.fields[0],table:'NpcParam',
+        entryIndex:2,entryName:'NpcParam.param',rowIndex:index+3,dataHash:String(index+1).repeat(64)}));
+      const response={ok:true,data:{sourceUri:'file://sample.param',...(nested?{record:{fields}}:{fields})}};
+      const result=await verifyGoalsThroughNativeTool(async()=>response,[fieldGoal],tree);
+      const evaluation=result.evaluations[0];
+      assert.equal(evaluation.nativeReadOk,true);assert.equal(evaluation.verified,false);
+      assert.equal(evaluation.status,'unverified');assert.equal(evaluation.observedValue,null);
+      assert.equal(evaluation.reason,'param-identity-ambiguous');
+      assert.equal(evaluation.diagnostics[0].code,'PARAM_GOAL_IDENTITY_AMBIGUOUS');
+      assert.deepEqual(evaluation.verificationEvidence,[]);
+    }
+  }
+});
+
+test('the same rowIndex in different native PARAM entries remains ambiguous',async()=>{
+  const fields=[0,1].map(entryIndex=>({...nativeValue(80).data.fields[0],table:'NpcParam',rowIndex:3,
+    entryIndex,entryName:`entry-${entryIndex}/NpcParam.param`}));
+  const result=await verifyGoalsThroughNativeTool(async()=>({ok:true,data:{sourceUri:'file://sample.param',fields}}),[fieldGoal],tree);
+  assert.equal(result.evaluations[0].verified,false);assert.equal(result.evaluations[0].status,'unverified');
+  assert.equal(result.evaluations[0].diagnostics[0].code,'PARAM_GOAL_IDENTITY_AMBIGUOUS');
+  assert.deepEqual(result.evaluations[0].verificationEvidence,[]);
+});
+
+test('a partial native field window cannot prove that the logical PARAM identity is unique',async()=>{
+  for(const metadata of [
+    {pagination:{hasMore:true,nextCursor:'opaque-next',returnedCount:1,totalCount:2}},
+    {pagination:{hasMore:false,nextCursor:'opaque-next'}},
+    {pagination:{hasMore:false,offset:1,returnedCount:1,totalCount:2}},
+    {evidence:{complete:false,status:'partial'}},
+    {scan:{status:'partial'}},
+    {execution:{status:'partial',native:'completed'}}
+  ]) {
+    const response=nativeValue(80);Object.assign(response.data,metadata);
+    const result=await verifyGoalsThroughNativeTool(async()=>response,[fieldGoal],tree);
+    assert.equal(result.evaluations[0].verified,false);assert.equal(result.evaluations[0].status,'unverified');
+    assert.equal(result.evaluations[0].reason,'param-identity-incomplete');
+    assert.equal(result.evaluations[0].diagnostics[0].code,'PARAM_GOAL_IDENTITY_INCOMPLETE');
+    assert.deepEqual(result.evaluations[0].verificationEvidence,[]);
+  }
+});
+
+test('one complete PARAM identity keeps native value/source/mutation assertions effective',async()=>{
+  const response=nativeValue(80);
+  response.data.fields[0].rowIndex=3;response.data.fields[0].entryIndex=2;
+  response.data.fields.push({...response.data.fields[0],rowId:2,value:81});
+  Object.assign(response.data,{pagination:{hasMore:false,nextCursor:null,offset:0,returnedCount:2,totalCount:2},
+    evidence:{complete:true},scan:{status:'complete'},execution:{status:'completed',native:'completed'}});
+  const result=await verifyGoalsThroughNativeTool(async()=>response,[fieldGoal],tree);
+  assert.equal(result.evaluations[0].verified,true);assert.equal(result.evaluations[0].observedValue,80);
+  assert.equal(result.evaluations[0].verificationEvidence.length,1);
+  const mutation=await verifyGoalsThroughNativeTool(async()=>response,[{...fieldGoal,requireMutation:true}],tree);
+  assert.equal(mutation.evaluations[0].verified,false);assert.equal(mutation.evaluations[0].reason,'required-mutation-missing');
+});
+
+test('composite/cached PARAM goals cannot promote an ambiguous child into task completion',async()=>{
+  let calls=0;
+  const response=nativeValue(80);response.data.fields.push({...response.data.fields[0],rowIndex:7,value:81});
+  const result=await verifyGoalsThroughNativeTool(async()=>{calls++;return response;},[
+    {goalId:'parent',kind:'composite',checks:[fieldGoal,{...fieldGoal,goalId:'other',expectedValue:81}]}
+  ],tree);
+  assert.equal(calls,1,'the cached read must still be evaluated independently for each goal');
+  assert.equal(result.evaluations[0].verified,false);assert.equal(result.evaluations[0].status,'unverified');
+  assert.ok(result.evaluations[0].checks.every(check=>check.reason==='param-identity-ambiguous'));
+  assert.deepEqual(result.evaluations[0].verificationEvidence,[]);
+});
