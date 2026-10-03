@@ -2,13 +2,15 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import test from 'node:test';
 import { mkdirSync } from 'node:fs';
 import { discoverChecks } from './verify/checkRegistry.mjs';
 import { loadWorkspaces } from './verify/scriptGraph.mjs';
 import { planScript } from './verify/commandPlan.mjs';
+import { classifyOutcome, OUTCOME } from './verify/runner.mjs';
 
 const runner = fileURLToPath(new URL('./check.mjs', import.meta.url));
 const compatibilityRunner = fileURLToPath(new URL('./verify.mjs', import.meta.url));
@@ -435,6 +437,56 @@ test('failed aggregate does not hide reachable workspace-tail tests from indepen
     const report=JSON.parse(result.stdout);
     assert.ok(report.results.some(r=>r.scriptName === 'workspace:@test/a:test:tail' && r.status==='passed'),JSON.stringify(report.results));
   }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test('actual Playwright list reports retain skipped cases and strict incomplete execution', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sf-check-playwright-skips-'));
+  const require = createRequire(import.meta.url);
+  const cli = join(dirname(require.resolve('playwright/package.json')), 'cli.js');
+  const testModule = require.resolve('@playwright/test');
+  const env = {...process.env, FORCE_COLOR:'1'};
+  delete env.NODE_TEST_CONTEXT;
+  delete env.NO_COLOR;
+  try {
+    writeFileSync(join(root, 'playwright.config.mjs'),
+      'export default {testDir:".",testMatch:"*.spec.cjs",workers:1,retries:0,reporter:"list"};');
+    for (const [name, body, expected] of [
+      ['mixed', 'test("executed",()=>{});test.skip("native unavailable",()=>{});', OUTCOME.PARTIAL],
+      ['skipped', 'test.skip("native unavailable",()=>{});', OUTCOME.SKIPPED],
+      ['passed', 'test("executed",()=>{});', OUTCOME.PASSED]
+    ]) {
+      writeFileSync(join(root, 'proof.spec.cjs'), `const {test}=require(${JSON.stringify(testModule)});${body}`);
+      const result = spawnSync(process.execPath, [cli, 'test', '-c', join(root, 'playwright.config.mjs')],
+        {cwd:root, encoding:'utf8', env, timeout:30000, maxBuffer:1024 * 1024});
+      assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+      const classified = classifyOutcome(result.status, result.stdout, result.stderr);
+      assert.equal(classified.outcome, expected, `${name}: ${result.stdout}`);
+      if (name !== 'passed') assert.ok(classified.skippedLegs.some(leg => leg.startsWith('playwright:')));
+      writeFileSync(join(root, 'package.json'), JSON.stringify({scripts:{'test:proof':'node output.mjs'}}));
+      writeFileSync(join(root, 'output.mjs'), `process.stdout.write(${JSON.stringify(result.stdout)});`);
+      const strict = spawnSync(process.execPath, [runner, '--suite', 'test:proof', '--require-executed'],
+        {cwd:root, encoding:'utf8', timeout:30000});
+      const report = JSON.parse(strict.stdout);
+      assert.equal(strict.status, name === 'passed' ? 0 : 1, strict.stderr);
+      assert.equal(report.results[0].status, name === 'passed' ? 'passed' : 'unavailable');
+      assert.equal(report.completionVerified, name === 'passed');
+    }
+  } finally { rmSync(root, {recursive:true, force:true}); }
+});
+
+test('Playwright skip evidence requires complete counts and never masks a failed exit', () => {
+  const mixed = 'Running 85 tests using 1 worker\n  6 skipped\n  79 passed (22.4m)\n';
+  assert.deepEqual(classifyOutcome(0, mixed), {outcome:OUTCOME.PARTIAL, skippedLegs:['playwright:6-unverified-tests']});
+  assert.equal(classifyOutcome(0, '', mixed).outcome, OUTCOME.PARTIAL);
+  assert.equal(classifyOutcome(1, mixed).outcome, OUTCOME.FAILED);
+  assert.equal(classifyOutcome(0, 'Running 2 tests using 1 worker\n  1 passed (1s)\n').outcome, OUTCOME.SKIPPED);
+  assert.equal(classifyOutcome(0, 'Running 2 tests using 1 worker\n  1 passed (1s)\n  1 passed (1s)\n').outcome, OUTCOME.SKIPPED);
+  assert.equal(classifyOutcome(0, 'Running 2 tests using 1 worker\n  2 passed (1s)\n  2 passed (1s)\n').outcome, OUTCOME.SKIPPED);
+  assert.equal(classifyOutcome(0, 'Running 2 tests using 1 worker\n  2 passed (1s)\n  1 skipped\n').outcome, OUTCOME.SKIPPED);
+  assert.deepEqual(classifyOutcome(0, 'Running 2 tests using 1 worker, shard 1 of 2\n  1 did not run\n  1 passed (1s)\n'),
+    {outcome:OUTCOME.PARTIAL, skippedLegs:['playwright:1-unverified-tests']});
+  assert.equal(classifyOutcome(0, '0 skipped; skipped some cache\n  0 skipped\n').outcome, OUTCOME.PASSED);
+  assert.equal(classifyOutcome(0, 'Running 1 test using 1 worker\n  0 skipped\n  1 passed (1s)\n').outcome, OUTCOME.PASSED);
 });
 
 test('desktop noEmit tests retain independently selectable entries routed through the actual source runner', () => {

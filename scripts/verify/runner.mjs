@@ -215,6 +215,42 @@ export function detectSkipSignals(stdout, stderr = '') {
     else if(skipped>0)skippedLegs.push(`node-test:${skipped}-unverified-tests`);
   }
 
+  // Playwright's list reporter emits counts rather than JSON. Bind terminal
+  // counts to its announced test total; isolated skip prose is not evidence.
+  const playwrightSummaries = [];
+  let incompletePlaywright = false;
+  for (const source of [stdout, stderr]) {
+    let summary = null;
+    const finishSummary = () => {
+      if (!summary) return;
+      const counted = Object.values(summary.counts).reduce((sum, value) => sum + value, 0);
+      if (!summary.invalid && Number.isSafeInteger(summary.total) && counted === summary.total) playwrightSummaries.push(summary.counts);
+      else incompletePlaywright = true;
+      summary = null;
+    };
+    for (const line of (source ?? '').replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '').split(/\r?\n/u)) {
+      const start = /^Running (\d+) tests? using \d+ workers?(?:, shard \d+ of \d+)?$/u.exec(line);
+      if (start) {
+        finishSummary();
+        summary = {total:Number(start[1]), counts:{}};
+        continue;
+      }
+      const count = /^  (\d+) (passed|skipped|did not run|failed|flaky|interrupted)(?: \([^\r\n]+\))?\s*$/u.exec(line);
+      if (!summary || !count) continue;
+      if (Object.hasOwn(summary.counts, count[2]) || !Number.isSafeInteger(Number(count[1]))) summary.invalid = true;
+      else summary.counts[count[2]] = Number(count[1]);
+    }
+    finishSummary();
+  }
+  if (playwrightSummaries.length || incompletePlaywright) {
+    const executed = playwrightSummaries.reduce((sum, counts) => sum + (counts.passed ?? 0)
+      + (counts.failed ?? 0) + (counts.flaky ?? 0) + (counts.interrupted ?? 0), 0);
+    const skipped = playwrightSummaries.reduce((sum, counts) => sum + (counts.skipped ?? 0) + (counts['did not run'] ?? 0), 0);
+    if (executed === 0) { wholeSkipped = true; skippedLegs.push('playwright:no-executed-tests'); }
+    else if (skipped > 0) skippedLegs.push(`playwright:${skipped}-unverified-tests`);
+    if (incompletePlaywright) skippedLegs.push('playwright:incomplete-summary');
+  }
+
   for (const source of [stdout, stderr]) {
     if (typeof source !== 'string' || source.length === 0) continue;
     for (const candidate of extractTopLevelJsonValues(source)) {
