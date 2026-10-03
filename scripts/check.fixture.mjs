@@ -12,6 +12,65 @@ import { planScript } from './verify/commandPlan.mjs';
 
 const runner = fileURLToPath(new URL('./check.mjs', import.meta.url));
 const compatibilityRunner = fileURLToPath(new URL('./verify.mjs', import.meta.url));
+test('unknown tiers reject direct and compatibility entries before any check executes', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sf-check-unknown-tier-'));
+  try {
+    mkdirSync(join(root, 'scripts'), {recursive:true});
+    writeFileSync(join(root, 'package.json'), JSON.stringify({scripts:{}}));
+    writeFileSync(join(root, 'scripts/proof.test.mjs'),
+      'import test from "node:test";import {writeFileSync} from "node:fs";test("actual check",()=>writeFileSync("executed.txt","executed"));');
+    for (const entry of [runner, compatibilityRunner]) for (const selection of [
+      ['--tier', 'unti', '--list'],
+      ['--tier', 'unti', '--audit'],
+      ['--tier', 'unit,unti'],
+      ['--tier', 'unti', '--suite', 'file:scripts/proof.test.mjs'],
+      ['--tier', 'unit', '--require-tier', 'unti'],
+      ['--tier', 'unit', '--require-tier', 'unit,unti'],
+      ['--tier', 'unit,'],
+      ['--require-tier', ',unit']
+    ]) {
+      const result = spawnSync(process.execPath,
+        [entry, ...selection, '--json-out', 'report.json'], {cwd:root, encoding:'utf8'});
+      assert.notEqual(result.status, 0, `${entry} ${selection.join(' ')} must reject unknown/empty tiers`);
+      assert.match(result.stderr, /Invalid check tier.*(?:unti|empty)/);
+      assert.equal(result.stdout.trim(), '', 'invalid selection cannot report successful checks');
+      assert.equal(existsSync(join(root, 'executed.txt')), false, 'invalid selection cannot execute a valid prefix');
+      assert.equal(existsSync(join(root, 'report.json')), false, 'invalid selection cannot write a success report');
+    }
+  } finally { rmSync(root, {recursive:true, force:true}); }
+});
+
+test('all documented tiers remain selectable and required tiers retain strict unavailable handling', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sf-check-known-tiers-'));
+  try {
+    mkdirSync(join(root, 'scripts'), {recursive:true});
+    writeFileSync(join(root, 'package.json'), JSON.stringify({scripts:{}}));
+    writeFileSync(join(root, 'scripts/proof.test.mjs'), 'import test from "node:test";test("actual assertion",()=>{});');
+    writeFileSync(join(root, 'scripts/missing.test.mjs'), 'import test from "node:test";test("missing fixture",{skip:"native corpus missing"},()=>{});');
+    const tiers = ['governance', 'unit', 'synthetic', 'native', 'release', 'e2e'];
+    for (const value of [...tiers, tiers.join(','), 'all']) {
+      const result = spawnSync(process.execPath, [runner, '--tier', value, '--list'], {cwd:root, encoding:'utf8'});
+      assert.equal(result.status, 0, result.stderr);
+      const report = JSON.parse(result.stdout);
+      assert.equal(report.completionVerified, false);
+      assert.ok(report.suites.every(row => value === 'all' || value.split(',').includes(row.tier)), value);
+    }
+    for (const requirement of [
+      ['--require-tier', 'unit'],
+      ['--require-tier', 'governance,unit'],
+      ['--require-executed'],
+      ['--require-suite', 'file:scripts/missing.test.mjs']
+    ]) {
+      const result = spawnSync(process.execPath, [runner, '--tier', 'unit', ...requirement], {cwd:root, encoding:'utf8'});
+      const report = JSON.parse(result.stdout);
+      assert.equal(result.status, 1, JSON.stringify(report));
+      assert.equal(report.results.find(row => row.scriptName === 'file:scripts/missing.test.mjs')?.status, 'unavailable');
+      assert.equal(report.ok, false);
+      assert.equal(report.completionVerified, false);
+    }
+  } finally { rmSync(root, {recursive:true, force:true}); }
+});
+
 test('public MAP fixtures stay selectable while real resource probes require a native environment', () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
   const registry = discoverChecks(root, loadWorkspaces(root));

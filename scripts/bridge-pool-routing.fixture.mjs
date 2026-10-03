@@ -1,5 +1,6 @@
 // Exercise the actual production pool module with deferred startup promises.
-// The seam replaces child-process startup only; no native/Electron process runs.
+// The seam replaces process startup and source compilation; no native/Electron
+// process runs. Compiler lifecycle has separate real-process/source-SDK tests.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
@@ -21,8 +22,8 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function harness(startup = () => undefined) {
-  const starts = [], requests = [], disposed = [];
+function harness(startup = () => undefined, platform = process.platform, sourceBuild = () => undefined) {
+  const starts = [], requests = [], disposed = [], sourceBuilds = [], launches = [];
   class BridgeDaemonError extends Error {
     constructor(code, message, retryable = false) { super(message); this.code = code; this.retryable = retryable; }
   }
@@ -36,6 +37,7 @@ function harness(startup = () => undefined) {
   });
   const BridgeDaemonClient = {
     start(options) {
+      launches.push('daemon');
       starts.push(options);
       return startup(options, starts.length, makeClient) ?? Promise.resolve(makeClient(options));
     }
@@ -46,10 +48,14 @@ function harness(startup = () => undefined) {
   assert.deepEqual((built.diagnostics ?? []).filter(item => item.category === ts.DiagnosticCategory.Error), []);
   const exports = {};
   vm.runInNewContext(built.outputText + '\nexports.fixturePool = clients; exports.fixtureLeases = client => activeClientUses.get(client) ?? 0;', {
-    exports, module: { exports }, process, Buffer, Error,
+    exports, module: { exports }, process: { ...process, platform }, Buffer, Error,
     require(name) {
       if (name.startsWith('node:')) return require(name);
       if (name === './bridgeDaemonClient.js') return { BridgeDaemonClient, BridgeDaemonError };
+      if (name === './bridgeSourceBuild.js') return { async prepareBridgeSourceBuild(options) {
+        sourceBuilds.push(options); launches.push('source-build');
+        await sourceBuild(options, sourceBuilds.length);
+      } };
       if (name === './bridgeTransportTiming.js') return { createBridgeTransportTimingCollector() { throw new Error('Unexpected timing capability'); } };
       throw new Error(`Unexpected pool runtime import: ${name}`);
     }
@@ -59,8 +65,54 @@ function harness(startup = () => undefined) {
     filePath: path.join(fixtureRoot, 'sample.luabnd'), allowedRoots: [fixtureRoot],
     workspaceSessionId: 'save-session', timeoutMs: 120_000, maxFrameBytes: 32 * 1024 * 1024,
     ...overrides });
-  return { ...exports, starts, requests, disposed, makeClient, BridgeDaemonError, options };
+  return { ...exports, starts, requests, disposed, sourceBuilds, launches, makeClient, BridgeDaemonError, options };
 }
+
+test('a Linux source fallback prepares compilation before the pooled daemon starts', async () => {
+  const h = harness(undefined, 'linux');
+  const result = await h.runBridge(h.options({ bridgeExecutablePath: undefined }));
+  assert.equal(result.parseStatus, 'partial');
+  assert.deepEqual(h.launches, ['source-build', 'daemon']);
+  assert.equal(h.sourceBuilds[0].args[0], 'build');
+  assert.equal(h.sourceBuilds[0].cwd, fixtureRoot);
+  assert.ok(h.starts[0].args.includes('--no-build'));
+  assert.ok(h.starts[0].args.includes('--no-restore'));
+  await h.disposeBridgeDaemonPool();
+});
+
+test('a ready Linux source daemon serves its next request without recompilation', async () => {
+  const h = harness(undefined, 'linux');
+  const options = h.options({ bridgeExecutablePath: undefined });
+  await h.runBridge(options);
+  const ready = h.requests[0].client;
+  await h.runBridge(options);
+  assert.equal(h.requests[1].client, ready);
+  assert.equal(h.starts.length, 1);
+  assert.equal(h.sourceBuilds.length, 1, 'A ready daemon must not wait for an unnecessary source build.');
+  await h.disposeBridgeDaemonPool();
+});
+
+test('concurrent Linux source callers recheck the pool after compiling and share one daemon', async () => {
+  const compilation = deferred();
+  const h = harness(undefined, 'linux', () => compilation.promise);
+  const options = h.options({ bridgeExecutablePath: undefined });
+  const first = h.runBridge(options);
+  const second = h.runBridge(options);
+  try {
+    await settleTurns();
+    assert.equal(h.sourceBuilds.length, 2, 'Each waiting caller must retain its own compiler cancellation ownership.');
+    assert.equal(h.starts.length, 0, 'The daemon cannot start before compilation succeeds.');
+    compilation.resolve();
+    const results = await Promise.all([first, second]);
+    assert.equal(results.every(result => result.parseStatus === 'partial'), true);
+    assert.equal(h.starts.length, 1);
+    assert.equal(h.requests[0].client, h.requests[1].client);
+  } finally {
+    compilation.resolve();
+    await Promise.all([first, second]);
+    await h.disposeBridgeDaemonPool();
+  }
+});
 
 test('a ready covering client serves a read before an earlier compatible startup settles', async () => {
   const gate = deferred();

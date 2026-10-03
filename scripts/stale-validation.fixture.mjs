@@ -89,20 +89,36 @@ test('early cleanup never fabricates a watchdog timeout or successful terminatio
 
 test('renderer tests retain fixed localized assertions and per-test profile cleanup', async () => {
   const source = await readFile(new URL('../apps/desktop/e2e/playwright/tests/renderer.spec.mjs', import.meta.url), 'utf8');
+  const fixture = await readFile(new URL('../apps/desktop/e2e/playwright/owned-test.mjs', import.meta.url), 'utf8');
   const verify = text => {
     assert.doesNotMatch(text, /mode:\s*'serial'/);
-    assert.match(text, /test\.afterEach/);
-    assert.match(text, /userDataDirs\.get\(test\.info\(\)\.testId\)/);
+    assert.match(text, /import \{[^}]*\btest\b[^}]*\btestWorkspace\b[^}]*\} from '\.\.\/owned-test\.mjs'/);
+    assert.match(text, /--user-data-dir=\$\{path\.join\(testWorkspace\(\)\.root, 'profile'\)\}/);
+    assert.match(text, /await testWorkspace\(\)\.registerApp\(app\)/);
     for (const label of ['参数文件', '行', '字段', '动画', '文本分类', '文本条目', '文件 / 状态机 / 状态', '条件与命令']) {
       assert.ok(text.includes(`name: '${label}'`), `missing fixed localized region ${label}`);
     }
     assert.match(text, /getByLabel\('行为工作台'\)/);
   };
+  const verifyFixture = text => {
+    assert.match(text, /ownedElectronResources:\s*\[async/);
+    assert.match(text, /owners\.set\(testInfo\.testId, owner\)/);
+    assert.match(text, /try\s*\{\s*await use\(owner\);\s*\}\s*finally\s*\{\s*owners\.delete\(testInfo\.testId\);\s*await owner\.dispose\(\);\s*\}/);
+    assert.match(text, /auto:\s*true/);
+    assert.match(text, /owners\.get\(test\.info\(\)\.testId\)/);
+  };
   verify(source);
+  verifyFixture(fixture);
   for (const label of ['参数文件', '行', '字段', '动画', '文本分类', '文本条目', '文件 / 状态机 / 状态', '条件与命令']) {
     assert.throws(() => verify(source.replaceAll(`name: '${label}'`, "name: 'incorrect-label'")), `negative label ${label}`);
   }
   assert.throws(() => verify(source + "\ntest.describe.configure({ mode: 'serial' });"));
+  assert.throws(() => verify(source.replace("'../owned-test.mjs'", "'@playwright/test'")));
+  assert.throws(() => verify(source.replace('testWorkspace().root', 'sharedProfileRoot')));
+  assert.throws(() => verify(source.replace('await testWorkspace().registerApp(app);', '')));
+  assert.throws(() => verifyFixture(fixture.replace('auto: true', 'auto: false')));
+  assert.throws(() => verifyFixture(fixture.replace('await owner.dispose();', '')));
+  assert.throws(() => verifyFixture(fixture.replace('owners.delete(testInfo.testId);', '')));
 });
 
 
@@ -114,22 +130,20 @@ test('actual Playwright runner executes the tail after a failure with an isolate
   await mkdir(parent, { recursive: true });
   const dir = await mkdtemp(join(parent, 'issue24-playwright-'));
   const source = await readFile(new URL('../apps/desktop/e2e/playwright/tests/renderer.spec.mjs', import.meta.url), 'utf8');
-  const hooks = source.slice(source.indexOf('const userDataDirs ='), source.indexOf('// Default Playwright mode'));
   const modes = [...source.matchAll(/test\.describe\.configure\([^;]+;/g)].map(match => match[0]).join('\n');
   const pathsFile = join(dir, 'profiles.json');
   const reportFile = join(dir, 'report.json');
-  const spec = `import { test, expect } from '@playwright/test';
-import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path';
-${hooks}
+  const spec = `import { test, expect, testWorkspace } from ${JSON.stringify(new URL('../apps/desktop/e2e/playwright/owned-test.mjs', import.meta.url).href)};
+import fs from 'node:fs'; import path from 'node:path';
 ${modes}
 const recordProfile = dir => fs.appendFileSync(${JSON.stringify(pathsFile)}, JSON.stringify(dir) + '\\n');
 test('deliberate first failure', () => {
-  const dir = userDataDirs.get(test.info().testId); recordProfile(dir);
+  const dir = testWorkspace().root; recordProfile(dir);
   fs.writeFileSync(path.join(dir, 'state-leak'), 'first-test');
   expect(false, 'deliberate independent-test failure').toBe(true);
 });
 test('tail still executes with clean profile', () => {
-  const dir = userDataDirs.get(test.info().testId); recordProfile(dir);
+  const dir = testWorkspace().root; recordProfile(dir);
   expect(fs.existsSync(path.join(dir, 'state-leak'))).toBe(false);
 });
 `;

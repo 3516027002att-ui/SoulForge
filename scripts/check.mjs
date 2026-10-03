@@ -6,6 +6,15 @@ import { discoverChecks } from './verify/checkRegistry.mjs';
 import { runPlannedSuite, OUTCOME } from './verify/runner.mjs';
 import { summarizePlan } from './verify/commandPlan.mjs';
 
+const checkTiers = ['governance','unit','synthetic','native','release','e2e'];
+function parseCheckTiers(value, option) {
+  if (option === '--tier' && value === 'all') return [...checkTiers];
+  const tiers = value.split(',');
+  const invalid = tiers.filter(tier => !checkTiers.includes(tier));
+  if (invalid.length) throw new Error(`Invalid check tier for ${option}: ${invalid.map(tier => tier || '(empty)').join(', ')}. Expected ${checkTiers.join(', ')}${option === '--tier' ? ', or all' : ''}`);
+  return tiers;
+}
+
 const options = {tiers:['unit'],suites:[],exclude:[],requiredTiers:[],requiredSuites:[],filter:null,list:false,audit:false,timeoutMs:900000,jsonOut:null};
 const args = process.argv.slice(2);
 for (let i = 0; i < args.length; i++) {
@@ -17,11 +26,11 @@ for (let i = 0; i < args.length; i++) {
   else if (['--tier','--suite','--exclude','--filter','--require-tier','--require-suite','--timeout-ms','--json-out'].includes(arg)) {
     const value = args[++i];
     if (!value || value.startsWith('--')) throw new Error(`${arg} requires a value`);
-    if (arg === '--tier') options.tiers = value === 'all' ? ['governance','unit','synthetic','native','release','e2e'] : value.split(',');
+    if (arg === '--tier') options.tiers = parseCheckTiers(value, arg);
     if (arg === '--suite') options.suites.push(...value.split(','));
     if (arg === '--exclude') options.exclude.push(...value.split(','));
     if (arg === '--filter') options.filter = value;
-    if (arg === '--require-tier') options.requiredTiers.push(...value.split(','));
+    if (arg === '--require-tier') options.requiredTiers.push(...parseCheckTiers(value, arg));
     if (arg === '--require-suite') options.requiredSuites.push(...value.split(','));
     if (arg === '--timeout-ms') options.timeoutMs = Number(value);
     if (arg === '--json-out') options.jsonOut = value;

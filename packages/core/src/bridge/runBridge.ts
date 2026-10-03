@@ -268,15 +268,14 @@ async function runBridgeWithPool<T = unknown>(
   let leasedClient: BridgeDaemonClient | undefined;
   let acquiredLease: BridgeClientLease | undefined;
   try {
-    if (launch.sourceBuildArgs) {
-      await prepareBridgeSourceBuild({
-        executable: launch.executable,
-        args: launch.sourceBuildArgs,
-        cwd: dirname(bridgeProjectPath),
-        ...(options.signal ? { signal: options.signal } : {}),
-        ...(options.onProgress ? { onProgress: options.onProgress } : {})
-      });
-    }
+    const sourceBuildArgs = launch.sourceBuildArgs;
+    const prepareSource = sourceBuildArgs ? () => prepareBridgeSourceBuild({
+      executable: launch.executable,
+      args: sourceBuildArgs,
+      cwd: dirname(bridgeProjectPath),
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.onProgress ? { onProgress: options.onProgress } : {})
+    }) : undefined;
     const poolScope = transportTiming?.begin('poolAcquireMs') ?? null;
     const lease = await getOrCreateClient(poolKey, {
       executable: launch.executable,
@@ -291,7 +290,7 @@ async function runBridgeWithPool<T = unknown>(
       maxFrameBytes,
       maxConcurrency,
       startupTimeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    }, launch, clientPool);
+    }, launch, clientPool, prepareSource);
     acquiredLease = lease;
     const client = lease.client;
     leasedClient = client;
@@ -682,7 +681,8 @@ async function getOrCreateClient(
   key: string,
   options: Parameters<typeof BridgeDaemonClient.start>[0],
   launch: { executable: string; args: string[] },
-  clientPool: BridgeClientPool
+  clientPool: BridgeClientPool,
+  prepareSource?: () => Promise<void>
 ): Promise<BridgeClientLease> {
   const covering = await findCoveringClient(
     clientPool,
@@ -704,6 +704,13 @@ async function getOrCreateClient(
       return { client, key, promise: existing };
     }
     if (clientPool.get(key) === existing) clientPool.delete(key);
+    return getOrCreateClient(key, options, launch, clientPool, prepareSource);
+  }
+
+  if (prepareSource) {
+    // Keep compiler cancellation owned by each caller, then recheck the pool:
+    // another caller may have started the daemon while compilation completed.
+    await prepareSource();
     return getOrCreateClient(key, options, launch, clientPool);
   }
 

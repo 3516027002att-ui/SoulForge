@@ -27,7 +27,9 @@ internal sealed class WitchyBndReadOnlyUnpacker(string? executable) : ILargeReso
         {
             if (string.IsNullOrWhiteSpace(executable) || !Path.IsPathFullyQualified(executable) || !File.Exists(executable))
                 throw new LargeResourceCacheException("LARGE_RESOURCE_UNPACKER_MISSING", "Import a local WitchyBND installation and configure SOULFORGE_LARGE_RESOURCE_UNPACKER; no unpacker is bundled.");
-            var directory = Path.GetDirectoryName(executable)!;
+            var executablePath = Path.GetFullPath(executable);
+            var pathComparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+            var directory = Path.GetDirectoryName(executablePath)!;
             var configurations = new[] { Path.Combine(directory, "appsettings.json"),
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WitchyBND", "appsettings.user.json"),
                 Path.Combine(directory, "appsettings.override.json") };
@@ -54,9 +56,11 @@ internal sealed class WitchyBndReadOnlyUnpacker(string? executable) : ILargeReso
             if (recursive || dcx || defer)
                 throw new LargeResourceCacheException("LARGE_RESOURCE_UNPACKER_CONFIG_UNSAFE", "Imported WitchyBND must disable recursive conversion, DCX-only conversion and deferred tools for basic unpack transport.");
             var components = Directory.EnumerateFiles(directory)
-                .Where(path => path == executable || Path.GetExtension(path).Equals(".dll", StringComparison.OrdinalIgnoreCase)
+                .Select(Path.GetFullPath)
+                .Where(path => pathComparer.Equals(path, executablePath) || Path.GetExtension(path).Equals(".dll", StringComparison.OrdinalIgnoreCase)
                     || Path.GetExtension(path).Equals(".so", StringComparison.OrdinalIgnoreCase))
-                .Concat(configurations.Where(File.Exists)).Distinct().OrderBy(path => path, StringComparer.Ordinal).ToArray();
+                .Concat(configurations.Where(File.Exists).Select(Path.GetFullPath))
+                .Distinct(pathComparer).OrderBy(path => path, pathComparer).ToArray();
             if (components.Length > 128 || components.Sum(path => new FileInfo(path).Length) > 512L * 1024 * 1024)
                 throw new LargeResourceCacheException("LARGE_RESOURCE_UNPACKER_IDENTITY_INVALID", "Imported tool installation exceeds the bounded identity inventory.");
             var version = "soulforge-basic-unpack-v1|-u|-b|-p|-t|-l";
@@ -170,8 +174,20 @@ internal sealed class LargeResourceReadCache(string cacheRoot, ILargeResourceUnp
     private const int MaxManifestBytes = 4 * 1024 * 1024;
     private const int MaxEntries = 100000;
 
-    public static bool RequiresCache(string source) => new FileInfo(source).Length > MaxLeafBytes
-        && (source.EndsWith(".dcx", StringComparison.OrdinalIgnoreCase) || Path.GetExtension(source).EndsWith("bnd", StringComparison.OrdinalIgnoreCase));
+    public static bool RequiresCache(string source)
+    {
+        if (new FileInfo(source).Length <= MaxLeafBytes) return false;
+        using var stream = File.Open(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        Span<byte> magic = stackalloc byte[4];
+        if (stream.Read(magic) != magic.Length) return false;
+        if (magic.SequenceEqual("BND4"u8)) return true;
+        // An opaque DCX wrapper alone says nothing about its native payload.
+        // Only explicit binder names enter this transport; its source-bound
+        // unpack manifest must still validate the actual BND4 container.
+        return magic.SequenceEqual("DCX\0"u8)
+            && Path.GetExtension(source).Equals(".dcx", StringComparison.OrdinalIgnoreCase)
+            && Path.GetExtension(Path.GetFileNameWithoutExtension(source)).EndsWith("bnd", StringComparison.OrdinalIgnoreCase);
+    }
 
     public static LargeResourceReadCache FromEnvironment() => new(
         Environment.GetEnvironmentVariable("SOULFORGE_READ_CACHE_ROOT") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SoulForge", "read-cache"),

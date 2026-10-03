@@ -2,6 +2,74 @@ using Xunit;
 
 public sealed class LargeResourceReadCacheTests
 {
+    [Theory]
+    [InlineData("texture.tpf.dcx", "DCX\0")]
+    [InlineData("model.flver.dcx", "DCX\0")]
+    [InlineData("events.emevd.dcx", "DCX\0")]
+    [InlineData("unknown.dcx", "DCX\0")]
+    [InlineData("misnamed.chrbnd.dcx", "TPF\0")]
+    [InlineData("misnamed.chrbnd", "TPF\0")]
+    public void OversizedStandaloneOrMisnamedResourcesStayOnTheirNativeRoute(string name, string magic)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "sf-large-cache-route-" + Guid.NewGuid());
+        Directory.CreateDirectory(root);
+        try
+        {
+            var source = Path.Combine(root, name);
+            using (var stream = File.Create(source))
+            {
+                stream.Write(System.Text.Encoding.ASCII.GetBytes(magic));
+                stream.SetLength(LargeResourceReadCache.MaxLeafBytes + 1);
+            }
+            Assert.False(LargeResourceReadCache.RequiresCache(source));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Theory]
+    [InlineData("container.bin", "BND4", true)]
+    [InlineData("c0000.CHRBND.DCX", "DCX\0", true)]
+    [InlineData("container.chrbnd.dcx", "DCX\0", false)]
+    public void CacheRoutingKeepsBoundedBinderDetectionAndTheSizeThreshold(string name, string magic, bool oversized)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "sf-large-cache-binder-" + Guid.NewGuid());
+        Directory.CreateDirectory(root);
+        try
+        {
+            var source = Path.Combine(root, name);
+            using (var stream = File.Create(source))
+            {
+                stream.Write(System.Text.Encoding.ASCII.GetBytes(magic));
+                stream.SetLength(oversized ? LargeResourceReadCache.MaxLeafBytes + 1 : LargeResourceReadCache.MaxLeafBytes);
+            }
+            Assert.Equal(oversized, LargeResourceReadCache.RequiresCache(source));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Fact]
+    public async Task ImportedToolIdentityAlwaysHashesTheExecutableUnderHostPathSemantics()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "sf-large-cache-executable-" + Guid.NewGuid());
+        Directory.CreateDirectory(root);
+        var executable = Path.Combine(root, "WitchyBND.exe");
+        await File.WriteAllBytesAsync(executable, new byte[] { 1, 2, 3 });
+        await File.WriteAllBytesAsync(Path.Combine(root, "unchanged.dll"), new byte[] { 4, 5, 6 });
+        try
+        {
+            var configured = OperatingSystem.IsWindows() ? executable.ToLowerInvariant() : executable;
+            var tool = new WitchyBndReadOnlyUnpacker(configured);
+            var original = tool.Identity;
+            await File.WriteAllBytesAsync(executable, new byte[] { 7, 8, 9 });
+            Assert.NotEqual(original, tool.Identity);
+            Assert.Equal(new WitchyBndReadOnlyUnpacker(executable).Identity, tool.Identity);
+            if (!OperatingSystem.IsWindows())
+                Assert.Equal("LARGE_RESOURCE_UNPACKER_MISSING", Assert.Throws<LargeResourceCacheException>(
+                    () => new WitchyBndReadOnlyUnpacker(Path.Combine(root, "witchybnd.exe")).Identity).Code);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
     [Fact]
     public async Task UnpackCacheIsContentBoundAndNeverPassesTheOriginalToTheTool()
     {

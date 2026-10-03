@@ -91,6 +91,8 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
     const loadMore = window.getByTestId('tae-load-more');
     const countLoaded = async () => (await animations.locator('.tae-animation-group__count').allTextContents())
       .reduce((total, text) => total + Number(text), 0);
+    // The workbench mounts before its first native page; no button yet is not EOF.
+    await expect.poll(countLoaded, { timeout: 120_000 }).toBeGreaterThan(0);
     for (let page = 0; page < 40 && await loadMore.count() > 0; page += 1) {
       await expect(loadMore).toBeEnabled({ timeout: 30_000 });
       const previousCount = await countLoaded();
