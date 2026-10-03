@@ -31,6 +31,7 @@ const POSIX_PATH = /(?<![A-Za-z0-9_./:%\\-])\/[^\s'"()（）\[\]「」『』，�
 const PHYSICAL_URI_SELECTOR = new RegExp(
   [WINDOWS_DRIVE_PATH.source, POSIX_PATH.source, '//', '(?:^|[=&])/'].join('|')
 );
+const ABSOLUTE_URI_SUFFIX = new RegExp([WINDOWS_DRIVE_PATH.source, '^/', '//'].join('|'));
 const URI_OR_PATH = new RegExp(
   [URI.source, WINDOWS_DRIVE_PATH.source, UNC_OR_DEVICE_PATH.source, POSIX_PATH.source].join('|'), 'g'
 );
@@ -74,6 +75,12 @@ function isLogicalFileUri(value: string): boolean {
   if (!match) return false;
   const authority = match[1]!;
   const suffix = match[2]!;
+  const decodedSuffix = decodeUriComponent(suffix);
+  if (decodedSuffix === undefined) return false;
+  // One slash separates the logical namespace from its relative resource path.
+  // Decoding must not reveal an extra root slash or an embedded absolute drive.
+  const relativeSuffix = decodedSuffix.startsWith('/') ? decodedSuffix.slice(1) : decodedSuffix;
+  if (ABSOLUTE_URI_SUFFIX.test(relativeSuffix)) return false;
   if (authority === '') return /^file:\/\/\/workspace(?:\/|$)/i.test(value);
   if (LOGICAL_RESOURCE_AUTHORITIES.has(authority.toLowerCase())) return true;
   // Actual no-source labels from Bridge ParserTypes and the EMEVD outline.

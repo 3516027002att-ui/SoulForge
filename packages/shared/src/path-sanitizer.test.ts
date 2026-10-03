@@ -64,6 +64,26 @@ it('logical authority does not permit encoded path escapes or physical separator
   ]) assert.equal(maskPathFragments(uri), MASKED_PATH_PLACEHOLDER, uri);
 });
 
+it('logical namespaces cannot carry absolute paths in their decoded URI suffix', () => {
+  for (const uri of [
+    'file://chr/C:/Users/alice/secret.flver',
+    'file://chr//home/alice/secret.flver',
+    'file://chr/C%3A%2FUsers%2Falice%2Fsecret.flver',
+    'file://chr/C%253A%252FUsers%252Falice%252Fsecret.flver',
+    'file://chr/%2Fhome%2Falice%2Fsecret.flver',
+    'file://chr/%252Fhome%252Falice%252Fsecret.flver',
+    'FILE://CHR/c%253a%252fUsers%252falice%252fsecret.flver',
+    'file://map/models/C:/Users/alice/secret.flver',
+    'file://param/nested//home/alice/secret.param',
+    'file:///workspace/C:/Users/alice/secret.flver',
+    'file:///workspace/%252Fhome%252Falice%252Fsecret.flver'
+  ]) {
+    assert.equal(maskPathFragments(uri), MASKED_PATH_PLACEHOLDER, uri);
+    assert.equal(maskPathFragments(`Read failed: ${uri} (retry later)`),
+      `Read failed: ${MASKED_PATH_PLACEHOLDER} (retry later)`, uri);
+  }
+});
+
 it('logical file URI query and fragment cannot carry embedded physical paths', () => {
   for (const uri of [
     'file://regulation.bin?path=C:/private/demo.fmg',
@@ -94,7 +114,11 @@ it('relative query labels and encoded container selectors keep their logical ide
     'file://pack.bnd#bnd/child/dir%2Fentry.fmg',
     'file://pack.bnd#bnd/child/dir%252Fentry.fmg',
     'file://pack.bnd!/dir%2Fentry.fmg',
-    'file://chr/pack.bnd!/dir%252Fentry.fmg'
+    'file://chr/pack.bnd!/dir%252Fentry.fmg',
+    'file://chr/c0000/models/c0000.flver',
+    'file://chr/c0000.anibnd.dcx!/animations/c0000.tae',
+    'file://map/mapstudio/m10_00_00_00.msb.dcx?variant=base',
+    'file:///workspace/chr/c0000.flver?version=2#bnd/entry'
   ]) assert.equal(maskPathFragments(uri), uri, uri);
 });
 
