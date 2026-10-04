@@ -80,6 +80,15 @@ test('short header reads are assembled without reading past the eight-byte probe
 test('SFBN fixture enumeration retains its existing fixture reader',async()=>{
  const h=harness({header:Buffer.from('BND4SFBN')});const out=await h.invoke('listContainerChildrenPage',uri,0,100);assert.equal(out.totalCount,205);assert.equal(h.calls.some(([n])=>n==='bridge'),false);assert.equal(h.calls.filter(([n])=>n==='list').length,1);
 });
+test('DCX-wrapped SFBN retains fixture enumeration after the native format refusal',async()=>{
+ const h=harness({header:Buffer.from('DCX\0owned'),bridge:()=>({parseStatus:'failed',diagnostics:[{severity:'error',code:'DCX_DOCUMENT_READ_FAILED',message:'Native BND4 header unsupported'}]})});const out=await h.invoke('listContainerChildrenPage',uri,0,100);assert.equal(out.ok,true);assert.equal(out.totalCount,205);assert.equal(h.calls.filter(([n])=>n==='list').length,1);
+});
+test('native format failure stays a failure when the fixture reader has no children',async()=>{
+ const h=harness({nativeFallback:true,bridge:()=>({parseStatus:'failed',diagnostics:[{severity:'error',code:'DCX_DOCUMENT_READ_FAILED',message:'Native header unsupported'}]})});const out=await h.invoke('listContainerChildrenPage',uri,0,100);assert.equal(out.ok,false);assert.equal(out.diagnostics[0].code,'DCX_DOCUMENT_READ_FAILED');
+});
+test('native root refusal cannot fall back to the fixture reader',async()=>{
+ const h=harness({header:Buffer.from('DCX\0owned'),bridge:()=>({parseStatus:'failed',diagnostics:[{severity:'error',code:'BRIDGE_PATH_OUTSIDE_ROOTS',message:'Refused'}]})});const out=await h.invoke('listContainerChildrenPage',uri,0,100);assert.equal(out.ok,false);assert.equal(h.calls.some(([n])=>n==='list'),false);
+});
 test('nonpaged loose BND4 listing follows the same native route',async()=>{
  const h=harness({nativeFallback:true,header:Buffer.from('BND4\0\0\0\0'),bridge:input=>({parseStatus:'partial',diagnostics:[],data:{format:'BND4',entryCount:3,entries:nativeEntries}})});const out=await h.invoke('listContainerChildren',uri);assert.equal(out.ok,true);assert.equal(out.children.length,3);assert.equal(h.calls.find(([n])=>n==='bridge')[1].command,'list-bnd4-entries');
 });

@@ -157,8 +157,22 @@ async function loadContainerChildrenTable(
     }
     allowedRoots = [...roots.allowedRoots];
   }
-  return enumerateNativeContainerEntries(file.absolutePath, sourceUri,
+  const native = await enumerateNativeContainerEntries(file.absolutePath, sourceUri,
     allowedRoots ?? [dirname(file.absolutePath)], kind);
+  if (kind === 'dcx' && !native.ok
+    && native.diagnostics.some(diagnostic => diagnostic.code === 'DCX_DOCUMENT_READ_FAILED')) {
+    // A valid DCX may wrap an SFBN fixture, whose binder layout is deliberately
+    // outside native authority. Only the existing fixture reader can confirm
+    // nonempty children; failed/empty native containers and permission refusals
+    // retain their original native diagnosis.
+    const fixture = await listNativeContainerChildren(file.absolutePath, {
+      relativePath: file.relativePath, recursive
+    });
+    if (fixture.ok && fixture.children.length > 0) {
+      return { ok: true, children: fixture.children, diagnostics: fixture.diagnostics };
+    }
+  }
+  return native;
 }
 
 /** Complete native entry table, projected to logical names and read-only capabilities. */
