@@ -10,16 +10,26 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import semver from 'semver';
 import { runProcess, processSucceeded } from '../subprocess-control.mjs';
+import { OWNED_BUILD_INPUT_HASH_FIELDS, OWNED_BUILD_TOOL_HASH_FIELDS, captureOwnedBuildInputs, resolveOwnedInstallerTools } from './owned-build-inputs.mjs';
 
 const entrypoint = fileURLToPath(import.meta.url);
+const expectedRepositoryRoot = resolve(dirname(entrypoint), '../..');
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const fail = (code, message) => Object.assign(new Error(`${code}: ${message}`), { code });
 const nonClaims = ['Application-initiated automatic update/feed/download/quitAndInstall', 'Upgrade of the official SoulForge installation',
   'Different-source version regression; A/B use the same source with distinct package metadata', 'Signing, SmartScreen/UAC and cross-machine acceptance'];
 const inside = (root, path) => { const value = relative(resolve(root), resolve(path)); return value !== '' && value !== '..' && !value.startsWith(`..\\`) && !value.startsWith('../') && !isAbsolute(value); };
 async function exists(path) { try { await lstat(path); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } }
+const samePath = (left, right) => resolve(left).toLowerCase() === resolve(right).toLowerCase();
 
-export async function validateInstalledManifest(manifest) {
+async function readCurrentHead(repositoryRoot, ports = {}) {
+  const result = await (ports.runProcess ?? runProcess)({ command: 'git', args: ['rev-parse', 'HEAD'], cwd: repositoryRoot, timeoutMs: 15000 });
+  const head = result.stdout?.trim();
+  if (!processSucceeded(result) || !/^[a-f0-9]{40}$/i.test(head ?? '')) throw fail('UPDATE_INSTALLED_CHECKOUT_INVALID', 'Current checkout HEAD could not be read.');
+  return head.toLowerCase();
+}
+
+export async function validateInstalledManifest(manifest, { expectedHeadSha, repositoryRoot } = {}, ports = {}) {
   if (manifest?.schemaVersion !== 1 || manifest.execute !== true || manifest.scope !== 'unsigned-owned-identity-manual-nsis-a-to-b-same-source') {
     throw fail('UPDATE_INSTALLED_APPROVAL_REQUIRED', 'An explicit approved actual A/B manifest is required.');
   }
@@ -69,11 +79,41 @@ export async function validateInstalledManifest(manifest) {
       return JSON.parse(bytes.toString('utf8'));
     };
     const receipt = await readBoundJson(manifest.buildReceiptPath, manifest.buildReceiptSha256);
-    assert.equal(receipt.schemaVersion, 1); assert.ok(semver.valid(receipt.builderVersion));
+    assert.equal(receipt.schemaVersion, 1); assert.equal(receipt.builderVersion, '26.16.1');
     assert.match(receipt.sourceHead, /^[a-f0-9]{40}$/i); assert.deepEqual(receipt.identity, identity);
     for (const name of ['trackedDiffSha256', 'productionSourceHash', 'productionOutputHash']) {
       assert.match(receipt[name] ?? '', /^[a-f0-9]{64}$/, `actual ${name} is required`);
     }
+    const inputs = receipt.buildInputs, tools = receipt.tools;
+    assert.ok(inputs && typeof inputs === 'object', 'current buildInputs are required');
+    assert.ok(tools && typeof tools === 'object', 'current builder/tool hashes are required');
+    assert.ok(isAbsolute(inputs.repositoryRoot ?? ''), 'buildInputs must bind an absolute repositoryRoot');
+    assert.match(inputs.headSha ?? '', /^[a-f0-9]{40}$/i, 'buildInputs must bind current HEAD');
+    assert.equal(inputs.headSha.toLowerCase(), receipt.sourceHead.toLowerCase(), 'buildInputs HEAD must match the build receipt');
+    for (const name of OWNED_BUILD_INPUT_HASH_FIELDS) assert.match(inputs[name] ?? '', /^[a-f0-9]{64}$/, `actual buildInputs.${name} is required`);
+    assert.equal(inputs.trackedDiffSha256, receipt.trackedDiffSha256, 'legacy trackedDiffSha256 must match the bound input snapshot');
+    assert.equal(inputs.agentSourceSha256, receipt.productionSourceHash, 'legacy productionSourceHash must match the bound agent source');
+    assert.equal(inputs.agentOutputSha256, receipt.productionOutputHash, 'legacy productionOutputHash must match the bound agent output');
+    for (const name of ['builderCli', 'builderPackagePath', 'fileMatcherPath', 'builderFilterPath', 'asarModulePath', 'nodeExecutable']) {
+      assert.ok(isAbsolute(tools[name] ?? ''), `absolute tools.${name} is required`);
+    }
+    assert.equal(tools.builderVersion, receipt.builderVersion);
+    assert.equal(typeof tools.nodeVersion, 'string'); assert.ok(tools.nodeVersion.length);
+    for (const name of OWNED_BUILD_TOOL_HASH_FIELDS) assert.match(tools[name] ?? '', /^[a-f0-9]{64}$/, `actual tools.${name} is required`);
+    for (const name of OWNED_BUILD_TOOL_HASH_FIELDS) assert.equal(inputs[name], tools[name], `buildInputs.${name} must match the exact recorded tool bytes`);
+    assert.equal(manifest.asarModulePath, tools.asarModulePath, 'approved ASAR path must match the actual build tool');
+    assert.equal(manifest.asarModuleSha256, tools.asarModuleSha256, 'approved ASAR hash must match the actual build tool');
+    assert.ok(receipt.payloads && typeof receipt.payloads === 'object', 'actual package payload bindings are required');
+    for (const label of ['a', 'b']) {
+      const payload = receipt.payloads[label];
+      assert.match(payload?.payloadSha256 ?? '', /^[a-f0-9]{64}$/, `actual ${label.toUpperCase()} package payload hash is required`);
+      assert.ok(Number.isSafeInteger(payload?.fileCount) && payload.fileCount > 0, `actual ${label.toUpperCase()} package file count is required`);
+      assert.equal(payload.packageMetadata?.name, identity.packageName);
+      assert.equal(payload.packageMetadata?.productName, identity.productName);
+      assert.equal(payload.packageMetadata?.version, manifest[label].version);
+    }
+    assert.equal(receipt.payloads.a.payloadSha256, receipt.payloads.b.payloadSha256, 'A/B payloads may differ only in package.json.version');
+    assert.equal(receipt.payloads.a.fileCount, receipt.payloads.b.fileCount, 'A/B payload file counts must match');
     for (const label of ['a', 'b']) {
       assert.deepEqual(receipt[label], manifest[label], 'receipt must bind the exact approved installer/version/hash');
       const config = await readBoundJson(receipt.configs?.[label]?.path, receipt.configs?.[label]?.sha256);
@@ -85,7 +125,24 @@ export async function validateInstalledManifest(manifest) {
       assert.equal(config.extraMetadata?.productName, identity.productName);
       assert.equal(config.extraMetadata?.version, manifest[label].version);
     }
-  } catch (error) { throw fail('UPDATE_INSTALLED_BUILD_RECEIPT_INVALID', error.message); }
+    if (expectedHeadSha !== undefined) {
+      assert.match(expectedHeadSha ?? '', /^[a-f0-9]{40}$/i, 'current HEAD must be available before installation');
+      assert.equal(receipt.sourceHead.toLowerCase(), expectedHeadSha.toLowerCase(), 'installer receipt must bind the current HEAD');
+    }
+    if (repositoryRoot !== undefined) {
+      assert.ok(isAbsolute(repositoryRoot), 'actual checkout root must be absolute');
+      assert.ok(expectedHeadSha, 'actual checkout validation requires current HEAD');
+      const currentRoot = resolve(await realpath(repositoryRoot));
+      assert.ok(samePath(currentRoot, inputs.repositoryRoot), 'installer receipt must bind the actual current repository root');
+      const resolveTools = ports.resolveOwnedInstallerTools ?? resolveOwnedInstallerTools;
+      const currentTools = await resolveTools(currentRoot);
+      assert.deepEqual(currentTools, tools, 'UPDATE_INSTALLED_INPUT_CHANGED: builder/tool bytes changed');
+      const capture = ports.captureOwnedBuildInputs ?? captureOwnedBuildInputs;
+      const currentInputs = await capture(currentRoot, currentTools, ports.capturePorts ?? {});
+      assert.deepEqual(currentInputs, inputs, 'UPDATE_INSTALLED_INPUT_CHANGED: source/runtime/Bridge/packaging inputs changed');
+      assert.equal(currentInputs.headSha.toLowerCase(), expectedHeadSha.toLowerCase(), 'probe HEAD must match the current checkout');
+    }
+  } catch (error) { throw fail('UPDATE_INSTALLED_BUILD_RECEIPT_INVALID', `${error.code ? `${error.code}: ` : ''}${error.message}`); }
   return manifest;
 }
 
@@ -194,16 +251,27 @@ export async function removeOwnedProfile(profile) {
   await rm(profile.physical, { recursive: true, force: true });
 }
 
-export async function runInstalledProbe(input) {
+export async function runInstalledProbe(input, ports = {}) {
   const { repositoryRoot, evidenceRoot, runId, headSha, installedConfigPath } = input;
   await mkdir(evidenceRoot, { recursive: true });
   const binding = { runId, headSha, entrypointSha256: sha256(await readFile(entrypoint)) };
   const blocked = message => ({ ...binding, status: 'blocked_environment', commands: [], artifacts: [], blockers: [message], untestedClaims: nonClaims,
     cases: [{ id: 'installer-a-to-b', status: 'blocked', executed: false, evidenceLevel: 'installed-e2e', assertions: [], evidenceFiles: [], diagnostics: [message] }] });
-  if (process.platform !== 'win32') return blocked('UPDATE_INSTALLED_PLATFORM_REQUIRED: Actual A/B NSIS execution requires Windows.');
+  if ((ports.platform ?? process.platform) !== 'win32') return blocked('UPDATE_INSTALLED_PLATFORM_REQUIRED: Actual A/B NSIS execution requires Windows.');
   if (!installedConfigPath) return blocked('UPDATE_INSTALLED_ARTIFACTS_REQUIRED: Approved actual A/B installer manifest is missing.');
+  let currentRepositoryRoot, currentHeadSha;
+  try {
+    const expectedRoot = await realpath(expectedRepositoryRoot);
+    currentRepositoryRoot = await realpath(repositoryRoot);
+    if (!samePath(currentRepositoryRoot, expectedRoot)) throw fail('UPDATE_INSTALLED_REPOSITORY_MISMATCH', 'Probe repositoryRoot must be this installed-a-to-b.mjs checkout.');
+    currentHeadSha = await readCurrentHead(currentRepositoryRoot, ports);
+    if (typeof headSha !== 'string' || currentHeadSha !== headSha.toLowerCase()) {
+      throw fail('UPDATE_INSTALLED_HEAD_MISMATCH', 'Probe HEAD must match the actual current checkout HEAD.');
+    }
+  } catch (error) { return blocked(error.message); }
   let manifest;
-  try { manifest = await validateInstalledManifest(JSON.parse(await readFile(installedConfigPath, 'utf8'))); }
+  const buildContext = { expectedHeadSha: currentHeadSha, repositoryRoot: currentRepositoryRoot };
+  try { manifest = await validateInstalledManifest(JSON.parse(await readFile(installedConfigPath, 'utf8')), buildContext, ports); }
   catch (error) { return blocked(error.message); }
   const commands = [], artifacts = [], receipts = [];
   let scratch, scratchParent, installedOwned = false, userData, ownedProfile, appDataRoot, shortcutPaths = [], baseline;
@@ -213,6 +281,13 @@ export async function runInstalledProbe(input) {
     artifacts.push({ relativePath: name, bytes: bytes.length, sha256: sha256(bytes) });
   };
   const execute = async (label, command, args, timeoutMs) => {
+    if (label === 'install-a' || label === 'install-b') {
+      const rootNow = await realpath(repositoryRoot);
+      if (!samePath(rootNow, currentRepositoryRoot)) throw fail('UPDATE_INSTALLED_REPOSITORY_MISMATCH', 'Current checkout changed before installer execution.');
+      const headNow = await readCurrentHead(rootNow, ports);
+      if (headNow !== currentHeadSha) throw fail('UPDATE_INSTALLED_HEAD_MISMATCH', 'Current checkout HEAD changed before installer execution.');
+      await validateInstalledManifest(manifest, buildContext, ports);
+    }
     const result = await runProcess({ command, args, cwd: repositoryRoot, timeoutMs });
     await evidence(`${label}.stdout.txt`, result.stdout); await evidence(`${label}.stderr.txt`, result.stderr);
     commands.push({ argv: [command, ...args], exitCode: result.code, status: processSucceeded(result) ? 'executed' : result.timedOut ? 'timeout' : 'failed',
@@ -311,6 +386,11 @@ export async function runInstalledProbe(input) {
       await removeOwnedProfile(ownedProfile);
     }
     assert.equal(await exists(userData), false, 'only the fresh owned profile must be cleaned');
+    const finalRoot = await realpath(repositoryRoot);
+    if (!samePath(finalRoot, currentRepositoryRoot)) throw fail('UPDATE_INSTALLED_REPOSITORY_MISMATCH', 'Current checkout changed before final receipt validation.');
+    const finalHead = await readCurrentHead(finalRoot, ports);
+    if (finalHead !== currentHeadSha) throw fail('UPDATE_INSTALLED_HEAD_MISMATCH', 'Current checkout HEAD changed before final receipt validation.');
+    await validateInstalledManifest(manifest, buildContext, ports);
     await evidence('receipt.json', { runId, headSha, scope: manifest.scope, identity, a: manifest.a, b: manifest.b, receipts,
       installerIdentities, buildReceiptSha256: manifest.buildReceiptSha256, officialRegistryBefore: baseline, officialRegistryAfter: await registrySnapshot('SoulForge'),
       ownedProfile,

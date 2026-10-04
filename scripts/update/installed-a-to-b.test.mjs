@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 
 const repositoryRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
+const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 test('installed suite without actual A/B artifacts is explicitly blocked and never passes', async () => {
   const base = join(repositoryRoot, 'node_modules/.cache/update-installed-tests');
   await mkdir(base, { recursive: true });
@@ -35,6 +36,21 @@ async function manifestFixture() {
       executableName: 'SoulForgeValidation-01234567', packageName: 'soulforge-validation-01234567' },
     a: { path: join(root, 'a.exe'), version: '0.9.2-validation.1', sha256: createHash('sha256').update(a).digest('hex') },
     b: { path: join(root, 'b.exe'), version: '0.9.2-validation.2', sha256: createHash('sha256').update(b).digest('hex') } };
+  const toolRoot = join(root, 'toolchain'); await mkdir(toolRoot, { recursive: true });
+  const toolPaths = {
+    builderCli: join(toolRoot, 'electron-builder', 'cli.js'), builderPackagePath: join(toolRoot, 'electron-builder', 'package.json'),
+    fileMatcherPath: join(toolRoot, 'app-builder-lib', 'fileMatcher.js'), builderFilterPath: join(toolRoot, 'app-builder-lib', 'filter.js'),
+    asarModulePath: join(toolRoot, 'asar.cjs'), nodeExecutable: process.execPath
+  };
+  await mkdir(join(toolRoot, 'electron-builder'), { recursive: true }); await mkdir(join(toolRoot, 'app-builder-lib'), { recursive: true });
+  await writeFile(toolPaths.builderCli, 'fixture builder cli'); await writeFile(toolPaths.builderPackagePath, JSON.stringify({ name: 'electron-builder', version: '26.16.1' }));
+  await writeFile(toolPaths.fileMatcherPath, 'fixture FileMatcher'); await writeFile(toolPaths.builderFilterPath, 'fixture filter');
+  await writeFile(toolPaths.asarModulePath, 'fixture ASAR module');
+  const tools = { ...toolPaths, builderVersion: '26.16.1', nodeVersion: process.version,
+    builderCliSha256: hash(await readFile(toolPaths.builderCli)), builderPackageSha256: hash(await readFile(toolPaths.builderPackagePath)),
+    builderFileMatcherSha256: hash(await readFile(toolPaths.fileMatcherPath)), builderFilterSha256: hash(await readFile(toolPaths.builderFilterPath)),
+    asarModuleSha256: hash(await readFile(toolPaths.asarModulePath)), nodeExecutableSha256: 'e'.repeat(64) };
+  manifest.asarModulePath = tools.asarModulePath; manifest.asarModuleSha256 = tools.asarModuleSha256;
   const configs = {};
   for (const label of ['a', 'b']) {
     const config = { appId: manifest.identity.appId, productName: manifest.identity.productName, executableName: manifest.identity.executableName,
@@ -44,9 +60,21 @@ async function manifestFixture() {
     const path = join(root, `${label}.config.json`); await writeFile(path, bytes);
     configs[label] = { path, sha256: createHash('sha256').update(bytes).digest('hex') };
   }
+  const buildInputs = { repositoryRoot: resolve(root), headSha: 'a'.repeat(40), trackedDiffSha256: 'b'.repeat(64),
+    agentSourceSha256: 'c'.repeat(64), agentOutputSha256: 'd'.repeat(64), agentManifestSha256: '1'.repeat(64),
+    bridgeSourceSha256: '2'.repeat(64), bridgeExecutableSha256: '3'.repeat(64), bridgeNativeLibrarySha256: '4'.repeat(64),
+    bridgeHelperSha256: '5'.repeat(64), bridgeReceiptSha256: '6'.repeat(64), packagingConfigSha256: '7'.repeat(64),
+    buildResourcesSha256: '8'.repeat(64), extraResourcesSha256: '9'.repeat(64), desktopPackageSha256: 'a'.repeat(64),
+    lockfileSha256: 'b'.repeat(64), prepareEntrypointSha256: 'c'.repeat(64), bindingHelperSha256: 'd'.repeat(64),
+    builderCliSha256: tools.builderCliSha256, builderPackageSha256: tools.builderPackageSha256,
+    builderFileMatcherSha256: tools.builderFileMatcherSha256, builderFilterSha256: tools.builderFilterSha256,
+    asarModuleSha256: tools.asarModuleSha256, nodeExecutableSha256: tools.nodeExecutableSha256 };
+  const payload = (version) => ({ payloadSha256: 'f'.repeat(64), fileCount: 4,
+    packageMetadata: { name: manifest.identity.packageName, productName: manifest.identity.productName, version } });
   const receipt = Buffer.from(JSON.stringify({ schemaVersion: 1, builderVersion: '26.16.1', sourceHead: 'a'.repeat(40),
     trackedDiffSha256: 'b'.repeat(64), productionSourceHash: 'c'.repeat(64), productionOutputHash: 'd'.repeat(64),
-    identity: manifest.identity, a: manifest.a, b: manifest.b, configs }));
+    identity: manifest.identity, a: manifest.a, b: manifest.b, configs, buildInputs, tools,
+    payloads: { a: payload(manifest.a.version), b: payload(manifest.b.version) } }));
   manifest.buildReceiptPath = join(root, 'build-receipt.json'); manifest.buildReceiptSha256 = createHash('sha256').update(receipt).digest('hex');
   await writeFile(manifest.buildReceiptPath, receipt);
   return { root, manifest };
@@ -87,6 +115,33 @@ test('approved artifact manifest must bind an actual builder receipt and matchin
     await assert.rejects(() => validateInstalledManifest({ ...manifest, buildReceiptPath: undefined }), /BUILD_RECEIPT/);
     await writeFile(join(root, 'a.config.json'), '{}');
     await assert.rejects(() => validateInstalledManifest(manifest), /BUILD_RECEIPT/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('legacy valid-looking installer receipt without build-input and tool bindings is rejected', async () => {
+  const { root, manifest } = await manifestFixture();
+  try {
+    const receipt = JSON.parse(await readFile(manifest.buildReceiptPath, 'utf8'));
+    delete receipt.buildInputs; delete receipt.tools; delete receipt.payloads;
+    const bytes = Buffer.from(JSON.stringify(receipt));
+    await writeFile(manifest.buildReceiptPath, bytes);
+    manifest.buildReceiptSha256 = hash(bytes);
+    await assert.rejects(() => validateInstalledManifest(manifest), /BUILD_RECEIPT.*(?:buildInputs|tools)/i);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('installed probe blocks a foreign checkout or stale supplied HEAD before any installer command', async () => {
+  const { root, manifest } = await manifestFixture();
+  try {
+    const manifestPath = join(root, 'manifest.json'); await writeFile(manifestPath, JSON.stringify(manifest));
+    const foreign = await installed.runInstalledProbe({ repositoryRoot: root, evidenceRoot: join(root, 'foreign-evidence'),
+      runId: 'foreign-checkout', headSha: 'a'.repeat(40), installedConfigPath: manifestPath }, { platform: 'win32' });
+    assert.equal(foreign.status, 'blocked_environment'); assert.equal(foreign.commands.length, 0);
+    assert.match(foreign.blockers.join(' '), /REPOSITORY_MISMATCH/);
+    const stale = await installed.runInstalledProbe({ repositoryRoot, evidenceRoot: join(root, 'stale-head-evidence'),
+      runId: 'stale-current-head', headSha: '0'.repeat(40), installedConfigPath: manifestPath }, { platform: 'win32' });
+    assert.equal(stale.status, 'blocked_environment'); assert.equal(stale.commands.length, 0);
+    assert.match(stale.blockers.join(' '), /HEAD_MISMATCH/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
