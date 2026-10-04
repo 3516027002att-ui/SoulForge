@@ -25,7 +25,7 @@ import { commitEmevdFullDocument as nativeCommitEmevdFullDocument, EmevdAuthorit
 import { renderEmevdDarkScriptAsync as nativeRenderEmevdDarkScriptAsync } from '../emevdDarkScriptWorkerHost.js';
 import { EmevdOpenSlots } from '../emevdOpenSlots.js';
 import { EmevdSourceTokens } from '../emevdSourceTokens.js';
-import { sanitizeDiagnostics, sanitizeRendererValue, type RendererSaveResult } from '../rendererDto.js';
+import { sanitizeDiagnostics, sanitizeRendererIpcResult, type RendererSaveResult } from '../rendererDto.js';
 import type { OperationLogUtilityClient } from '../operationLogUtilityClient.js';
 import { WorkspaceReadLifetime } from '../ipc/workspaceReadLifetime.js';
 import {
@@ -255,7 +255,7 @@ export function createEventService(deps: EventServiceDeps) {
             ? { oodleRuntimeRoot: getSession()!.layers.baseRoot }
             : {})
         });
-        return sanitizeRendererValue({
+        return sanitizeRendererIpcResult('resource.readEmevdDocument', {
           ok: result.parseStatus !== 'failed',
           sourceUri,
           relativePath: file.relativePath,

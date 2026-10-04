@@ -218,6 +218,7 @@ import type {
 } from '@soulforge/core';
 import {
   sanitizeDiagnostics,
+  sanitizeRendererIpcResult,
   sanitizeRendererValue,
   toRendererEditorDocumentResult,
   toRendererHistoryEntry,
@@ -571,7 +572,7 @@ function handle<Args extends unknown[], Result>(
   ipcMain.handle(channel, async (event, ...args) => {
     assertTrustedSender(event, channel);
     const result = await listener(event, ...(args as Args));
-    return sanitizeRendererValue(result);
+    return sanitizeRendererIpcResult(channel, result);
   });
 }
 

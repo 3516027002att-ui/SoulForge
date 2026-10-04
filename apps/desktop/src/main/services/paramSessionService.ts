@@ -1,7 +1,7 @@
 import { dirname } from 'node:path';
 import { isParamBackupPath, type BridgeRunner, type WorkspaceSession } from '@soulforge/core';
 import { PARAM_PAGE_SIZE, PARAM_ROW_PAYLOAD_BATCH_MAX, type IndexedFile, type Diagnostic, type ParamDefDocument, type ParamNativeTelemetry, type ParamSessionMetadata } from '@soulforge/shared';
-import { sanitizeDiagnostics, sanitizeRendererValue } from '../rendererDto.js';
+import { sanitizeDiagnostics, sanitizeRendererIpcResult, sanitizeRendererValue } from '../rendererDto.js';
 
 export interface ParamSessionBinding {
   sourceUri: string;
@@ -227,7 +227,7 @@ export function createParamSessionService(ports: ParamSessionServicePorts) {
       dataBase64: r.dataBase64
     }));
     _forensicsInc('param:main:readRows:payloadRows', payloadRows.length);
-    return sanitizeRendererValue({
+    return sanitizeRendererIpcResult('resource.readParamRows', {
       ok: true,
       sessionToken,
       rows: payloadRows,

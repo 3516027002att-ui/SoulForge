@@ -138,6 +138,9 @@ try {
     assert(evidence.containerFormat.includes('BND4'), `container format: ${evidence.containerFormat}`);
     assert(evidence.entryCount===fixedFixtureNumber(fixed.fixture,'entryCount'),`independent pinned entry count (${evidence.entryCount})`);
     assert(evidence.entries.length > 0, 'entries must be enumerated');
+    assert(new Set(evidence.entries.map(entry => entry.index)).size === evidence.entries.length,
+      'each sampled entry has its own native table slot; missing slots never reuse zero');
+    assert(evidence.entries.every(entry => entry.index >= 0 && entry.size > 0), 'pinned entries have native index and size');
 
     // Extension distribution across the whole container must be present and
     // dominated by script extensions (.lua for aicommon.luabnd).

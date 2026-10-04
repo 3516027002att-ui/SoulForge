@@ -3,9 +3,9 @@ import { test } from 'node:test';
 import { deflateSync } from 'node:zlib';
 import { readFile, readdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { compareRgba, decodePng, boxReference, expectedTpf, compareTpfMetadata, compareTpfPreview, assertProducerReceipt, extractTpfSlices, verifyTpfSourceSlices } from './compare-tpf-projection-fields.mjs';
+import { compareRgba, decodePng, boxReference, expectedTpf, compareTpfMetadata, compareTpfPreview, assertProducerReceipt, extractTpfSlices, verifyTpfSourceSlices, createTpfResponseReplay } from './compare-tpf-projection-fields.mjs';
 
 test('raw pixel check permits only documented BC1 one-unit rounding',()=>{
   assert.equal(compareRgba(Buffer.from([10,20,30,255]),Buffer.from([11,20,30,255]),1).status,'passed');
@@ -46,12 +46,29 @@ test('preview field and pixel corruption localize to first Bridge boundary',()=>
   for(const [k,v]of [['name','Wrong'],['width',2],['colorSpace','unknown']])assert.equal(compareTpfPreview(expected,{...preview,[k]:v},pixels,reference,state,preview.previewToken).firstDivergentLayer,'bridge');
   assert.equal(compareTpfPreview(expected,preview,{...pixels,rgba:Buffer.from([50,20,30,255])},reference,state,preview.previewToken).firstDivergentLayer,'bridge');
 });
+
+test('actual source-bundled TPF response uses registered preview profile, not binary field names',async()=>{
+  const replay=await createTpfResponseReplay(resolve('.')),calls=[];
+  assert.ok(replay.receipt.sources.some(source=>source.path.replaceAll('\\','/').endsWith('/rendererDto.ts')));
+  assert.ok(replay.receipt.sources.some(source=>source.path.replaceAll('\\','/').endsWith('/path-sanitizer.ts')));
+  const uri='file:///workspace/owned.tpf',filePath=resolve('owned.tpf'),png='data:image/png;base64,+/8=';
+  const deps={activeSession:null,indexedFiles:[{sourceUri:uri,absolutePath:filePath,relativePath:'owned.tpf'}],verifiedReadRoots:async()=>({diagnostics:[],allowedRoots:[resolve('.')]})};
+  const wire={parseStatus:'partial',data:{previewToken:png},diagnostics:[{code:'OWNED',message:'warning',details:{bytesBase64:'/tmp/private',text:'/tmp/private'}}]};
+  const handler=replay.createHandler('resource.readTpfTexturePreview',deps,async input=>{calls.push(input);return wire;});
+  const output=await handler(null,uri,3);
+  assert.equal(output.ok,true);assert.equal(output.data.previewToken,png);
+  assert.equal(calls[0].command,'read-tpf-texture-preview');assert.deepEqual(calls[0].commandOptions,{textureIndex:3});
+  assert.equal(JSON.stringify(output.diagnostics).includes('/tmp/private'),false);
+  assert.equal(wire.diagnostics[0].details.text,'/tmp/private');
+  const document=replay.createHandler('resource.readTpfDocument',deps,async()=>({...wire,data:{previewToken:png}}));
+  assert.notEqual((await document(null,uri)).data.previewToken,png,'document metadata route cannot claim the preview profile');
+});
 test('actual compiled production input slices match source and honor failure/cancellation',{skip:!process.env.SOULFORGE_TPF_PRODUCT_ROOT},async()=>{
   const root=process.env.SOULFORGE_TPF_PRODUCT_ROOT,require=createRequire(join(root,'package.json')),ts=require('typescript'),main=await readFile(join(root,'apps/desktop/out/main/index.js'),'utf8'),dir=join(root,'apps/desktop/out/renderer/assets'),bundle=(await readdir(dir)).find(n=>/^index-.*\.js$/.test(n)),renderer=await readFile(join(dir,bundle),'utf8');
   const assetsSource=await readFile(join(root,'apps/desktop/src/main/ipc/assets.ts'),'utf8'),panelSource=await readFile(join(root,'apps/desktop/src/renderer/src/editors/TpfWorkbenchPanel.tsx'),'utf8'),sharedSource=await readFile(join(root,'packages/shared/src/tpf-editor.ts'),'utf8'),sharedCompiled=await readFile(join(root,'packages/shared/dist/tpf-editor.js'),'utf8');
   const verify=(assets=assetsSource,panel=panelSource)=>verifyTpfSourceSlices(ts,main,renderer,assets,panel,sharedSource,sharedCompiled);
   assert.equal(verify().length,6);
-  assert.throws(()=>verify(assetsSource.replaceAll('if (!file)','if (+file)')),/SOURCE_COMPILED_SLICE_MISMATCH/);
+  assert.throws(()=>verify(assetsSource.replaceAll('read.readTpfDocument(...args)','read.readTpfTexturePreview(...args)')),/SOURCE_COMPILED_SLICE_MISMATCH/);
   assert.throws(()=>verify(undefined,panelSource.replaceAll('if (cancelled) return','if (!cancelled) return')),/SOURCE_COMPILED_SLICE_MISMATCH/);
   const slices=extractTpfSlices(ts,main,renderer),raw={ok:true,data:{name:'Texture',previewToken:'data:image/png;base64,eA=='}};
   assert.equal(slices.consumePreview(raw).preview,raw.data);assert.equal(slices.imageSource(raw.data),raw.data.previewToken);

@@ -92,7 +92,10 @@ export function convertLegacyKnowledge(database: SqliteDatabase, migration: SqlM
   for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name: string}>) {
     if (Object.hasOwn(expectedColumns, row.name)) continue;
     const fks = database.pragma(`foreign_key_list("${row.name.replaceAll('"', '""')}")`) as Array<{table: string}>;
-    requireValue(!fks.some(fk => Object.hasOwn(expectedColumns, fk.table)), 'external knowledge foreign key');
+    // SQLite folds ASCII identifier case, while foreign_key_list preserves the
+    // spelling used in REFERENCES. Mixed-case dependants must not reach DROP.
+    requireValue(!fks.some(fk => Object.hasOwn(expectedColumns,
+      fk.table.replace(/[A-Z]/g, letter => letter.toLowerCase()))), 'external knowledge foreign key');
   }
   requireValue(!database.prepare("SELECT 1 FROM sqlite_master WHERE type IN ('trigger','view') AND (sql LIKE '%knowledge_generations%' OR sql LIKE '%knowledge_current%')").get(), 'custom knowledge trigger/view');
   requireValue(!database.prepare(`SELECT 1 FROM sqlite_master WHERE type='index' AND sql IS NOT NULL

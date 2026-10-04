@@ -166,7 +166,17 @@ test('diagnostics retain their projection and cyclic object failure is not hidde
   const output = api.sanitizeDiagnostics([{ severity: 'error', code: 'X', message: '失败 C:/private',
     sourceUri: 'file://event/logical.emevd', details: { token: 'secret', text: 'C:/content', message: 'C:/private' } }]);
   assert.deepEqual(plain(output), [{ severity: 'error', code: 'X', message: '失败 [本机路径已隐藏]',
-    sourceUri: 'file://event/logical.emevd', details: { text: 'C:/content', message: '[本机路径已隐藏]' } }]);
+    sourceUri: 'file://event/logical.emevd', details: { text: '[本机路径已隐藏]', message: '[本机路径已隐藏]' } }]);
   const cycle = {}; cycle.self = cycle;
   assert.throws(() => api.sanitizeRendererValue(cycle), error => error.name === 'RangeError');
+});
+
+test('diagnostic binary names and opaque bytes cannot bypass main or preload masking', () => {
+  const input = { data: { details: { bytesBase64: '/tmp/private', text: '/tmp/private',
+    bytes: new Uint8Array([47, 116, 109, 112]), buffer: new ArrayBuffer(4) } } };
+  for (const project of [api.sanitizeRendererValue, preload.stripPathFields,
+    value => api.sanitizeRendererIpcResult('resource.readFlverMesh', value)]) {
+    assert.deepEqual(plain(project(input)), { data: { details: { bytesBase64: '[本机路径已隐藏]',
+      text: '[本机路径已隐藏]', bytes: '[二进制诊断已隐藏]', buffer: '[二进制诊断已隐藏]' } } });
+  }
 });

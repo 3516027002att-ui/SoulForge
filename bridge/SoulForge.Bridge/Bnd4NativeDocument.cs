@@ -16,6 +16,7 @@ internal sealed class Bnd4NativeDocument
     public byte[] SourceBytes { get; }
     public int DataOffset { get; }
     public int FileHeaderSize { get; }
+    public bool SupportsStructuralRepack => SourceBytes[0x32] != 4;
     public IReadOnlyList<Bnd4Entry> Entries { get; }
     private IReadOnlyList<byte[]> EntryBytes { get; }
     public string SourceHash => Hash(SourceBytes);
@@ -135,12 +136,12 @@ internal sealed class Bnd4NativeDocument
     {
         if (nextEntries.Count > 1_000_000) throw new InvalidDataException("BND4 子项数量超出安全上限。");
         // Payload replacement does not authorize rebuilding opaque name/hash
-        // metadata. Keep the complete original prefix, including its hash index.
+        // metadata. Keep the original addresses, including its hash index.
         var sameIdentities = nextEntries.Count == Entries.Count && nextEntries.Select((entry, index) =>
             entry.Id == Entries[index].Id && entry.Name == Entries[index].Name
             && entry.Flags == Entries[index].Flags && entry.Unknown == Entries[index].Unknown).All(value => value);
-        if (sameIdentities && Entries.Count > 0) return RepackPayloads(nextEntries);
-        if (SourceBytes[0x32] == 4)
+        if (sameIdentities) return Entries.Count == 0 ? SourceBytes.ToArray() : RepackPayloads(nextEntries);
+        if (!SupportsStructuralRepack)
             throw new NotSupportedException("BND4_HASH_INDEX_STRUCTURAL_REPACK_UNSUPPORTED: 保留未知哈希索引的容器仅允许现有子项内容替换，不能重命名、增删或重排子项。");
         var unicodeNames = Entries.Count == 0 || Entries.Any(entry => IsUtf16Name(entry.NameOffset));
         var nameBytes = new List<byte[]>();
@@ -183,37 +184,31 @@ internal sealed class Bnd4NativeDocument
     private byte[] RepackPayloads(IReadOnlyList<Bnd4RepackEntry> nextEntries)
     {
         if (IsLayoutPreservingRepack(nextEntries)) return RebuildPreservingLayout(nextEntries);
-        var first = Entries.Min(entry => entry.DataOffset);
-        if (first < DataOffset) throw new InvalidDataException("BND4 payload overlaps metadata.");
-        var physical = Entries.OrderBy(entry => entry.DataOffset).ToArray();
-        var size = first;
-        var gaps = new Dictionary<int, (int Offset, int Length)>();
-        for (var i = 0; i < physical.Length; i++)
+        // Do not shift original gaps or trailing bytes: they may contain name
+        // tables or opaque metadata addressed by offsets we do not understand.
+        // Append changed payloads and change only their declared table fields.
+        var size = SourceBytes.Length;
+        var appended = new List<(int Index, int Offset)>();
+        for (var i = 0; i < Entries.Count; i++)
         {
-            var entry = physical[i];
-            var end = checked(entry.DataOffset + entry.CompressedSize);
-            var nextStart = i + 1 < physical.Length ? physical[i + 1].DataOffset : SourceBytes.Length;
-            if (end > nextStart) throw new NotSupportedException("BND4_OVERLAPPING_PAYLOAD_REPACK_UNSUPPORTED");
-            gaps[entry.Index] = (end, nextStart - end);
-            size = checked(size + nextEntries[entry.Index].StoredBytes.Length + nextStart - end);
-            if (i + 1 < physical.Length) size = Align(size, 0x10);
+            var next = nextEntries[i];
+            if (EntryBytes[i].AsSpan().SequenceEqual(next.StoredBytes)
+                && (next.UncompressedSize ?? next.StoredBytes.Length) == Entries[i].UncompressedSize) continue;
+            size = Align(size, 0x10);
+            appended.Add((i, size));
+            size = checked(size + next.StoredBytes.Length);
+            if (size > DcxNativeDocument.MaxSourceBytes) throw new InvalidDataException("BND4 重建大小超出安全范围。");
         }
         var output = new byte[size];
-        SourceBytes.AsSpan(0, first).CopyTo(output);
-        var cursor = first;
-        foreach (var entry in physical)
+        SourceBytes.CopyTo(output, 0);
+        foreach (var (index, offset) in appended)
         {
-            var next = nextEntries[entry.Index];
-            var header = 0x40 + entry.Index * FileHeaderSize;
+            var next = nextEntries[index];
+            var header = 0x40 + index * FileHeaderSize;
             WriteInt64Le(output, header + 8, next.StoredBytes.Length);
             WriteInt64Le(output, header + 16, next.UncompressedSize ?? next.StoredBytes.Length);
-            WriteUInt32Le(output, header + 24, checked((uint)cursor));
-            next.StoredBytes.CopyTo(output.AsSpan(cursor));
-            cursor = checked(cursor + next.StoredBytes.Length);
-            var gap = gaps[entry.Index];
-            SourceBytes.AsSpan(gap.Offset, gap.Length).CopyTo(output.AsSpan(cursor));
-            cursor = checked(cursor + gap.Length);
-            if (entry != physical[^1]) cursor = Align(cursor, 0x10);
+            WriteUInt32Le(output, header + 24, checked((uint)offset));
+            next.StoredBytes.CopyTo(output.AsSpan(offset));
         }
         return output;
     }
@@ -440,6 +435,9 @@ internal sealed class Bnd4NativeDocument
     public Bnd4CrudVerification VerifyCrud()
     {
         if (Entries.Count == 0) return new Bnd4CrudVerification(false, false, false, false, false, "BND4 没有可验证子项。");
+        if (!SupportsStructuralRepack)
+            return new Bnd4CrudVerification(false, false, false, false, false,
+                "BND4_HASH_INDEX_STRUCTURAL_REPACK_UNSUPPORTED: 结构写入不可用，本次未执行 CRUD 验证；不影响只读解析。");
         var source = ToRepackEntries().ToList();
         var first = source[0];
         var renamed = source.ToList();

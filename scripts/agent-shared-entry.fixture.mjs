@@ -85,7 +85,7 @@ test('assembly exposes host-operation settlement before a caller disposes native
 });
 test('shared finite entry applies the configured total timeout to an unresponsive provider',async()=>{
  const root=await mkdtemp(join(tmpdir(),'sf-finite-total-timeout-'));
- try{const result=await core.createAgentRunAssembly({tools:[],executeTool:async()=>({ok:true,content:'{}'})}).run({sessionsDir:root,adapter:{...makeAdapter(),complete:()=>new Promise(resolve=>setTimeout(()=>resolve({message:{role:'assistant',content:'late'},finishReason:'stop',diagnostics:[]}),100))},config,apiKey:'',prompt:'read',permissionMode:'plan',kernel:'finite',timeoutMs:15});
+ try{const result=await core.createAgentRunAssembly({tools:[],executeTool:async()=>({ok:true,content:'{}'})}).run({sessionsDir:root,adapter:{...makeAdapter(),complete:()=>new Promise(resolve=>setTimeout(()=>resolve({message:{role:'assistant',content:'late'},finishReason:'stop',diagnostics:[]}),100))},config,apiKey:'',prompt:'read',permissionMode:'plan',kernel:'finite',timeoutMs:180000,kernelLimits:{timeoutMs:15}});
  assert.equal(result.kernel.reason,'time_budget');
  }finally{await rm(root,{recursive:true,force:true});}
 });

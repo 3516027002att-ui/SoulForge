@@ -56,8 +56,7 @@ function harness(options = {}) {
   };
   const shared = {
     PARAM_PAGE_SIZE: 50, PARAM_ROW_PAYLOAD_BATCH_MAX: 256,
-    PARAM_SESSION_IPC_CHANNELS: { open: channels[0], readIndexPage: channels[1], readRows: channels[2] },
-    maskPathFragments: value => value
+    PARAM_SESSION_IPC_CHANNELS: { open: channels[0], readIndexPage: channels[1], readRows: channels[2] }
   };
   function load(filename) {
     if (cache.has(filename)) return cache.get(filename);
@@ -85,6 +84,7 @@ function harness(options = {}) {
     }, { filename });
     return exports;
   }
+  Object.assign(shared, load(path.join(root, 'packages/shared/src/path-sanitizer.ts')));
   const adapter = load(adapterPath);
   const deps = {
     handle(channel, listener) { handlers.set(channel, (...args) => {
@@ -151,6 +151,18 @@ test('slim session preserves native identity, indexed rows, root scope and read 
   assert.deepEqual(reads.map(input => input.timeoutMs), [120000, 60000, 60000]);
   assert.deepEqual(reads.map(input => input.allowedRoots), [['/owned/mod', '/owned/base'], ['/owned/mod', '/owned/base'], ['/owned/mod', '/owned/base']]);
   assert.deepEqual(reads[2].commandOptions, { documentSession: 'owned-token', includeRowPayloads: true, rowSelections: [{ rowIndex: 0, expectedId: 7, expectedDataHash: hash }] });
+});
+
+test('selected PARAM rows keep native payload bytes while diagnostic binary-shaped paths are hidden', async () => {
+  const h = harness({ bridge: async () => ({ parseStatus: 'confirmed',
+    diagnostics: [{ severity: 'warning', code: 'OWNED', message: 'bounded warning', details: { bytesBase64: '/tmp/private', text: '/tmp/private' } }],
+    data: { sessionToken: 'owned-token', sourceHash: hash, typeName: 'OwnedParam', rowCount: 1, rowDataSize: 9,
+      rows: [{ rowIndex: 0, id: 7, dataHash: hash, dataBase64: '/tmp/private' }] } }) });
+  const opened = await h.invoke(channels[0], { sourceUri: file.sourceUri });
+  assert.equal(opened.firstPage.rows[0].dataBase64, undefined);
+  const output = await h.invoke(channels[2], { sourceUri: file.sourceUri, sessionToken: 'owned-token', rows: [{ rowIndex: 0, id: 7, dataHash: hash }] });
+  assert.equal(output.rows[0].dataBase64, '/tmp/private');
+  assert.equal(JSON.stringify(output.diagnostics).includes('/tmp/private'), false);
 });
 
 test('session binding and selected-row limits refuse wrong source or oversized batch', async () => {

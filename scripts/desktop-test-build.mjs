@@ -1,6 +1,6 @@
 import { mkdir, open, writeFile, readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { dirname, resolve, join } from 'node:path';
+import { dirname, resolve, join, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createProcessCancellation, processSucceeded, readTimeoutMs, runProcess } from './subprocess-control.mjs';
 import { createOwnedTemporaryDirectory } from './owned-temporary-directory.mjs';
@@ -8,6 +8,18 @@ import {windowsCommandEnvironment} from './windows-command-environment.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const flags = { database: 'SOULFORGE_BUILD_DATABASE_UTILITY_SMOKE', gateway: 'SOULFORGE_BUILD_ME3_GATEWAY_SMOKE', sekiro: 'SOULFORGE_BUILD_ME3_SEKIRO_SESSION_SMOKE' };
+
+/** Direct Node invocations have no npm_execpath. Only Windows uses Node's sibling npm layout. */
+export function desktopBuildCommand(environment = process.env, platform = process.platform, nodeExecutable = process.execPath) {
+  const args = ['run', 'build', '-w', '@soulforge/desktop'];
+  if (environment.npm_execpath) return { command: nodeExecutable, args: [environment.npm_execpath, ...args] };
+  if (platform === 'win32') return {
+    command: nodeExecutable,
+    args: [win32.join(win32.dirname(nodeExecutable), 'node_modules/npm/bin/npm-cli.js'), ...args]
+  };
+  // Preserve PATH-based executable resolution without a shell or an assumed npm installation prefix.
+  return { command: 'npm', args };
+}
 
 /** One output owner per test run; never publish smoke entries into production out. */
 export async function withDesktopTestBuild(kind, execute, options = {}) {
@@ -60,8 +72,7 @@ export async function withDesktopTestBuild(kind, execute, options = {}) {
         electronVersion, betterSqlite3Version: sqliteVersion, platform: process.platform, arch: process.arch };
     }
     if (options.build !== false) {
-      const command = process.execPath;
-      const args = [process.env.npm_execpath || join(dirname(process.execPath),'node_modules/npm/bin/npm-cli.js'),'run','build','-w','@soulforge/desktop'];
+      const { command, args } = desktopBuildCommand(env);
       const buildEnv=process.platform==='win32'?windowsCommandEnvironment(env):env;
       const result = await runProcess({ command, args, cwd: repositoryRoot, env:buildEnv, owner: workspace,
         timeoutMs: readTimeoutMs('SOULFORGE_BUILD_TIMEOUT_MS', 20 * 60 * 1000), signal: cancellation.signal,

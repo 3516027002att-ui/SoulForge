@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { dirname, basename, join } from 'node:path';
 import { isParamBackupPath, runBridge, type WorkspaceSession } from '@soulforge/core';
 import type { Diagnostic, GparamDocument, IndexedFile } from '@soulforge/shared';
-import { sanitizeRendererValue } from '../rendererDto.js';
+import { sanitizeRendererIpcResult, sanitizeRendererValue } from '../rendererDto.js';
 
 export interface AssetReadServiceDeps {
   readonly indexedFiles: readonly IndexedFile[];
@@ -97,7 +97,7 @@ export function createAssetReadService(deps: AssetReadServiceDeps) {
       timeoutMs: 120_000,
       commandOptions: { textureIndex }
     });
-    return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
+    return sanitizeRendererIpcResult('resource.readTpfTexturePreview', { ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
   };
 
   const readFlverMesh = async (
@@ -122,7 +122,7 @@ export function createAssetReadService(deps: AssetReadServiceDeps) {
         texturePackagePaths: flverTexturePackagePaths(file.absolutePath)
       }
     });
-    return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
+    return sanitizeRendererIpcResult('resource.readFlverMesh', { ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
   };
 
   const readFlverSkeleton = async (

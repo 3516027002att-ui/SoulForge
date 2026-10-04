@@ -264,12 +264,9 @@ interface Bnd4InventoryData {
   resourceKinds?: Record<string, number>;
 }
 
-interface DcxReadEnvelope {
+interface Bnd4ListEnvelope {
   compressionFormat?: string;
-  nested?: {
-    entryCount?: number;
-    entries?: Bnd4InventoryEntry[];
-  };
+  entries?: Bnd4InventoryEntry[];
 }
 
 interface Bnd4ChildSnapshotEnvelope {
@@ -292,7 +289,7 @@ function normalizeExtensionKey(key: string): string {
  * Build a readonly container-level magic/reference inventory for a script
  * container. Uses the Bridge `inventory-asset-resources` command for the
  * container anchor (format / entryCount / extension distribution), the
- * `read-dcx-document` command for the full BND4 reference table when the
+ * `list-bnd4-entries` command for the full BND4 reference table when the
  * container is DCX-wrapped, and `snapshot-bnd4-child` for a bounded magic
  * sample over real `.lua`/`.hks` header bytes.
  *
@@ -348,29 +345,29 @@ export async function buildScriptContainerEvidence(
   }
 
   // Step 2: Full BND4 reference table (index / size / id per entry) via the
-  // DCX document reader when the container is DCX-wrapped; otherwise fall back
-  // to the inventory bounded sample set (name/id only).
+  // listing command (no mutation self-test). A missing reference table leaves
+  // only name/id inventory, which must not be presented as a successful read.
   let rawEntries: Bnd4InventoryEntry[] = data.sampleEntries ?? data.entries ?? [];
   let containerFormat = data.format ?? 'BND4';
-  let enumerationSource: 'read-dcx-document' | 'inventory-sample' = 'inventory-sample';
-  const dcx = await runBridge<DcxReadEnvelope>({
-    command: 'read-dcx-document',
+  let enumerationSource: 'list-bnd4-entries' | 'inventory-sample' = 'inventory-sample';
+  const dcx = await runBridge<Bnd4ListEnvelope>({
+    command: 'list-bnd4-entries',
     filePath: options.containerPath,
     resourceUri: sourceUri,
     allowedRoots: options.allowedRoots,
     ...(options.oodleRuntimeRoot ? { oodleRuntimeRoot: options.oodleRuntimeRoot } : {}),
     timeoutMs: options.timeoutMs ?? 60_000
   });
-  const dcxEntries = dcx.data?.nested?.entries;
+  const dcxEntries = dcx.data?.entries;
   if (dcx.parseStatus !== 'failed' && Array.isArray(dcxEntries) && dcxEntries.length > 0) {
     rawEntries = dcxEntries;
     if (dcx.data?.compressionFormat) {
       containerFormat = `DCX-${dcx.data.compressionFormat}->BND4`;
     }
-    enumerationSource = 'read-dcx-document';
+    enumerationSource = 'list-bnd4-entries';
   }
 
-  const truncated = rawEntries.length > MAX_EVIDENCE_ENTRIES;
+  const truncated = rawEntries.length > MAX_EVIDENCE_ENTRIES || rawEntries.length < (data.entryCount ?? 0);
   const boundedEntries = rawEntries.slice(0, MAX_EVIDENCE_ENTRIES);
 
   // Step 3: Per-entry classification with sanitized names (extension-based).
@@ -381,7 +378,9 @@ export async function buildScriptContainerEvidence(
     const classification = classifyScriptEntry(rawName);
     return {
       name,
-      index: entry.index ?? 0,
+      // Inventory samples do not promise a physical slot. Never lend slot 0's
+      // bytes to another entry when a full reference table was unavailable.
+      index: Number.isSafeInteger(entry.index) && entry.index! >= 0 ? entry.index! : -1,
       size: entry.uncompressedSize ?? 0,
       extension: rawName.split('.').pop()?.toLowerCase() ?? '',
       classification,
@@ -396,7 +395,7 @@ export async function buildScriptContainerEvidence(
   // content never leaves the daemon response into the evidence projection.
   const luaBytecodeIndices: number[] = [];
   entries.forEach((entry, index) => {
-    if (entry.classification === 'lua-bytecode') luaBytecodeIndices.push(index);
+    if (entry.classification === 'lua-bytecode' && entry.index >= 0) luaBytecodeIndices.push(index);
   });
   const magicSampleCount = Math.min(MAGIC_SAMPLE_LIMIT, luaBytecodeIndices.length);
   let magicVerifiedCount = 0;
@@ -435,6 +434,12 @@ export async function buildScriptContainerEvidence(
     classificationSummary[entry.classification] += 1;
   }
   const scriptEntryCount = entries.filter((entry) => isScriptClassification(entry.classification)).length;
+  const referencesAvailable = enumerationSource === 'list-bnd4-entries'
+    && entries.every(entry => entry.index >= 0);
+  if (!referencesAvailable) diagnostics.push(createDiagnostic({
+    severity: 'warning', code: 'SCRIPT_EVIDENCE_REFERENCE_TABLE_UNAVAILABLE',
+    message: '原生条目引用表不可用；仅保留名称分类，不将缺失槽位视作第 0 项或完整证据。', targetUri: sourceUri
+  }));
 
   diagnostics.push(createDiagnostic({
     severity: 'info',
@@ -444,7 +449,7 @@ export async function buildScriptContainerEvidence(
   }));
 
   return {
-    ok: true,
+    ok: referencesAvailable,
     containerPath: options.containerPath,
     containerFormat,
     entryCount: data.entryCount ?? rawEntries.length,

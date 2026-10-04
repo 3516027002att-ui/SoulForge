@@ -76,7 +76,8 @@ public sealed class NativeTextLayoutTests
         Assert.Equal(0xe0, BinaryPrimitives.ReadInt64LittleEndian(output.AsSpan(0x38)));
         var secondOffset = BinaryPrimitives.ReadUInt32LittleEndian(output.AsSpan(0x64 + 24));
         Assert.Equal(Enumerable.Repeat((byte)2, 8), output.AsSpan((int)secondOffset, 8).ToArray());
-        Assert.Equal(Enumerable.Repeat((byte)0x5b, 0x18), output.AsSpan(0x128, 0x18).ToArray());
+        Assert.Equal(Enumerable.Repeat((byte)0x5b, 0x18), output.AsSpan(0x108, 0x18).ToArray());
+        Assert.Equal(0x120u, secondOffset);
     }
 
     [Fact]
@@ -85,5 +86,41 @@ public sealed class NativeTextLayoutTests
         var doc = Bnd4NativeDocument.Read(Binder()); var entries = doc.ToRepackEntries().ToArray();
         entries[0] = entries[0] with { Name = "renamed.fmg" };
         Assert.Throws<NotSupportedException>(() => doc.Repack(entries));
+    }
+
+    [Fact]
+    public void PayloadGrowthKeepsOutOfPrefixMetadataAtItsOriginalAddress()
+    {
+        var bytes = Binder();
+        // A reader-accepted name in an inter-payload gap is not permission to
+        // relocate that gap without rewriting every unknown pointer to it.
+        I32(bytes, 0x64 + 32, 0x108);
+        Encoding.Unicode.GetBytes("gap.fmg\0").CopyTo(bytes, 0x108);
+        I64(bytes, 0x38, 0x118);
+        var doc = Bnd4NativeDocument.Read(bytes);
+        var entries = doc.ToRepackEntries().ToArray();
+        entries[0] = entries[0] with { StoredBytes = new byte[40], UncompressedSize = 40 };
+        var output = doc.Repack(entries);
+        Assert.Equal("gap.fmg", Bnd4NativeDocument.Read(output).Entries[1].Name);
+        Assert.Equal(bytes.AsSpan(0x108, 0x18).ToArray(), output.AsSpan(0x108, 0x18).ToArray());
+        Assert.Equal(0x118, BinaryPrimitives.ReadInt64LittleEndian(output.AsSpan(0x38)));
+    }
+
+    [Fact]
+    public void ReadEnvelopeDoesNotFailWhenStructuralWriterIsUnavailable()
+    {
+        var doc = Bnd4NativeDocument.Read(Binder());
+        Assert.NotNull(doc.ToEnvelope());
+        var crud = doc.VerifyCrud();
+        Assert.Contains("BND4_HASH_INDEX_STRUCTURAL_REPACK_UNSUPPORTED", System.Text.Json.JsonSerializer.Serialize(crud));
+    }
+
+    [Fact]
+    public void EmptyHashIndexedBinderStillHasAByteIdenticalNoOpRead()
+    {
+        var bytes = Binder(); I32(bytes, 0x0c, 0);
+        var doc = Bnd4NativeDocument.Read(bytes);
+        Assert.Equal(bytes, doc.Repack(doc.ToRepackEntries()));
+        Assert.NotNull(doc.ToEnvelope());
     }
 }

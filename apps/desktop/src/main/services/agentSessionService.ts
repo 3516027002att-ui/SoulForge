@@ -228,6 +228,8 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
         const activeWorkspaceSession = deps.getActiveSession();
         const activeWorkspaceIndex = deps.getActiveIndex();
         let coreSession: CoreToolSession | undefined;
+        let executionStarted = false;
+        try {
         if (activeWorkspaceSession) {
           const storage = deps.durableStoragePaths(activeWorkspaceSession.meta.workspaceId);
           coreSession = await openAgentCoreToolSession({
@@ -454,6 +456,10 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
           model: authorization.model
         });
         agentSessionOwners.set(sessionId, ownerId);
+        let assembly: AgentAssembly | undefined;
+        // Own synchronous launch failures as well as Promise rejections. Once
+        // accepted, every setup/dispatch path must reach the same cleanup.
+        const execution = (async () => {
         authorization.bindTarget();
         sendAgentEvent(sessionId, { type: 'session-accepted', mode });
 
@@ -600,7 +606,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
             deps.operationLogUtility.forWorkspace(ragWorkspace.meta.workspaceId), query, { signal }
           )
         }) : undefined;
-        const assembly = createAgentRunAssembly(bridge, {
+        assembly = createAgentRunAssembly(bridge, {
           sessionRunner: deps.sessionRunner,
           ...(coreSession ? { coreSession } : {}),
           composition: {
@@ -614,7 +620,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
             ...(ragSearch ? { ragSearch } : {})
           }
         });
-        void authorization.execute(assembly, {
+        return authorization.execute(assembly, {
           sessionsDir: agentSessionsBaseDir,
           sessionId,
           prompt: request.prompt,
@@ -629,7 +635,10 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
           ...(mode === 'fullPermission' ? { approvalRequiredLevels: [] } : {}),
           ...(resumeFrom ? { resumeFrom } : {}),
           onEvent: (event) => sendAgentEvent(sessionId, event)
-        }).then((result) => {
+        });
+        })();
+        executionStarted = true;
+        void execution.then((result) => {
           activeAgentRuns.delete(sessionId);
           rejectSessionApprovals(sessionId, '会话已结束，未回答的审批按拒绝处理。');
           const relativeRolloutPath = relative(agentSessionsBaseDir, result.rolloutPath).replace(/\\/g, '/');
@@ -640,15 +649,21 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
           rejectSessionApprovals(sessionId, '会话异常结束，未回答的审批按拒绝处理。');
           sendAgentEvent(sessionId, {
             type: 'session-error',
-            code: 'AGENT_SESSION_FAILED',
+            code: error !== null && typeof error === 'object' && 'code' in error && error.code === 'AGENT_BUDGET_INVALID'
+              ? 'AGENT_BUDGET_INVALID' : 'AGENT_SESSION_FAILED',
             message: error instanceof Error ? error.message : String(error)
           });
         }).finally(async () => {
-          await assembly.waitForHostOperations();
-          coreSession?.close();
+          try { await assembly?.waitForHostOperations(); }
+          finally { coreSession?.close(); }
         });
 
         return { ok: true, sessionId };
+        } finally {
+          // A failure while preparing prompts/context precedes admission and
+          // has no background owner to close the already-opened core session.
+          if (!executionStarted) coreSession?.close();
+        }
 
   }
 

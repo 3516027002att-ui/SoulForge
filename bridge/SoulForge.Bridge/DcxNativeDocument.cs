@@ -150,7 +150,7 @@ internal sealed class DcxNativeDocument
         {
             var binder = Bnd4NativeDocument.Read(Payload);
             nested = binder.ToEnvelope();
-            if (CompressionFormat == "DFLT" && binder.Entries.Count > 0)
+            if (CompressionFormat == "DFLT" && binder.Entries.Count > 0 && binder.SupportsStructuralRepack)
             {
                 var entries = binder.ToRepackEntries().ToList();
                 entries[0] = entries[0] with { Name = entries[0].Name + ".dcx-roundtrip" };

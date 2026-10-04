@@ -96,3 +96,36 @@ for (const fault of ['unknown-checksum', 'conflicting-snapshots', 'extra-field',
     if (fault === 'before-checksum-commit') { db.exec('DROP TRIGGER fail_migration'); applyMigrations(db, migrations); }
   }));
 }
+
+for (const table of ['knowledge_generations', 'knowledge_current']) {
+  for (const reference of [table, table.toUpperCase(), table.replace('knowledge_', 'KnOwLeDgE_')]) {
+    test(`legacy v14 refuses external cascading foreign key to ${reference}`, async () => fixture(async (db) => {
+      const columns = table === 'knowledge_generations' ? 'workspace_id, generation_id' : 'workspace_id';
+      db.exec(`CREATE TABLE user_knowledge_notes (
+        workspace_id TEXT NOT NULL, generation_id TEXT NOT NULL, body TEXT NOT NULL,
+        FOREIGN KEY (${columns}) REFERENCES "${reference}" (${columns}) ON DELETE CASCADE
+      );`);
+      db.prepare('INSERT INTO user_knowledge_notes VALUES (?,?,?)').run('test', snapshot.current, 'must remain untouched');
+      const before = {
+        notes: db.prepare('SELECT * FROM user_knowledge_notes').all(),
+        generations: db.prepare('SELECT * FROM knowledge_generations ORDER BY generation_id').all(),
+        current: db.prepare('SELECT * FROM knowledge_current').all(),
+        schema: db.prepare('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name').all(),
+        ledger: db.prepare('SELECT * FROM schema_migrations ORDER BY id').all(),
+        version: db.pragma('user_version', { simple: true })
+      };
+      assert.throws(() => applyMigrations(db, migrations), error => {
+        const failure = error as { code?: string; details?: { cause?: string } };
+        return failure.code === 'SQLITE_LEGACY_KNOWLEDGE_MIGRATION_FAILED'
+          && failure.details?.cause === 'LEGACY_KNOWLEDGE_INVALID: external knowledge foreign key';
+      });
+      assert.deepEqual(db.prepare('SELECT * FROM user_knowledge_notes').all(), before.notes);
+      assert.deepEqual(db.prepare('SELECT * FROM knowledge_generations ORDER BY generation_id').all(), before.generations);
+      assert.deepEqual(db.prepare('SELECT * FROM knowledge_current').all(), before.current);
+      assert.deepEqual(db.prepare('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name').all(), before.schema);
+      assert.deepEqual(db.prepare('SELECT * FROM schema_migrations ORDER BY id').all(), before.ledger);
+      assert.equal(db.pragma('user_version', { simple: true }), before.version);
+      assert.deepEqual(db.pragma('foreign_key_check'), []);
+    }));
+  }
+}

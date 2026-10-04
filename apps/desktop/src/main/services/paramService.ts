@@ -39,7 +39,7 @@ import {
 } from '@soulforge/shared';
 import { prepareBridgeRoots as nativePrepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from '../bridgeRoots.js';
 import type { NativeBnd4EntryLike, NativeDcxEnvelopeLike } from '../ipc/bridgeEnvelopes.js';
-import { sanitizeDiagnostics, sanitizeRendererValue, type RendererSaveResult } from '../rendererDto.js';
+import { sanitizeDiagnostics, sanitizeRendererIpcResult, sanitizeRendererValue, type RendererSaveResult } from '../rendererDto.js';
 import { readParamDocumentWithMetadataFallback } from '../ipc/paramReadFallback.js';
 import {
   appendPostCommitFailureDiagnostic,
@@ -1004,7 +1004,7 @@ let paramMetadataCache: {
     // 行宽一致，拿不到时它给出 ROW_WIDTH_MISMATCH 诊断。
     const rowWidthMatches = paramDef !== null;
 
-    return sanitizeRendererValue({
+    return sanitizeRendererIpcResult('resource.readParamDocument', {
       ok: result.ok,
       sourceUri,
       relativePath: file.relativePath,

@@ -9,6 +9,9 @@ import { fileURLToPath } from 'node:url';
 // from an independent raw-byte/external oracle, never from this reader.
 const source = process.env.SF_REAL_TAE_SOURCE?.trim();
 const expectedCount = Number(process.env.SF_REAL_TAE_EXPECTED_ANIMATION_COUNT);
+// Optional read-only game runtime for original KRAK containers. The mutated
+// fixture stays in the owned overlay even when this points at a real game.
+const runtimeRoot = process.env.SF_REAL_GAME_ROOT?.trim();
 const here = dirname(fileURLToPath(import.meta.url));
 test.skip(!source || !existsSync(source) || !Number.isSafeInteger(expectedCount) || expectedCount <= 0,
   '需要真实 TAE 容器及独立核对的动作总数，未配置时明确跳过');
@@ -24,8 +27,8 @@ test('real native TAE total renders on a bounded initial page and read failures 
   try {
     app = await electron.launch({ chromiumSandbox: true, args: [resolve(here, '../production-main.mjs'),
       ...(process.env.SF_E2E_HEADLESS === '1' ? ['--ozone-platform=headless'] : []), `--user-data-dir=${join(root, 'user-data')}`],
-      env: { ...process.env, HOME: home, NODE_ENV: 'production', SF_E2E_OVERLAY_ROOT: overlay, SF_E2E_BASE_ROOT: game,
-        SF_E2E_WORKSPACE_STORAGE_ROOT: join(root, 'storage') } });
+      env: { ...process.env, HOME: home, NODE_ENV: 'production', SF_E2E_OVERLAY_ROOT: overlay,
+        SF_E2E_BASE_ROOT: runtimeRoot || game, SF_E2E_WORKSPACE_STORAGE_ROOT: join(root, 'storage') } });
     await testWorkspace().registerApp(app);
     expect(app.process().spawnargs).not.toContain('--no-sandbox');
     const page = await app.firstWindow();
@@ -33,6 +36,10 @@ test('real native TAE total renders on a bounded initial page and read failures 
     expect(await nativeWindow.evaluate(window => window.webContents.getLastWebPreferences().sandbox)).toBe(true);
     const errors = []; page.on('pageerror', error => errors.push(String(error)));
     await page.waitForFunction(() => !!globalThis.soulforge);
+    if (runtimeRoot) {
+      await page.getByRole('region', { name: '开始' }).getByTestId('choose-base-directory').click();
+      await expect(page.getByRole('region', { name: '开始' }).getByTestId('choose-base-directory')).toContainText('更换原版目录');
+    }
     await page.getByRole('region', { name: '开始' }).getByTestId('open-workspace').click();
     await expect(page.locator('.workspace-switcher__trigger')).toContainText('mods', { timeout: 120_000 });
     const open = async () => {

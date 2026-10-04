@@ -2,9 +2,31 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {composeAgentSessionOptions} from '../packages/core/dist/model-services/agentHostComposition.js';
 import {runFiniteAgentAdapter} from '../packages/core/dist/model-services/finiteAgentAdapter.js';
+import {createAgentRunAssembly} from '../packages/core/dist/model-services/agentRunAssembly.js';
 
 const params = {permissionMode:'plan', prompt:'read only'};
 const desktop = {defaultTimeoutMs:180_000, defaultTotalTimeoutMs:1_800_000, maxStepsCeiling:200};
+
+test('assembly rejects invalid budgets and synchronous runners through its Promise contract', async () => {
+  let calls = 0;
+  for (const controls of [{maxCost:0}, {totalTimeoutMs:2 ** 32}]) {
+    const assembly = createAgentRunAssembly({tools:[], executeTool:async()=>{throw new Error('no tools');}}, {
+      composition:{...desktop, controls}, sessionRunner:()=>{calls++; throw new Error('must not launch');}
+    });
+    let pending;
+    assert.doesNotThrow(() => {pending = assembly.run(params);});
+    await assert.rejects(pending, {code:'AGENT_BUDGET_INVALID'});
+    await assembly.waitForHostOperations();
+  }
+  assert.equal(calls, 0);
+  const error = new Error('owned synchronous runner failure');
+  const assembly = createAgentRunAssembly({tools:[], executeTool:async()=>{throw new Error('no tools');}}, {
+    sessionRunner:()=>{throw error;}
+  });
+  let pending;
+  assert.doesNotThrow(() => {pending = assembly.run(params);});
+  await assert.rejects(pending, value => value === error);
+});
 
 test('desktop normalizes request and total deadlines separately, with optional money limits', () => {
   const result = composeAgentSessionOptions(params, desktop);

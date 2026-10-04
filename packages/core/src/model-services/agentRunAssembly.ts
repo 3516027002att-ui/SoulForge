@@ -33,7 +33,7 @@ export function createAgentRunAssembly(bridge: AgentToolBridge, options: {
       catch { return projectStatus({id:`${sessionId}:${callId}`,state:'unknown',queuedAt:0,
         outcome:{id:`${sessionId}:${callId}`,ok:false,requestState:'unknown',transaction:{state:'unknown',operations:[]}}}); }
     },
-    run(params: Omit<AgentSessionRunParams, 'tools' | 'executeTool'>) {
+    async run(params: Omit<AgentSessionRunParams, 'tools' | 'executeTool'>) {
       const sessionId = params.sessionId ?? randomUUID();
       const host = options.coreSession ? new LocalSessionHost(`agent:${sessionId}`,
         options.coreSession.workspaceId, options.coreSession.principal, options.coreSession) : undefined;

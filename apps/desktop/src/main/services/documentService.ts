@@ -140,7 +140,7 @@ export function createDocumentService(input: DocumentServiceDeps) {
     };
     const readContent = async (owner: DocumentOwner, rawRequest: unknown): Promise<EditorDocumentResult<EditorContentValue>> => {
         const request = decodeReadEditorContentRequest(rawRequest);
-        return toRendererEditorDocumentResult(await ensureEditorDocumentStore().readContent(owner(), request));
+        return toRendererEditorDocumentResult(await ensureEditorDocumentStore().readContent(owner(), request), 'document.readContent');
     };
     const apply = async (owner: DocumentOwner, rawRequest: unknown): Promise<EditorDocumentResult<ApplyEditorMutationValue>> => {
         const request = decodeApplyEditorMutationRequest(rawRequest);

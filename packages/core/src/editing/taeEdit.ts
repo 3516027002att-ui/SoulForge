@@ -86,6 +86,68 @@ export interface TaeEventFieldEdit {
   value: string | number | boolean;
 }
 
+type TaeFieldSnapshot = NonNullable<TaeEventSnapshot['fields']>[number];
+const TAE_FIELD_SIZES: Readonly<Record<string, number>> = { b: 1, u8: 1, s8: 1, u16: 2, s16: 2, u32: 4, s32: 4, s64: 8, f32: 4 };
+const TAE_INTEGER_RANGES: Readonly<Record<string, readonly [bigint, bigint]>> = {
+  u8: [0n, 255n], s8: [-128n, 127n], u16: [0n, 65535n], s16: [-32768n, 32767n],
+  u32: [0n, 4294967295n], s32: [-2147483648n, 2147483647n], s64: [-9223372036854775808n, 9223372036854775807n]
+};
+
+function validTaeEnumEntries(value: unknown): boolean {
+  // Native schemas serialize an absent enum as null. Any other non-array
+  // shape is corrupt evidence, not an absent constraint.
+  return value === undefined || value === null || (Array.isArray(value) && value.every(item => (
+    item !== null && typeof item === 'object' && typeof item.name === 'string'
+    && typeof item.value === 'number' && Number.isSafeInteger(item.value)
+    && item.value >= -2147483648 && item.value <= 2147483647
+  )));
+}
+
+/** Compare schema scalars, not bytes. Bridge remains the only native codec.
+ * Its EncodeValue accepts numeric strings, bool forms and named enum entries;
+ * native readback returns typed values. Unknown/lossy schema evidence fails closed. */
+function matchesTaeFieldReadback(before: TaeFieldSnapshot, after: TaeFieldSnapshot, requested: TaeEventFieldEdit['value']): boolean {
+  const type = before.type;
+  if (!type || !Object.hasOwn(TAE_FIELD_SIZES, type) || before.size !== TAE_FIELD_SIZES[type]
+    || !Number.isSafeInteger(before.index) || before.index! < 0
+    || !Number.isSafeInteger(before.offset) || before.offset! < 0
+    || after.type !== type || after.size !== before.size || after.offset !== before.offset
+    || after.index !== before.index || after.name !== before.name
+    || after.isPadding === true || after.assert !== undefined) return false;
+  if (!validTaeEnumEntries(before.enumEntries) || !validTaeEnumEntries(after.enumEntries)) return false;
+  const enumEntries = before.enumEntries ?? [], observedEnum = after.enumEntries ?? [];
+  if (enumEntries.length !== observedEnum.length
+    || enumEntries.some((item, index) => item.name !== observedEnum[index]!.name || item.value !== observedEnum[index]!.value)) return false;
+  let value = requested;
+  if (typeof value === 'string') {
+    const text = value;
+    const entry = enumEntries.find(item => item.name === text
+      || (/^[\x00-\x7F]*$/.test(item.name) && /^[\x00-\x7F]*$/.test(text) && item.name.toLowerCase() === text.toLowerCase()));
+    if (entry) value = entry.value;
+  }
+  if (type === 'b') {
+    if (typeof value === 'string' && /^(true|false)$/i.test(value.trim())) value = value.trim().toLowerCase() === 'true';
+    else if (value === 0 || value === 1) value = value === 1;
+    return typeof value === 'boolean' && after.value === value;
+  }
+  if (type === 'f32') {
+    let numeric: number;
+    if (typeof value === 'number') numeric = value === 0 ? 0 : value; // JSON numbers do not retain -0.
+    else if (typeof value === 'string' && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(value.trim())) numeric = Number(value);
+    else return false;
+    const expected = Math.fround(numeric);
+    return Number.isFinite(expected) && typeof after.value === 'number' && Number.isFinite(after.value)
+      && Object.is(Math.fround(after.value), expected);
+  }
+  const range = TAE_INTEGER_RANGES[type];
+  if (!range || typeof after.value !== 'number' || !Number.isSafeInteger(after.value)) return false;
+  let expected: bigint;
+  if (typeof value === 'number' && Number.isSafeInteger(value)) expected = BigInt(value);
+  else if (typeof value === 'string' && /^[+-]?\d+$/.test(value.trim())) expected = BigInt(value.trim());
+  else return false;
+  return expected >= range[0] && expected <= range[1] && BigInt(after.value) === expected;
+}
+
 export interface TaeEditFailure {
   code: string;
   message: string;
@@ -655,12 +717,14 @@ export async function setTaeEventFields(input: {
   const reread = await readTaeEnvelope(input.edit, resolved.path, before.map(event => event.address));
   const after = reread.ok ? projectEvents(reread.chrId, reread.animations) : [];
   const nativeVerified = reread.ok && input.edits.every((edit, index) => {
-    const observed = after.find(event => event.address === before[index]!.address);
-    const field = observed?.fields?.find(value => (edit.fieldIndex === undefined || value.index === edit.fieldIndex)
-      && (edit.fieldName === undefined || value.name === edit.fieldName));
-    return field !== undefined && (Object.is(field.value, edit.value)
-      || (typeof field.value === 'number' && typeof edit.value === 'number'
-        && Math.abs(field.value - edit.value) <= Math.max(0.000001, Math.abs(edit.value) * 0.000001)));
+    const previous = before[index]!;
+    const observed = after.find(event => event.address === previous.address);
+    if (observed?.parameterDecoded !== true || observed.eventTypeId !== previous.eventTypeId
+      || observed.schemaBankId !== previous.schemaBankId || observed.schemaVariant !== previous.schemaVariant) return false;
+    const selected = (value: TaeFieldSnapshot) => (edit.fieldIndex === undefined || value.index === edit.fieldIndex)
+      && (edit.fieldName === undefined || value.name === edit.fieldName);
+    const original = previous.fields?.filter(selected), fields = observed.fields?.filter(selected);
+    return original?.length === 1 && fields?.length === 1 && matchesTaeFieldReadback(original[0]!, fields[0]!, edit.value);
   });
   return {
     ok: true,
@@ -836,6 +900,10 @@ function projectEvents(chrId: string, animations: EnvelopeAnim[]): TaeEventSnaps
     const code = formatAnimCode(anim.animId);
     for (let index = 0; index < (anim.events ?? []).length; index += 1) {
       const event = anim.events![index]!;
+      const schemaShapeValid = Array.isArray(event.templateFields) && event.templateFields.every(field => (
+        field !== null && typeof field === 'object' && typeof field.name === 'string' && field.name.length > 0
+        && validTaeEnumEntries(field.enumEntries)
+      ));
       const startTime = typeof event.startTime === 'number' && Number.isFinite(event.startTime) ? event.startTime : 0;
       const endTime = typeof event.endTime === 'number' && Number.isFinite(event.endTime) ? event.endTime : startTime;
       const sectionSelector = sectionSelectorForAnimation(anim);
@@ -863,13 +931,13 @@ function projectEvents(chrId: string, animations: EnvelopeAnim[]): TaeEventSnaps
         ...(typeof event.typeName === 'string' && event.typeName.length > 0 ? { typeName: event.typeName } : {}),
         ...(typeof event.schemaBankId === 'number' ? { schemaBankId: event.schemaBankId } : {}),
         ...(typeof event.schemaVariant === 'string' ? { schemaVariant: event.schemaVariant } : {}),
-        ...(typeof event.parameterDecoded === 'boolean' ? { parameterDecoded: event.parameterDecoded } : {}),
+        ...(typeof event.parameterDecoded === 'boolean' ? { parameterDecoded: event.parameterDecoded && schemaShapeValid } : {}),
         ...(typeof event.parameterTailLength === 'number' ? { parameterTailLength: event.parameterTailLength } : {}),
         startTime,
         endTime,
         startFrame: frameFromSeconds(startTime),
         endFrame: frameFromSeconds(endTime),
-        decodeStatus: event.parameterDecoded === true && Array.isArray(event.templateFields)
+        decodeStatus: event.parameterDecoded === true && schemaShapeValid
           ? 'decoded'
           : typeof event.parameterBytesHex === 'string' && event.parameterBytesHex.length > 0
             ? 'unknown'
@@ -886,7 +954,7 @@ function projectEvents(chrId: string, animations: EnvelopeAnim[]): TaeEventSnaps
           ? {
             fields: event.templateFields
               .filter((field): field is EnvelopeTemplateField & { name: string } => (
-                typeof field.name === 'string' && field.name.length > 0
+                field !== null && typeof field === 'object' && typeof field.name === 'string' && field.name.length > 0
               ))
               .map((field) => ({
                 name: field.name,

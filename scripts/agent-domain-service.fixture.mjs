@@ -116,7 +116,8 @@ async function harness(options = {}) {
     durableStoragePaths: () => ({ root: owned, backupBaseDir: path.join(owned, 'backups'), recoveryDir: path.join(owned, 'recovery'), stagingRoot: path.join(owned, 'stage') }),
     currentToolContext: () => ({ workspaceIndex: activeIndex, ...(activeSession ? { session: activeSession, workspaceSessionId: 'owned-session', workspaceSessionGeneration: generation, indexedFilesRevision: generation } : {}), mode: 'plan',
       ...(options.rag ? { rag: options.rag, ragSessionId: 'owned-session', ragGeneration: generation, ragIndexedFilesRevision: generation, ragEpoch: activeIndex?.getNativeVersionEpoch(), ragScope: 'full' } : {}) }),
-    requestWriteConfirmation: async input => { calls.push(['writeConfirmation', input]); return null; }, readSystemPrompt: () => 'Owned system prompt.' };
+    requestWriteConfirmation: async input => { calls.push(['writeConfirmation', input]); return null; },
+    readSystemPrompt: () => { if (options.systemPromptError) throw options.systemPromptError; return 'Owned system prompt.'; } };
   api.registerAgentIpcHandlers(deps);
   return { api, calls, owned, target, handlers, deps, utility, embeddings, journal,
     directLocal() {
@@ -489,17 +490,79 @@ test('actual desktop admission forwards exact controls through shared compositio
     assert.equal(params.approvalRequiredLevels, undefined); assert.equal(params.sampling.temperature, 0);
   } finally { await h.close(); }
 });
-test('invalid numeric desktop controls use existing safe defaults and a real short deadline reaches the finite runner', async () => {
+test('invalid numeric desktop controls use existing safe defaults and a real short total deadline reaches the finite runner', async () => {
   const h = await harness(); try {
     await h.request('plan', { timeoutMs: 0, maxSteps: -1, maxTotalOutputTokens: 0, autoCompactTokenLimit: 0, retryMaxAttempts: -1 }); await h.waitEvent('session-done');
     const params = h.calls.find(([name]) => name === 'utilityRun')[1]; assert.equal(params.timeoutMs, 180_000);
-    assert.equal(params.maxSteps, undefined); assert.equal(params.maxTotalOutputTokens, undefined); assert.equal(params.retryPolicy, undefined);
+    assert.equal(params.maxSteps, 200); assert.equal(params.maxTotalOutputTokens, undefined); assert.equal(params.retryPolicy, undefined);
     assert.equal(params.compaction.autoCompactTokenLimit, 1600);
   } finally { await h.close(); }
   const delayed = await harness({ complete: async () => { await new Promise(done => setTimeout(done, 50)); return response('Late fixture response.'); } });
-  try { await delayed.request('plan', { timeoutMs: 10 }); const done = await delayed.waitEvent('session-done'); assert.equal(done.event.finishReason, 'cancelled');
+  try { await delayed.request('plan', { timeoutMs: 180_000, totalTimeoutMs: 10 }); const done = await delayed.waitEvent('session-done'); assert.equal(done.event.finishReason, 'cancelled');
     assert.equal(delayed.target.events.some(({ event }) => event.type === 'agent-message-delta'), false);
   } finally { await delayed.close(); }
+});
+test('invalid desktop money and total budgets terminate accepted sessions and release owned CoreToolSession', async () => {
+  for (const controls of [{maxCost:0}, {maxCost:1, pricing:{inputPerMillion:-1, outputPerMillion:1}}, {totalTimeoutMs:2 ** 32}]) {
+    const h = await harness({session:ownedWorkspace, index:new realCore.WorkspaceIndex('owned'), journal:true});
+    try {
+      const accepted = await h.request('plan', controls);
+      assert.equal(accepted.ok, true);
+      const terminal = await h.waitEvent('session-error');
+      await new Promise(done => setImmediate(done));
+      assert.equal(terminal.event.code, 'AGENT_BUDGET_INVALID');
+      assert.equal(h.api.isAgentSessionActive(accepted.sessionId), false);
+      assert.equal(h.calls.filter(([name]) => name === 'coreClose').length, 1);
+      assert.equal(h.calls.filter(([name]) => name === 'utilityRun' || name === 'complete').length, 0);
+      assert.equal(h.target.events.some(({event}) => event.type === 'session-done'), false);
+    } finally { await h.close(); }
+  }
+});
+test('desktop displays the same explicit run budget that its host enforces', async () => {
+  const h = await harness();
+  try {
+    await h.request('plan', {timeoutMs:2000, totalTimeoutMs:500, maxSteps:3, maxCost:1, pricing:{inputPerMillion:2, outputPerMillion:3}});
+    await h.waitEvent('session-done');
+    const params = h.calls.find(([name]) => name === 'utilityRun')[1];
+    const budget = h.target.events.find(({event}) => event.type === 'run-budget').event.budget;
+    assert.equal(params.timeoutMs, 2000);
+    assert.equal(budget.totalTimeoutMs, params.kernelLimits.timeoutMs);
+    assert.equal(budget.totalTimeoutMs, 500);
+    assert.equal(budget.maxSteps, params.maxSteps);
+    assert.equal(budget.maxSteps, 3);
+    assert.equal(budget.maxCost, params.kernelLimits.maxCost);
+    assert.equal(budget.maxCost, 1);
+    assert.deepEqual(plain(params.pricing), {inputPerMillion:2, outputPerMillion:3});
+  } finally { await h.close(); }
+});
+test('synchronous launch port failures release active state and core sessions without a provider call', async () => {
+  for (const port of ['bindTarget', 'execute']) {
+    const h = await harness({session:ownedWorkspace, index:new realCore.WorkspaceIndex('owned'), journal:true});
+    const {service, authorization} = h.directSession();
+    authorization[port] = () => { throw new Error(`owned ${port} failure`); };
+    try {
+      const accepted = await service.run({ownerId:71, sessionId:`owned-${port}`, mode:'plan',
+        request:{configId:'owned-config', prompt:'Owned direct task.'}, citationLines:[], authorization});
+      assert.equal(accepted.ok, true);
+      await new Promise(done => setImmediate(done));
+      const replay = await service.events(71, accepted.sessionId, 0);
+      assert.equal(replay.events.at(-1).event.type, 'session-error');
+      assert.equal(replay.events.at(-1).event.code, 'AGENT_SESSION_FAILED');
+      assert.equal(service.hasActiveRuns(), false);
+      assert.equal(h.calls.filter(([name]) => name === 'coreClose').length, 1);
+      assert.equal(h.calls.filter(([name]) => name === 'utilityRun' || name === 'complete').length, 0);
+    } finally { service.clearState(); await h.close(); }
+  }
+});
+test('synchronous preparation failure rejects before acceptance and closes its opened core session', async () => {
+  const failure = new Error('owned system prompt failure');
+  const h = await harness({session:ownedWorkspace, index:new realCore.WorkspaceIndex('owned'), journal:true, systemPromptError:failure});
+  try {
+    await assert.rejects(h.request(), error => error === failure);
+    assert.equal(h.calls.filter(([name]) => name === 'coreClose').length, 1);
+    assert.equal(h.target.events.length, 0);
+    assert.equal(h.calls.filter(([name]) => name === 'utilityRun' || name === 'complete').length, 0);
+  } finally { await h.close(); }
 });
 test('direct application runs need only admitted identities and execution ports without transport or vault', async () => {
   const h = await harness(), { service, authorization } = h.directSession();

@@ -18,24 +18,78 @@
 /** 本机路径占位符（各端共用同一文案，UI 里也按它做特殊显示）。 */
 export const MASKED_PATH_PLACEHOLDER = '[本机路径已隐藏]';
 
-// These are declared native binary DTO fields, not diagnostic text or path
-// authority. Base64 can legitimately start with / or contain +/; treating it as
-// POSIX text corrupts geometry before the renderer's strict decoder sees it.
-const RENDERER_BINARY_FIELDS = new Set([
-  'positionsBase64', 'indicesBase64', 'uvsBase64', 'normalsBase64',
-  'normalWBase64', 'boneIndicesBase64', 'sourceBoneIndicesBase64',
-  'boneWeightsBase64', 'vertexAlphaBase64', 'rgbaBase64', 'xyzBase64', 'xyzwBase64',
-  'bytesBase64', 'dataBase64', 'argsBase64', 'textureBase64', 'splineRawPayloadBase64'
+// Binary authority comes from the registered IPC response contract, never a
+// field name or a schema/channel supplied inside the returned object. Both
+// "/tmp/private" and real geometry can be syntactically valid base64.
+type BinaryPath = readonly (string | number)[];
+type BinaryRule = { path: readonly string[]; encoding: 'base64' | 'png' };
+const binaryRules = (root: readonly string[], fields: readonly string[], encoding: BinaryRule['encoding'] = 'base64'): BinaryRule[] =>
+  fields.map(field => ({ path: [...root, field], encoding }));
+const GEOMETRY_FIELDS = ['positionsBase64', 'indicesBase64', 'uvsBase64', 'normalsBase64'];
+function meshBinaryRules(root: readonly string[]): BinaryRule[] {
+  return [
+    ...binaryRules(root, [...GEOMETRY_FIELDS, 'boneIndicesBase64', 'boneWeightsBase64', 'vertexAlphaBase64']),
+    ...binaryRules([...root, 'uvSetsBase64'], ['*']),
+    ...binaryRules([...root, 'positionDiagnostics', '*'], ['xyzBase64', 'normalWBase64']),
+    ...binaryRules([...root, 'normalDiagnostics', '*'], ['xyzBase64', 'normalWBase64']),
+    ...binaryRules([...root, 'tangentDiagnostics', '*'], ['xyzwBase64']),
+    ...binaryRules([...root, 'bitangentDiagnostics', '*'], ['xyzwBase64']),
+    ...binaryRules([...root, 'vertexColorDiagnostics', '*'], ['rgbaBase64'])
+  ];
+}
+const RENDERER_BINARY_PROFILES = new Map<string, readonly BinaryRule[]>([
+  ['resource.readMapStaticGeometry', [
+    ...binaryRules(['data', 'chunks', '*'], GEOMETRY_FIELDS),
+    ...binaryRules(['data', 'chunks', '*'], ['texturePreviewToken'], 'png'),
+    ...binaryRules(['data'], ['texturePreviewToken'], 'png')
+  ]],
+  ['resource.readFlverMesh', [
+    ...meshBinaryRules(['data']),
+    ...binaryRules(['data'], ['texturePreviewToken', 'mask1TexturePreviewToken', 'albedo2TexturePreviewToken', 'normal2TexturePreviewToken'], 'png')
+  ]],
+  ['resource.readMapPartMesh', meshBinaryRules(['data'])],
+  ['resource.readTaeChrbndPreview', [
+    ...meshBinaryRules(['data', 'models', '*', 'meshes', '*']),
+    ...binaryRules(['data', 'models', '*', 'meshes', '*'], ['sourceBoneIndicesBase64']),
+    ...binaryRules(['data', 'models', '*', 'meshes', '*'], ['projectionTexturePreviewToken'], 'png'),
+    ...binaryRules(['data', 'models', '*'], ['texturePreviewToken'], 'png'),
+    ...binaryRules(['data', 'models', '*', 'texturePreviews', '*'],
+      ['texturePreviewToken', 'normalTexturePreviewToken', 'metalnessTexturePreviewToken', 'mask1TexturePreviewToken'], 'png'),
+    ...binaryRules(['data', 'models', '*', 'texturePreviews', '*', 'albedo2'], ['texturePreviewToken'], 'png'),
+    ...binaryRules(['data', 'models', '*', 'texturePreviews', '*', 'normal2'], ['texturePreviewToken'], 'png')
+  ]],
+  ['resource.readTaeAnimationClip', binaryRules(['data'], ['splineRawPayloadBase64'])],
+  ['resource.readTpfTexturePreview', binaryRules(['data'], ['previewToken'], 'png')],
+  ['document.readContent', binaryRules(['value'], ['previewToken'], 'png')],
+  ['resource.readParamDocument', binaryRules(['data', 'rows', '*'], ['dataBase64'])],
+  ['resource.readParamPage', binaryRules(['rows', '*'], ['dataBase64'])],
+  ['resource.readContainerParamPage', binaryRules(['rows', '*'], ['dataBase64'])],
+  ['resource.readParamRows', binaryRules(['rows', '*'], ['dataBase64'])],
+  ['resource.readEmevdDocument', binaryRules(['data', 'instructionsSample', '*'], ['argsBase64'])],
+  ['resource.readRawRange', binaryRules([], ['base64'])]
 ]);
+
+/** Generic diagnostics are text, even when nested below a declared binary DTO. */
+export function isRendererDiagnosticContext(key: string): boolean {
+  return /^(?:diagnostics?|details?|errors?)$/i.test(key);
+}
 function isEncodedBytes(value: unknown): value is string {
   // No generic "endsWith(Base64)" bypass and no exemption for malformed text.
   // This flat expression has no repeated groups (large geometry must not blow
-  // the regexp stack). Native DTOs use standard padded base64, not data URLs.
+  // the regexp stack). Native DTOs use standard padded base64.
   return typeof value === 'string' && value.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(value);
 }
-export function isRendererBinaryPayload(key: string, value: unknown): boolean {
-  return RENDERER_BINARY_FIELDS.has(key) ? isEncodedBytes(value)
-    : key === 'uvSetsBase64' && Array.isArray(value) && value.every(isEncodedBytes);
+export function isRendererBinaryPayload(channel: string, path: BinaryPath, value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  if (path.some(part => typeof part === 'string' && isRendererDiagnosticContext(part))) return false;
+  const rule = RENDERER_BINARY_PROFILES.get(channel)?.find(candidate =>
+    candidate.path.length === path.length && candidate.path.every((part, index) =>
+      part === '*' ? typeof path[index] === 'number' : part === path[index]));
+  if (!rule) return false;
+  if (rule.encoding === 'base64') return isEncodedBytes(value);
+  const prefix = 'data:image/png;base64,';
+  return typeof value === 'string' && value.startsWith(prefix) && value.length > prefix.length
+    && isEncodedBytes(value.slice(prefix.length));
 }
 
 /** 盘符绝对路径：D:\x、D:/x（盘符前不是字母数字 —— 覆盖全角冒号/CJK 前缀）。 */

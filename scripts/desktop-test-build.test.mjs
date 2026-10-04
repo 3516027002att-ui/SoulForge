@@ -12,6 +12,30 @@ const build = await import('./desktop-test-build.mjs').catch(error => {
   throw error;
 });
 
+test('direct Node smoke selects the platform npm entry without inventing a Linux sibling layout', () => {
+  assert.equal(typeof build.desktopBuildCommand, 'function');
+  const args = ['run', 'build', '-w', '@soulforge/desktop'];
+  assert.deepEqual(build.desktopBuildCommand({}, 'linux', '/opt/node/bin/node'), { command: 'npm', args });
+  assert.deepEqual(build.desktopBuildCommand({}, 'darwin', '/usr/local/bin/node'), { command: 'npm', args });
+  assert.deepEqual(build.desktopBuildCommand({ npm_execpath: '/opt/node/lib/node_modules/npm/bin/npm-cli.js' }, 'linux', '/opt/node/bin/node'), {
+    command: '/opt/node/bin/node', args: ['/opt/node/lib/node_modules/npm/bin/npm-cli.js', ...args]
+  });
+  assert.deepEqual(build.desktopBuildCommand({}, 'win32', 'C:\\Program Files\\nodejs\\node.exe'), {
+    command: 'C:\\Program Files\\nodejs\\node.exe', args: ['C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js', ...args]
+  });
+});
+
+test('actual npm entry resolves without npm_execpath and without starting a build', () => {
+  assert.equal(typeof build.desktopBuildCommand, 'function');
+  const env = { ...process.env, npm_config_update_notifier: 'false', npm_config_logs_max: '0' };
+  delete env.npm_execpath;
+  const plan = build.desktopBuildCommand(env);
+  const args = [...plan.args.slice(0, plan.args.indexOf('run')), '--version'];
+  const result = spawnSync(plan.command, args, { env, encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  assert.equal(result.status, 0, result.stderr || String(result.error));
+  assert.match(result.stdout.trim(), /^\d+\.\d+\.\d+/);
+});
+
 // Evaluate actual target/output selection without loading build plugins.
 // The plugin constructors do not affect these branches; build/runtime checks
 // separately execute the real plugins, bundles and Electron utility process.
