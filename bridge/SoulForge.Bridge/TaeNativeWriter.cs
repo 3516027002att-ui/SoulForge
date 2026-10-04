@@ -12,8 +12,8 @@ using System.Threading.Tasks;
 ///
 /// 遵循 SF-11 规范：
 /// 1. 彻底移除 m 份整文件克隆快照 (BeforeBytes)，改由不可变基线与 ByteRangeWritePlan 管理；
-/// 2. 全文跨动画共享时间槽检查：建立 timeSlotOffset → 使用者集合，跨动画/同动画共享槽拒绝并返回 TAE_SHARED_TIME_SLOT_WRITE_UNSUPPORTED；
-/// 3. 单事件点事件 (start==end 共享槽) 强制一致性值写入，避免前后覆盖；
+/// 2. 非共享槽保留原位写入；共享槽变更/点事件拆分按动画追加完整时间表，重定位已知指针，不覆盖旧共享槽；
+/// 3. 时间表与事件插入共同规划，保留原时间表、未知区及其它动画的字节，未知布局仍拒绝写回；
 /// 4. 动画内多事件插入按动画分组 (Grouped by Animation)，每个动画仅计算并追加一次最终 eventTable，杜绝 O(mB) 复制开销；
 /// 5. 写入前对修改区间进行 O(M log M) 排序合并，输出后对基线未触及区间与追加块执行流式逐字节验证。
 /// </summary>
@@ -60,12 +60,15 @@ internal static class TaeNativeWriter
         var timeSlotMap = BuildGlobalTimeSlotMap(layout);
         var templates = ResolveInsertionTemplates(mutations, layout, source);
 
-        // 1. 全量静态前置校验：跨动画共享时间槽与参数连续性检查 (SF-11 §2.6.2)
-        ValidateMutations(mutations, layout, timeSlotMap, source, templates);
+        // 1. 全量静态前置校验；共享槽由后续完整时间表 COW 计划处理。
+        ValidateMutations(mutations, layout, source, templates);
 
         // 2. 构建区间写入计划 (SF-11 §2.6.3)
         var plan = new ByteRangeWritePlan(source);
-        var appliedSummaries = BuildAndApplyPlan(mutations, layout, plan, source, templates);
+        var appliedSummaries = BuildAndApplyPlan(mutations, layout, plan, source, templates, timeSlotMap);
+
+        if (plan.CurrentAppendOffset > MaxSourceBytes)
+            throw new InvalidDataException("TAE 写入后大小超出安全范围。");
 
         // 3. 单次分配最终输出 (O(B+A))
         var rebuilt = plan.Apply();
@@ -89,7 +92,7 @@ internal static class TaeNativeWriter
         plan.VerifyStreamingUntouched(reread.SourceBytes);
 
         // 7. 语义命中与兄弟事件零污染核对 (Sibling verify)
-        VerifyMutationResults(mutations, appliedSummaries, layout, reread, source, templates);
+        VerifyMutationResults(mutations, appliedSummaries, layout, reread, source, templates, plan);
 
         // 4. 原子安全写入暂存区
         var directory = Path.GetDirectoryName(outputPath) ?? throw new InvalidDataException("outputPath 没有父目录。");
@@ -116,7 +119,7 @@ internal static class TaeNativeWriter
             outputSize = reread.SourceBytes.Length,
             rereadVerified = true,
             structurePreserved = true,
-            byteSurgical = insertCount == 0,
+            byteSurgical = plan.Appends.Count == 0,
             mutations = appliedSummaries
         };
     }
@@ -153,7 +156,6 @@ internal static class TaeNativeWriter
     private static void ValidateMutations(
         List<TaeMutation> mutations,
         TaeLayout layout,
-        Dictionary<int, List<TimeSlotUser>> timeSlotMap,
         byte[] source, Dictionary<TaeMutation, TemplateSpec> templates)
     {
         foreach (var mutation in mutations)
@@ -164,46 +166,7 @@ internal static class TaeNativeWriter
             if (mutation.Kind == "update-event-times")
             {
                 ValidateTimes(mutation.StartTime!.Value, mutation.EndTime!.Value);
-                var ev = ResolveEvent(anim, mutation.EventIndex!.Value);
-
-                // 全文时间槽使用者检查：不能被本动画其它事件或其它动画的事件共享 (SF-11 §2.6.2)
-                if (timeSlotMap.TryGetValue(ev.StartTimeAbs, out var startUsers))
-                {
-                    var otherStartUsers = startUsers.Where(u => u.AnimId != anim.AnimId || u.EventIndex != ev.Index).ToList();
-                    if (otherStartUsers.Count > 0)
-                    {
-                        var firstOther = otherStartUsers[0];
-                        throw new TaeWriteBlockedException(
-                            $"TAE 动画 {mutation.AnimId} 事件 {ev.Index} 的起始时间槽被动画 {firstOther.AnimId} 事件 {firstOther.EventIndex} 共享；"
-                            + "改写会非预期地改动兄弟事件（sibling verify 失败），拒绝写回。",
-                            "TAE_SHARED_TIME_SLOT_WRITE_UNSUPPORTED",
-                            new { mutation = mutation.Kind, reason = "shared-start-time-slot", sharedWithAnim = firstOther.AnimId, sharedWithEvent = firstOther.EventIndex });
-                    }
-                }
-
-                if (timeSlotMap.TryGetValue(ev.EndTimeAbs, out var endUsers))
-                {
-                    var otherEndUsers = endUsers.Where(u => u.AnimId != anim.AnimId || u.EventIndex != ev.Index).ToList();
-                    if (otherEndUsers.Count > 0)
-                    {
-                        var firstOther = otherEndUsers[0];
-                        throw new TaeWriteBlockedException(
-                            $"TAE 动画 {mutation.AnimId} 事件 {ev.Index} 的结束时间槽被动画 {firstOther.AnimId} 事件 {firstOther.EventIndex} 共享；"
-                            + "改写会非预期地改动兄弟事件（sibling verify 失败），拒绝写回。",
-                            "TAE_SHARED_TIME_SLOT_WRITE_UNSUPPORTED",
-                            new { mutation = mutation.Kind, reason = "shared-end-time-slot", sharedWithAnim = firstOther.AnimId, sharedWithEvent = firstOther.EventIndex });
-                    }
-                }
-
-                // 零时长点事件（start/end 指向同一时间槽）：只能写入同一个值 (SF-11 §2.6.2)
-                if (ev.StartTimeAbs == ev.EndTimeAbs && mutation.StartTime!.Value != mutation.EndTime!.Value)
-                {
-                    throw new TaeWriteBlockedException(
-                        $"TAE 动画 {mutation.AnimId} 事件 {ev.Index} 的 start/end 指向同一时间槽（点事件），"
-                        + $"要求 startTime == endTime，收到 {mutation.StartTime} ≠ {mutation.EndTime}。",
-                        "TAE_SHARED_TIME_SLOT_WRITE_UNSUPPORTED",
-                        new { mutation = mutation.Kind, reason = "point-event-single-slot" });
-                }
+                _ = ResolveEvent(anim, mutation.EventIndex!.Value);
             }
             else if (mutation.Kind == "insert-event")
             {
@@ -493,13 +456,261 @@ internal static class TaeNativeWriter
         byte[] Bytes,
         int ParameterLength);
 
+    private sealed record RelocatedTimeTable(
+        Dictionary<int, int> OffsetsByBits,
+        (int Start, int End)[] ExistingEventTimes);
+
+    private sealed record KnownRegion(int Offset, int Length, string Kind, long? AnimId = null)
+    {
+        public long End => (long)Offset + Length;
+    }
+
+    private static int AppendChecked(ByteRangeWritePlan plan, byte[] bytes, string owner, int alignment = 1)
+    {
+        var padding = (alignment - plan.CurrentAppendOffset % alignment) % alignment;
+        var end = checked((long)plan.CurrentAppendOffset + padding + bytes.LongLength);
+        if (end > MaxSourceBytes || end > int.MaxValue)
+            throw new InvalidDataException("TAE 追加数据超出文件大小安全范围。");
+        return plan.Append(bytes, owner, alignment);
+    }
+
+    private static bool SameTime(float left, float right) =>
+        BitConverter.SingleToInt32Bits(left) == BitConverter.SingleToInt32Bits(right);
+
+    private static TaeWriteBlockedException UnknownTimeLayout(string reason) => new(
+        $"TAE 时间表不能无损重定位：{reason}。",
+        "TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE", new { reason });
+
+    private static Dictionary<long, RelocatedTimeTable> BuildRelocatedTimeTables(
+        List<TaeMutation> mutations, TaeLayout layout, ByteRangeWritePlan plan, byte[] source,
+        Dictionary<int, List<TimeSlotUser>> timeSlotMap)
+    {
+        var updates = mutations.Where(m => m.Kind == "update-event-times")
+            .GroupBy(m => (m.AnimId, EventIndex: m.EventIndex!.Value))
+            .ToDictionary(g => g.Key, g => g.Last());
+        var inserts = mutations.Where(m => m.Kind == "insert-event")
+            .GroupBy(m => m.AnimId).ToDictionary(g => g.Key, g => g.ToList());
+
+        // Cross-animation references are valid only when they refer to a known
+        // declared float slot. An arbitrary in-bounds pointer is not authority
+        // to treat opaque bytes as a timestamp. Merge aligned ranges once.
+        var timeRanges = new List<(int Start, int End)>();
+        foreach (var anim in layout.Animations.Values.Where(a => a.TimesCount > 0).OrderBy(a => a.TimesArrayAbs))
+        {
+            if (anim.TimesArrayAbs % 4 != 0) throw UnknownTimeLayout("unaligned-declared-time-table");
+            var end = checked(anim.TimesArrayAbs + anim.TimesCount * 4);
+            if (timeRanges.Count > 0 && anim.TimesArrayAbs <= timeRanges[^1].End)
+                timeRanges[^1] = (timeRanges[^1].Start, Math.Max(timeRanges[^1].End, end));
+            else timeRanges.Add((anim.TimesArrayAbs, end));
+        }
+        bool IsDeclaredSlot(int offset)
+        {
+            if (offset % 4 != 0) return false;
+            int lo = 0, hi = timeRanges.Count - 1;
+            while (lo <= hi)
+            {
+                var mid = lo + (hi - lo) / 2; var range = timeRanges[mid];
+                if (offset < range.Start) hi = mid - 1;
+                else if ((long)offset + 4 > range.End) lo = mid + 1;
+                else return true;
+            }
+            return false;
+        }
+        bool SharedWithOtherEvent(int offset, long animId, int index) => timeSlotMap[offset]
+            .Any(user => user.AnimId != animId || user.EventIndex != index);
+        bool RequiresCopy(TaeMutation mutation)
+        {
+            var ev = layout.FindAnim(mutation.AnimId)!.Events[mutation.EventIndex!.Value];
+            if (!IsDeclaredSlot(ev.StartTimeAbs) || !IsDeclaredSlot(ev.EndTimeAbs))
+                throw UnknownTimeLayout("event-time-pointer-outside-declared-tables");
+            return (ev.StartTimeAbs == ev.EndTimeAbs && !SameTime(mutation.StartTime!.Value, mutation.EndTime!.Value))
+                || (SharedWithOtherEvent(ev.StartTimeAbs, mutation.AnimId, ev.Index)
+                    && !SameTime(mutation.StartTime!.Value, BinaryPrimitives.ReadSingleLittleEndian(source.AsSpan(ev.StartTimeAbs, 4))))
+                || (SharedWithOtherEvent(ev.EndTimeAbs, mutation.AnimId, ev.Index)
+                    && !SameTime(mutation.EndTime!.Value, BinaryPrimitives.ReadSingleLittleEndian(source.AsSpan(ev.EndTimeAbs, 4))));
+        }
+        var copyIds = new HashSet<long>(inserts.Keys);
+        foreach (var mutation in updates.Values)
+            if (RequiresCopy(mutation)) copyIds.Add(mutation.AnimId);
+        var result = new Dictionary<long, RelocatedTimeTable>();
+        if (copyIds.Count == 0) return result;
+
+        // Appending must not extend an event whose parameter extent has no
+        // explicit group-table boundary. The external SDT reader uses the end
+        // of the event header even when its parameter pointer is zero, and can
+        // infer the final body's end from EOF; zero is NOT proof of no bytes.
+        foreach (var anim in layout.Animations.Values)
+            if (anim.Events.Count > 0 && anim.EventGroupTableAbs == 0)
+                throw UnknownTimeLayout("unbounded-parameter-tail");
+        var regions = BuildKnownTimeRelocationRegions(layout, source);
+        var protectedRegions = regions.Where(r => r.Kind != "time-table" && r.Length > 0).OrderBy(r => r.Offset).ToArray();
+        var maxEnds = new long[protectedRegions.Length];
+        for (var i = 0; i < maxEnds.Length; i++) maxEnds[i] = Math.Max(i == 0 ? 0 : maxEnds[i - 1], protectedRegions[i].End);
+        bool IsStructuralSlot(int offset)
+        {
+            int lo = 0, hi = maxEnds.Length;
+            while (lo < hi)
+            {
+                var mid = lo + (hi - lo) / 2;
+                if (maxEnds[mid] <= offset) lo = mid + 1; else hi = mid;
+            }
+            for (var index = lo; index < protectedRegions.Length && protectedRegions[index].Offset < (long)offset + 4; index++)
+                if (protectedRegions[index].End > offset) return true;
+            return false;
+        }
+        foreach (var animId in copyIds.OrderBy(id => id))
+        {
+            var anim = layout.FindAnim(animId)!;
+            var emptyNameField = FindEmptyNameTimeAlias(anim, source);
+            ValidateTimeRelocationOwnership(anim, regions, emptyNameField);
+            var eventBits = new (int Start, int End)[anim.Events.Count];
+            var uniqueBits = new HashSet<int>();
+            void Add(int bits)
+            {
+                if (!float.IsFinite(BitConverter.Int32BitsToSingle(bits)))
+                    throw UnknownTimeLayout("non-finite-preserved-time");
+                uniqueBits.Add(bits);
+            }
+            foreach (var ev in anim.Events)
+            {
+                if (!IsDeclaredSlot(ev.StartTimeAbs) || !IsDeclaredSlot(ev.EndTimeAbs))
+                    throw UnknownTimeLayout("event-time-pointer-outside-declared-tables");
+                if (IsStructuralSlot(ev.StartTimeAbs) || IsStructuralSlot(ev.EndTimeAbs))
+                    throw UnknownTimeLayout("time-slot-overlaps-known-structure");
+                var hasUpdate = updates.TryGetValue((animId, ev.Index), out var update);
+                var startBits = hasUpdate ? BitConverter.SingleToInt32Bits(update!.StartTime!.Value)
+                    : BinaryPrimitives.ReadInt32LittleEndian(source.AsSpan(ev.StartTimeAbs, 4));
+                var endBits = hasUpdate ? BitConverter.SingleToInt32Bits(update!.EndTime!.Value)
+                    : BinaryPrimitives.ReadInt32LittleEndian(source.AsSpan(ev.EndTimeAbs, 4));
+                Add(startBits); Add(endBits); eventBits[ev.Index] = (startBits, endBits);
+            }
+            if (inserts.TryGetValue(animId, out var additions))
+                foreach (var addition in additions)
+                {
+                    Add(BitConverter.SingleToInt32Bits(addition.StartTime!.Value));
+                    Add(BitConverter.SingleToInt32Bits(addition.EndTime!.Value));
+                }
+            // Preserve exact float bits (including signed zero) of unchanged
+            // events. Only the newly appended active table is canonicalized;
+            // the old table and unused/opaque source bytes are never moved.
+            var orderedBits = uniqueBits.OrderBy(BitConverter.Int32BitsToSingle).ThenBy(bits => bits).ToArray();
+            if (orderedBits.Length > 2_000_000) throw UnknownTimeLayout("time-count-limit");
+            var bytes = new byte[checked(orderedBits.Length * 4)];
+            for (var i = 0; i < orderedBits.Length; i++)
+                BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(i * 4, 4), orderedBits[i]);
+            var tableAbs = AppendChecked(plan, bytes, $"anim:{animId}:complete_time_table", alignment: 4);
+            var offsets = orderedBits.Select((bits, index) => (bits, offset: checked(tableAbs + index * 4)))
+                .ToDictionary(pair => pair.bits, pair => pair.offset);
+            var eventTimes = eventBits.Select(pair => (Start: offsets[pair.Start], End: offsets[pair.End])).ToArray();
+            plan.AddOrUpdateInterval(anim.AnimEntryAbs + 0x10, BitConverter.GetBytes((long)tableAbs), $"anim:{animId}:times:offset", "relocate-times");
+            // SDT count is int32 followed by a reserved int32; do not rewrite
+            // unrelated padding as if it were part of an int64 count.
+            plan.AddOrUpdateInterval(anim.AnimEntryAbs + 0x28, BitConverter.GetBytes(orderedBits.Length), $"anim:{animId}:times:count", "count-times");
+            if (emptyNameField is { } nameField)
+            {
+                // A SDT empty filename can alias the old timesOffset. Moving
+                // that table must not turn the old floats into a filename.
+                // Give this private, proven name field a real UTF-16 empty
+                // string. Eight bytes also preserve the external reader's
+                // bounded int64 lookahead; no miniheader/opaque block is moved.
+                var emptyNameAbs = AppendChecked(plan, new byte[8], $"anim:{animId}:empty-animation-name", alignment: 2);
+                plan.AddOrUpdateInterval(nameField, BitConverter.GetBytes((long)emptyNameAbs),
+                    $"anim:{animId}:empty-name-pointer", "detach-empty-name-from-time-table");
+            }
+            if (!inserts.ContainsKey(animId))
+                foreach (var ev in anim.Events)
+                {
+                    var at = checked(anim.EventTableAbs + ev.Index * EventTableEntrySize);
+                    plan.AddOrUpdateInterval(at, BitConverter.GetBytes((long)eventTimes[ev.Index].Start), $"anim:{animId}:event:{ev.Index}:start-pointer", "relocate-time-pointer");
+                    plan.AddOrUpdateInterval(at + 8, BitConverter.GetBytes((long)eventTimes[ev.Index].End), $"anim:{animId}:event:{ev.Index}:end-pointer", "relocate-time-pointer");
+                }
+            result.Add(animId, new RelocatedTimeTable(offsets, eventTimes));
+        }
+        return result;
+    }
+
+    private static int? FindEmptyNameTimeAlias(TaeLayout.AnimInfo anim, byte[] source)
+    {
+        if (anim.AnimFileInfoAbs == 0) return null;
+        var info = anim.AnimFileInfoAbs;
+        if (info > source.Length - 16) throw UnknownTimeLayout("miniheader-out-of-bounds");
+        var field = BinaryPrimitives.ReadInt64LittleEndian(source.AsSpan(info + 8, 8));
+        if (field == 0) return null; // Known null miniheader.
+        if (field != (long)info + 16 || info > source.Length - 24)
+            throw UnknownTimeLayout("unknown-miniheader-name-field");
+        var nameOffset = BinaryPrimitives.ReadInt64LittleEndian(source.AsSpan(info + 16, 8));
+        if (nameOffset != anim.TimesArrayAbs) return null;
+        var type = BinaryPrimitives.ReadInt64LittleEndian(source.AsSpan(info, 8));
+        if (type is not (0 or 1)) throw UnknownTimeLayout("unknown-miniheader-type");
+        return info + 16;
+    }
+
+    private static List<KnownRegion> BuildKnownTimeRelocationRegions(TaeLayout layout, byte[] source)
+    {
+        var regions = new List<KnownRegion>
+        {
+            new(0, FileHeaderSize, "file-header"),
+            new(layout.Section1Abs, Section1HeaderSize, "section-header"),
+            new(layout.AnimTableAbs, checked(layout.Animations.Count * AnimTableEntrySize), "animation-table")
+        };
+        foreach (var anim in layout.Animations.Values)
+        {
+            regions.Add(new(anim.AnimEntryAbs, AnimationEntrySize, "animation-entry", anim.AnimId));
+            regions.Add(new(anim.EventTableAbs, checked(anim.EventCount * EventTableEntrySize), "event-table", anim.AnimId));
+            regions.Add(new(anim.TimesArrayAbs, checked(anim.TimesCount * 4), "time-table", anim.AnimId));
+            regions.Add(new(anim.EventGroupTableAbs, checked(anim.EventGroupCount * EventGroupEntrySize), "group-table", anim.AnimId));
+            if (anim.AnimFileInfoAbs > 0)
+            {
+                if (anim.AnimFileInfoAbs > source.Length - 16) throw UnknownTimeLayout("miniheader-out-of-bounds");
+                var nameField = BinaryPrimitives.ReadInt64LittleEndian(source.AsSpan(anim.AnimFileInfoAbs + 8, 8));
+                var size = nameField == (long)anim.AnimFileInfoAbs + 16 ? 24 : 16;
+                if (anim.AnimFileInfoAbs > source.Length - size) throw UnknownTimeLayout("miniheader-out-of-bounds");
+                regions.Add(new(anim.AnimFileInfoAbs, size, "miniheader", anim.AnimId));
+            }
+            foreach (var ev in anim.Events)
+            {
+                var end = ev.ParamDataAbs == 0 ? ev.EventDataAbs + EventDataHeaderSize
+                    : checked(ev.ParamDataAbs + GetParameterSpan(anim, ev, source.Length));
+                regions.Add(new(ev.EventDataAbs, checked(end - ev.EventDataAbs), "event-data", anim.AnimId));
+            }
+            for (var index = 0; index < anim.EventGroupCount; index++)
+            {
+                var at = checked(anim.EventGroupTableAbs + index * EventGroupEntrySize);
+                var count = BinaryPrimitives.ReadInt64LittleEndian(source.AsSpan(at, 8));
+                var offset = BinaryPrimitives.ReadInt64LittleEndian(source.AsSpan(at + 8, 8));
+                var type = BinaryPrimitives.ReadInt64LittleEndian(source.AsSpan(at + 16, 8));
+                if (count > 0) regions.Add(new(checked((int)offset), checked((int)count * 4), "group-members", anim.AnimId));
+                if (type > 0) regions.Add(new(checked((int)type), 16, "group-type", anim.AnimId));
+            }
+        }
+        return regions;
+    }
+
+    private static void ValidateTimeRelocationOwnership(TaeLayout.AnimInfo anim, List<KnownRegion> regions, int? emptyNameField)
+    {
+        List<KnownRegion> writes = [
+            new(anim.AnimEntryAbs, AnimationEntrySize, "animation-entry", anim.AnimId),
+            new(anim.EventTableAbs, checked(anim.EventCount * EventTableEntrySize), "event-table", anim.AnimId)
+        ];
+        if (emptyNameField is { } nameField) writes.Add(new(nameField, 8, "miniheader", anim.AnimId));
+        foreach (var write in writes)
+            foreach (var region in regions)
+            {
+                if (region.Length == 0 || write.Length == 0 || (region.AnimId == anim.AnimId && region.Kind == write.Kind)) continue;
+                if (write.Offset < region.End && region.Offset < write.End)
+                    throw UnknownTimeLayout($"overlapping-{write.Kind}-and-{region.Kind}");
+            }
+    }
+
     private static List<object> BuildAndApplyPlan(
         List<TaeMutation> mutations,
         TaeLayout layout,
         ByteRangeWritePlan plan,
-        byte[] source, Dictionary<TaeMutation, TemplateSpec> templates)
+        byte[] source, Dictionary<TaeMutation, TemplateSpec> templates,
+        Dictionary<int, List<TimeSlotUser>> timeSlotMap)
     {
         var summaries = new List<object>(mutations.Count);
+        var relocatedTimes = BuildRelocatedTimeTables(mutations, layout, plan, source, timeSlotMap);
 
         // 1. 处理所有 update-event-times
         foreach (var m in mutations.Where(m => m.Kind == "update-event-times"))
@@ -507,13 +718,15 @@ internal static class TaeNativeWriter
             var anim = layout.FindAnim(m.AnimId)!;
             var ev = ResolveEvent(anim, m.EventIndex!.Value);
 
-            var startBytes = BitConverter.GetBytes(m.StartTime!.Value);
-            plan.AddOrUpdateInterval(ev.StartTimeAbs, startBytes, $"anim:{m.AnimId}:event:{ev.Index}:start", $"set-start:{m.StartTime}");
-
-            if (ev.EndTimeAbs != ev.StartTimeAbs)
+            if (!relocatedTimes.ContainsKey(m.AnimId))
             {
-                var endBytes = BitConverter.GetBytes(m.EndTime!.Value);
-                plan.AddOrUpdateInterval(ev.EndTimeAbs, endBytes, $"anim:{m.AnimId}:event:{ev.Index}:end", $"set-end:{m.EndTime}");
+                var startBytes = BitConverter.GetBytes(m.StartTime!.Value);
+                plan.AddOrUpdateInterval(ev.StartTimeAbs, startBytes, $"anim:{m.AnimId}:event:{ev.Index}:start", $"set-start:{m.StartTime}");
+                if (ev.EndTimeAbs != ev.StartTimeAbs)
+                {
+                    var endBytes = BitConverter.GetBytes(m.EndTime!.Value);
+                    plan.AddOrUpdateInterval(ev.EndTimeAbs, endBytes, $"anim:{m.AnimId}:event:{ev.Index}:end", $"set-end:{m.EndTime}");
+                }
             }
 
             summaries.Add(new
@@ -523,7 +736,7 @@ internal static class TaeNativeWriter
                 eventIndex = m.EventIndex,
                 startTime = m.StartTime,
                 endTime = m.EndTime,
-                byteSurgical = true
+                byteSurgical = !relocatedTimes.ContainsKey(m.AnimId)
             });
         }
 
@@ -565,11 +778,12 @@ internal static class TaeNativeWriter
             var insertSpecs = new List<InsertSpec>(animInserts.Count);
             var currentEventCount = anim.EventCount;
 
-            // Times precede the contiguous data region. Every event header
-            // precedes its parameter body; the last body ends at the group table.
+            // All new and retained events reference the one complete table
+            // already appended for this animation (not orphaned float slots).
+            var timeTable = relocatedTimes[animId];
             var newTimes = animInserts.Select(m => (Mutation: m,
-                Start: plan.Append(BitConverter.GetBytes(m.StartTime!.Value), $"anim:{animId}:new:start"),
-                End: plan.Append(BitConverter.GetBytes(m.EndTime!.Value), $"anim:{animId}:new:end"))).ToArray();
+                Start: timeTable.OffsetsByBits[BitConverter.SingleToInt32Bits(m.StartTime!.Value)],
+                End: timeTable.OffsetsByBits[BitConverter.SingleToInt32Bits(m.EndTime!.Value)])).ToArray();
             var relocatedHeaders = new List<int>();
             foreach (var ev in anim.Events)
             {
@@ -583,7 +797,7 @@ internal static class TaeNativeWriter
                         interval.NewBytes.CopyTo(copy, interval.Offset - ev.EventDataAbs);
                 var headerAbs = plan.CurrentAppendOffset;
                 BinaryPrimitives.WriteInt64LittleEndian(copy.AsSpan(8, 8), ev.ParamDataAbs == 0 ? 0 : headerAbs + prefix);
-                relocatedHeaders.Add(plan.Append(copy, $"anim:{animId}:old_event_{ev.Index}:data"));
+                relocatedHeaders.Add(AppendChecked(plan, copy, $"anim:{animId}:old_event_{ev.Index}:data"));
             }
             foreach (var (insertMutation, startTimeAbs, endTimeAbs) in newTimes)
             {
@@ -598,7 +812,7 @@ internal static class TaeNativeWriter
                 var paramDataAbs = templateSpan > 0 ? eventDataAbs + EventDataHeaderSize : 0;
                 BinaryPrimitives.WriteInt64LittleEndian(data.AsSpan(8, 8), paramDataAbs);
                 if (templateSpan > 0) templateSpec.Parameters.CopyTo(data, EventDataHeaderSize);
-                plan.Append(data, $"anim:{animId}:new_event_{currentEventCount}:data");
+                AppendChecked(plan, data, $"anim:{animId}:new_event_{currentEventCount}:data");
                 insertSpecs.Add(new InsertSpec(insertMutation, currentEventCount++, eventTypeId, templateSpan,
                     startTimeAbs, endTimeAbs, paramDataAbs, eventDataAbs));
             }
@@ -631,14 +845,18 @@ internal static class TaeNativeWriter
                     var oldOffset = BinaryPrimitives.ReadInt32LittleEndian(array.AsSpan(i * 4, 4));
                     BinaryPrimitives.WriteInt32LittleEndian(array.AsSpan(i * 4, 4), newTableAbs + oldOffset - anim.EventTableAbs);
                 }
-            plan.Append(groupTable, $"anim:{animId}:groups");
-            foreach (var array in arrays) plan.Append(array, $"anim:{animId}:group_event_refs");
+            AppendChecked(plan, groupTable, $"anim:{animId}:groups");
+            foreach (var array in arrays) AppendChecked(plan, array, $"anim:{animId}:group_event_refs");
 
             var oldTableSize = checked(anim.EventCount * EventTableEntrySize);
             var finalTable = new byte[checked(currentEventCount * EventTableEntrySize)];
             Buffer.BlockCopy(source, anim.EventTableAbs, finalTable, 0, oldTableSize);
             for (var i = 0; i < relocatedHeaders.Count; i++)
+            {
+                BinaryPrimitives.WriteInt64LittleEndian(finalTable.AsSpan(i * EventTableEntrySize, 8), timeTable.ExistingEventTimes[i].Start);
+                BinaryPrimitives.WriteInt64LittleEndian(finalTable.AsSpan(i * EventTableEntrySize + 8, 8), timeTable.ExistingEventTimes[i].End);
                 BinaryPrimitives.WriteInt64LittleEndian(finalTable.AsSpan(i * EventTableEntrySize + 16, 8), relocatedHeaders[i]);
+            }
             for (var k = 0; k < insertSpecs.Count; k++)
             {
                 var spec = insertSpecs[k]; var entryOffset = oldTableSize + k * EventTableEntrySize;
@@ -646,7 +864,7 @@ internal static class TaeNativeWriter
                 BinaryPrimitives.WriteInt64LittleEndian(finalTable.AsSpan(entryOffset + 8, 8), spec.EndTimeAbs);
                 BinaryPrimitives.WriteInt64LittleEndian(finalTable.AsSpan(entryOffset + 16, 8), spec.EventDataAbs);
             }
-            if (plan.Append(finalTable, $"anim:{animId}:final_event_table", alignment: 8) != newTableAbs)
+            if (AppendChecked(plan, finalTable, $"anim:{animId}:final_event_table", alignment: 8) != newTableAbs)
                 throw new InvalidDataException("TAE 插入计划偏移不一致。");
             plan.AddOrUpdateInterval(anim.AnimEntryAbs, BitConverter.GetBytes((long)newTableAbs), $"anim:{animId}:entry:table_offset", $"table:{newTableAbs}");
             plan.AddOrUpdateInterval(anim.AnimEntryAbs + 8, BitConverter.GetBytes((long)groupTableAbs), $"anim:{animId}:entry:group_offset", $"groups:{groupTableAbs}");
@@ -670,8 +888,8 @@ internal static class TaeNativeWriter
             }
         }
 
-        // 4. 若发生插入追加，同步文件头声明大小 (0x0C int32)
-        if (insertsByAnim.Count > 0)
+        // 4. 时间表 COW 与事件插入均需同步文件头声明大小。
+        if (plan.Appends.Count > 0)
         {
             var finalSize = plan.CurrentAppendOffset;
             plan.AddOrUpdateInterval(0x0C, BitConverter.GetBytes(finalSize), "header:declared_size", $"declared_size:{finalSize}");
@@ -685,7 +903,7 @@ internal static class TaeNativeWriter
         List<object> summaries,
         TaeLayout layout,
         TaeNativeDocument reread,
-        byte[] source, Dictionary<TaeMutation, TemplateSpec> templates)
+        byte[] source, Dictionary<TaeMutation, TemplateSpec> templates, ByteRangeWritePlan plan)
     {
         var rereadAnims = reread.Animations.ToDictionary(a => a.AnimId);
 
@@ -703,7 +921,7 @@ internal static class TaeNativeWriter
             var animReread = rereadAnims[m.AnimId];
             var evReread = animReread.Events[m.EventIndex!.Value];
 
-            if (Math.Abs(evReread.StartTime - m.StartTime!.Value) > 0.0001f || Math.Abs(evReread.EndTime - m.EndTime!.Value) > 0.0001f)
+            if (!SameTime(evReread.StartTime, m.StartTime!.Value) || !SameTime(evReread.EndTime, m.EndTime!.Value))
             {
                 throw new InvalidDataException($"重读后事件 {m.EventIndex} 时间 {evReread.StartTime}/{evReread.EndTime} ≠ 写入 {m.StartTime}/{m.EndTime}。");
             }
@@ -722,11 +940,51 @@ internal static class TaeNativeWriter
                 var origStart = BinaryPrimitives.ReadSingleLittleEndian(source.AsSpan(origEv.StartTimeAbs, 4));
                 var origEnd = BinaryPrimitives.ReadSingleLittleEndian(source.AsSpan(origEv.EndTimeAbs, 4));
 
-                if (Math.Abs(rereadOtherEv.StartTime - origStart) > 0.0001f || Math.Abs(rereadOtherEv.EndTime - origEnd) > 0.0001f)
+                if (!SameTime(rereadOtherEv.StartTime, origStart) || !SameTime(rereadOtherEv.EndTime, origEnd))
                 {
                     throw new InvalidDataException($"兄弟事件 {i} 时间发生非预期变更: 原 {origStart}/{origEnd}，重读 {rereadOtherEv.StartTime}/{rereadOtherEv.EndTime}。");
                 }
             }
+        }
+
+        // Append-only relocation must preserve every original event header's
+        // type/padding and exact native parameter extent/body, including tails.
+        // First-party field writes are the only permitted body exceptions.
+        if (plan.Appends.Count > 0)
+        {
+            var writes = plan.GetSortedMergedIntervals();
+            foreach (var anim in layout.Animations.Values)
+                foreach (var ev in anim.Events)
+                {
+                    var after = rereadAnims[anim.AnimId].Events[ev.Index];
+                    if (!source.AsSpan(ev.EventDataAbs, 8).SequenceEqual(reread.SourceBytes.AsSpan(checked((int)after.EventDataOffset), 8)))
+                        throw new InvalidDataException("TAE 原事件类型或未知头部字节发生改变。");
+                    var length = GetParameterSpan(anim, ev, source.Length);
+                    if (reread.GetParameterLength(rereadAnims[anim.AnimId], ev.Index) != length)
+                        throw new InvalidDataException("TAE 原事件参数体长度发生改变。");
+                    if (ev.ParamDataAbs == 0)
+                    {
+                        if (after.ParameterDataOffset != 0) throw new InvalidDataException("TAE 原空参数指针发生改变。");
+                        continue;
+                    }
+                    var prefix = ev.ParamDataAbs - ev.EventDataAbs - EventDataHeaderSize;
+                    if (after.ParameterDataOffset - after.EventDataOffset - EventDataHeaderSize != prefix
+                        || !source.AsSpan(ev.EventDataAbs + EventDataHeaderSize, prefix).SequenceEqual(
+                            reread.SourceBytes.AsSpan(checked((int)after.EventDataOffset + EventDataHeaderSize), prefix)))
+                        throw new InvalidDataException("TAE 原事件参数前的未知字节发生改变。");
+                    var actual = reread.SourceBytes.AsSpan(checked((int)after.ParameterDataOffset), length);
+                    var cursor = 0;
+                    foreach (var write in writes.Where(w => w.Offset >= ev.ParamDataAbs && (long)w.Offset + w.Length <= (long)ev.ParamDataAbs + length))
+                    {
+                        var relative = write.Offset - ev.ParamDataAbs;
+                        if (!source.AsSpan(ev.ParamDataAbs + cursor, relative - cursor).SequenceEqual(actual.Slice(cursor, relative - cursor))
+                            || !write.NewBytes.AsSpan().SequenceEqual(actual.Slice(relative, write.Length)))
+                            throw new InvalidDataException("TAE 原事件参数体未按声明字段写入保留。");
+                        cursor = relative + write.Length;
+                    }
+                    if (!source.AsSpan(ev.ParamDataAbs + cursor, length - cursor).SequenceEqual(actual[cursor..]))
+                        throw new InvalidDataException("TAE 原事件参数尾部发生改变。");
+                }
         }
 
         // Exact appended indices, rather than time matching an existing event.
@@ -739,8 +997,8 @@ internal static class TaeNativeWriter
                 var spec = templates[m];
                 var newEv = animReread.Events[nextIndex++];
                 if (newEv.EventTypeId != spec.Event.EventTypeId
-                    || Math.Abs(newEv.StartTime - m.StartTime!.Value) > 0.0001f
-                    || Math.Abs(newEv.EndTime - m.EndTime!.Value) > 0.0001f)
+                    || !SameTime(newEv.StartTime, m.StartTime!.Value)
+                    || !SameTime(newEv.EndTime, m.EndTime!.Value))
                     throw new InvalidDataException("新增 TAE 事件的类型或时间不符合请求。");
                 if (reread.GetParameterLength(animReread, nextIndex - 1) != spec.Parameters.Length
                     || (spec.Parameters.Length > 0 && !reread.SourceBytes.AsSpan(
@@ -883,13 +1141,17 @@ internal static class TaeNativeWriter
 
     private sealed class TaeLayout
     {
-            public Dictionary<long, AnimInfo> Animations { get; }
-            public int? SchemaBankId { get; }
+        public Dictionary<long, AnimInfo> Animations { get; }
+        public int? SchemaBankId { get; }
+        public int Section1Abs { get; }
+        public int AnimTableAbs { get; }
 
-        private TaeLayout(Dictionary<long, AnimInfo> animations, int? schemaBankId)
+        private TaeLayout(Dictionary<long, AnimInfo> animations, int? schemaBankId, int section1Abs, int animTableAbs)
         {
             Animations = animations;
             SchemaBankId = schemaBankId;
+            Section1Abs = section1Abs;
+            AnimTableAbs = animTableAbs;
         }
 
         public AnimInfo? FindAnim(long animId) => Animations.TryGetValue(animId, out var anim) ? anim : null;
@@ -902,6 +1164,9 @@ internal static class TaeNativeWriter
             public required int EventGroupTableAbs { get; init; }
             public required int EventCount { get; init; }
             public required int EventGroupCount { get; init; }
+            public required int TimesArrayAbs { get; init; }
+            public required int TimesCount { get; init; }
+            public required int AnimFileInfoAbs { get; init; }
             public required List<EventInfo> Events { get; init; } = new();
         }
 
@@ -948,12 +1213,20 @@ internal static class TaeNativeWriter
                 var ae = checked((int)animEntryOffset);
                 var eventTableOffset = ReadInt64(source, ae);
                 var eventGroupTableOffset = ReadInt64(source, ae + 0x08);
+                var timesArrayOffset = ReadInt64(source, ae + 0x10);
+                var animFileInfoOffset = ReadInt64(source, ae + 0x18);
                 var eventCount = ReadInt32(source, ae + 0x20);
                 var eventGroupCount = ReadInt32(source, ae + 0x24);
+                var timesCount = ReadInt64(source, ae + 0x28);
                 if (eventCount < 0 || eventCount > 1_000_000)
                     throw new InvalidDataException($"TAE 动画 {animId} 事件数越界。");
                 if (eventGroupCount < 0 || eventGroupCount > 1_000_000)
                     throw new InvalidDataException($"TAE 动画 {animId} 事件组数越界。");
+                if (timesCount < 0 || timesCount > 2_000_000 || timesArrayOffset < 0 || timesArrayOffset > source.Length
+                    || timesCount * 4 > source.Length - timesArrayOffset)
+                    throw new InvalidDataException($"TAE 动画 {animId} 时间数组越界。");
+                if (animFileInfoOffset < 0 || animFileInfoOffset > source.Length)
+                    throw UnknownTimeLayout("miniheader-out-of-bounds");
                 if (eventCount > 0
                     && (eventTableOffset < 0 || eventTableOffset + (long)eventCount * EventTableEntrySize > source.Length))
                     throw new InvalidDataException($"TAE 动画 {animId} 事件表越界。");
@@ -990,7 +1263,7 @@ internal static class TaeNativeWriter
                     });
                 }
 
-                animations[animId] = new AnimInfo
+                var animation = new AnimInfo
                 {
                     AnimId = animId,
                     AnimEntryAbs = ae,
@@ -998,10 +1271,15 @@ internal static class TaeNativeWriter
                     EventGroupTableAbs = checked((int)eventGroupTableOffset),
                     EventCount = eventCount,
                     EventGroupCount = eventGroupCount,
+                    TimesArrayAbs = checked((int)timesArrayOffset),
+                    TimesCount = checked((int)timesCount),
+                    AnimFileInfoAbs = checked((int)animFileInfoOffset),
                     Events = events
                 };
+                if (!animations.TryAdd(animId, animation))
+                    throw UnknownTimeLayout("duplicate-animation-id");
             }
-            return new TaeLayout(animations, schemaBankId);
+            return new TaeLayout(animations, schemaBankId, s1, checked((int)animTableOffset));
         }
 
         private static int ReadInt32(byte[] source, int offset) =>
