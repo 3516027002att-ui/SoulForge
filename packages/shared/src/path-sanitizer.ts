@@ -18,6 +18,26 @@
 /** 本机路径占位符（各端共用同一文案，UI 里也按它做特殊显示）。 */
 export const MASKED_PATH_PLACEHOLDER = '[本机路径已隐藏]';
 
+// These are declared native binary DTO fields, not diagnostic text or path
+// authority. Base64 can legitimately start with / or contain +/; treating it as
+// POSIX text corrupts geometry before the renderer's strict decoder sees it.
+const RENDERER_BINARY_FIELDS = new Set([
+  'positionsBase64', 'indicesBase64', 'uvsBase64', 'normalsBase64',
+  'normalWBase64', 'boneIndicesBase64', 'sourceBoneIndicesBase64',
+  'boneWeightsBase64', 'vertexAlphaBase64', 'rgbaBase64', 'xyzBase64', 'xyzwBase64',
+  'bytesBase64', 'dataBase64', 'argsBase64', 'textureBase64', 'splineRawPayloadBase64'
+]);
+function isEncodedBytes(value: unknown): value is string {
+  // No generic "endsWith(Base64)" bypass and no exemption for malformed text.
+  // This flat expression has no repeated groups (large geometry must not blow
+  // the regexp stack). Native DTOs use standard padded base64, not data URLs.
+  return typeof value === 'string' && value.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(value);
+}
+export function isRendererBinaryPayload(key: string, value: unknown): boolean {
+  return RENDERER_BINARY_FIELDS.has(key) ? isEncodedBytes(value)
+    : key === 'uvSetsBase64' && Array.isArray(value) && value.every(isEncodedBytes);
+}
+
 /** 盘符绝对路径：D:\x、D:/x（盘符前不是字母数字 —— 覆盖全角冒号/CJK 前缀）。 */
 const WINDOWS_DRIVE_PATH = /(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s'"()（）\[\]「」『』，。、；：！？]*/g;
 

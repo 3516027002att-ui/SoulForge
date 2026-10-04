@@ -21,7 +21,7 @@ import {
   type ResourcePreview,
   type SaveTextResourceResult
 } from '@soulforge/shared';
-import { maskPathFragments } from '@soulforge/shared';
+import { maskPathFragments, isRendererBinaryPayload } from '@soulforge/shared';
 
 const SOURCE_TEXT_KEYS = new Set([
   'dslTemplate',
@@ -180,6 +180,7 @@ export function sanitizeRendererValue(value: unknown): unknown {
     if (SENSITIVE_PATH_KEYS.has(key)) continue;
     // Internal workspace ids are currently file URLs and therefore reveal the root.
     if (key === 'workspaceId') continue;
+    if (isRendererBinaryPayload(key, child)) { output[key] = child; continue; }
     // 源码是内容，不是本机路径泄漏。70k 行 DarkScript 不得整串跑盘符/UNC 正则。
     if (typeof child === 'string') {
       output[key] = SOURCE_TEXT_KEYS.has(key) ? child : sanitizeRendererString(child);
