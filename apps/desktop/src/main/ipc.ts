@@ -238,7 +238,6 @@ import { MainMe3RuntimeGateway } from './me3RuntimeGateway.js';
 import { MemoryManager } from './memoryManager.js';
 import {
   registerWorkspaceIpcHandlers,
-  clearWorkspaceIpcCaches,
   getWorkspaceSession,
   getWorkspaceIndexedFiles,
   getWorkspaceActiveIndex,
@@ -266,7 +265,8 @@ import { registerMapIpcHandlers } from './ipc/map.js';
 import { registerActionIpcHandlers } from './ipc/action.js';
 import { registerAssetIpcHandlers } from './ipc/assets.js';
 import { registerEventIpcHandlers, clearEmevdIpcCaches, disposeEmevdWindow } from './ipc/event.js';
-import { clearAgentIpcState } from './ipc/agent.js';
+import { disposeAgentIpcServices } from './ipc/agent.js';
+import { disposeWorkspaceService } from './services/workspaceService.js';
 import { registerUpdateIpcHandlers } from './update/updateIpc.js';
 
 /** 只读存在性检查（chrbnd 伴生查找用；不抛异常）。 */
@@ -563,6 +563,18 @@ function rejectNonSekiroNativeWrite(sourceUri: string, file?: IndexedFile): Rend
 
 export async function disposeOperationLogUtility(): Promise<void> {
   await utilityLifecycle.dispose();
+}
+
+let applicationProducerDisposal: Promise<void> | null = null;
+export function disposeApplicationProducers(): Promise<void> {
+  if (applicationProducerDisposal) return applicationProducerDisposal;
+  // Each call revokes admission synchronously. Do not await one owner while
+  // another can still admit a model, refresh, embedding or mount operation.
+  const semantic = semanticRefresh.dispose();
+  const agent = disposeAgentIpcServices();
+  const workspace = disposeWorkspaceService();
+  applicationProducerDisposal = Promise.allSettled([semantic, agent, workspace]).then(() => undefined);
+  return applicationProducerDisposal;
 }
 
 function handle<Args extends unknown[], Result>(

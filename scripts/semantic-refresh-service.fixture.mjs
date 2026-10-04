@@ -311,3 +311,73 @@ test('synchronous postcommit publication failure preserves the error and receipt
   h.fire(180_000); await new Promise(done => setImmediate(done));
   assert.equal(h.calls.filter(([name]) => ['disposeIdle', 'scan', 'analyze', 'native', 'delta', 'embedding'].includes(name)).length, 0);
 });
+
+test('dispose stops deferred admission and waits for the real pending database load', async () => {
+  const start = deferred(), wait = deferred();
+  const h = harness({ loadChunks: async () => { start.resolve(); await wait.promise; return []; } });
+  const pending = h.service.refreshActiveIndexAfterSemanticEvidence([uri]);
+  const observed = pending.catch(error => error);
+  await start.promise;
+  let disposed = false, disposal;
+  try {
+    disposal = h.service.dispose();
+    assert.equal(h.service.dispose(), disposal, 'shutdown must share its completion barrier');
+    void disposal.then(() => { disposed = true; });
+    await assert.rejects(h.service.refreshActiveIndexAfterSemanticEvidence([uri]), /关闭|停止|disposed/i);
+    await assert.rejects(h.service.refreshActiveIndexAfterNativeWrite([uri]), /关闭|停止|disposed/i);
+    await new Promise(done => setImmediate(done));
+    assert.equal(disposed, false, 'cancelled callers are not settled database owners');
+  } finally { wait.resolve(); await observed; await disposal; }
+  assert.equal(disposed, true);
+  assert.equal(h.calls.filter(([name]) => ['delta', 'embedding', 'publishRag'].includes(name)).length, 0);
+});
+
+test('dispose clears parked Agent refresh timers without running the queued batch', async () => {
+  const h = harness(); h.setAgentActive(true);
+  await h.service.refreshActiveIndexAfterSemanticEvidence([uri]);
+  assert.equal(h.timers.size, 1);
+  await h.service.dispose();
+  assert.equal(h.timers.size, 0);
+  h.setAgentActive(false); h.fire(250); h.fire(40);
+  await new Promise(done => setImmediate(done));
+  assert.deepEqual(h.calls, []);
+});
+
+test('dispose drains a real postcommit tail after its deadline already released the caller', async () => {
+  const start = deferred(), wait = deferred();
+  const h = harness({ scan: async () => { start.resolve(); await wait.promise; return { files: [file(uri, 'after')] }; } });
+  const carrier = { ok: true, committed: true, opId: 'owned-committed' };
+  const pending = h.service.refreshActiveIndexAfterNativeWrite([uri], carrier);
+  await start.promise; h.fire(180_000);
+  assert.equal((await pending).status, 'failed');
+  const before = plain(carrier), publications = h.calls.filter(([name]) => name.startsWith('publish')).length;
+  let disposed = false, disposal;
+  try {
+    disposal = h.service.dispose().then(() => { disposed = true; });
+    await new Promise(done => setImmediate(done));
+    assert.equal(disposed, false, 'deadline settlement must not erase the real work owner');
+  } finally { wait.resolve(); await disposal; }
+  assert.deepEqual(plain(carrier), before, 'shutdown never rewrites committed/deadline facts');
+  assert.equal(h.calls.filter(([name]) => name.startsWith('publish')).length, publications);
+  assert.equal(h.calls.filter(([name]) => ['analyze', 'native', 'delta', 'embedding'].includes(name)).length, 0);
+  assert.equal(h.timers.size, 0);
+});
+
+test('dispose waits for every concurrent postcommit owner rather than the newest one', async () => {
+  const waits = [deferred(), deferred()], starts = [deferred(), deferred()]; let count = 0;
+  const h = harness({ disposeIdle: async () => {
+    const current = count++; starts[current].resolve(); await waits[current].promise;
+    return { disposedClientCount: 0, activeClientCount: 0 };
+  } });
+  const first = h.service.refreshActiveIndexAfterNativeWrite([uri]); await starts[0].promise;
+  const second = h.service.refreshActiveIndexAfterNativeWrite([uri]); await starts[1].promise;
+  let disposed = false, disposal;
+  try {
+    disposal = h.service.dispose().then(() => { disposed = true; });
+    waits[1].resolve(); await second;
+    await new Promise(done => setImmediate(done));
+    assert.equal(disposed, false);
+  } finally { for (const wait of waits) wait.resolve(); await Promise.allSettled([first, second]); await disposal; }
+  assert.equal(disposed, true);
+  assert.equal(h.calls.filter(([name]) => ['scan', 'analyze', 'native', 'delta', 'embedding'].includes(name)).length, 0);
+});

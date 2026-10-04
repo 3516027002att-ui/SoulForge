@@ -67,6 +67,37 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
   const AGENT_EVENT_HISTORY_TTL_MS = 5 * 60_000;
 
   const activeAgentRuns = new Map<string, { controller: AbortController; ownerId: number; serviceId: string; model: string; }>();
+  // Admission, terminal delivery and host cleanup are distinct lifetimes. The
+  // active map is for UI state; it is not the shutdown ownership registry.
+  type OwnedRun = { controller: AbortController; ownerId: number; sessionId: string };
+  const ownedRuns = new Set<OwnedRun>();
+  const pendingWork = new Set<Promise<unknown>>();
+  let stopped = false;
+  let disposal: Promise<void> | null = null;
+
+  function stoppedResult(): AiAgentRunIpcResult {
+    return { ok: false, error: { code: 'AGENT_SERVICE_DISPOSED', message: 'Agent 服务已关闭，未启动新任务。' } };
+  }
+  function assertRunAvailable(owner: OwnedRun): void {
+    if (stopped || owner.controller.signal.aborted) {
+      throw Object.assign(new Error('Agent 任务已取消或服务已关闭。'), { code: stopped ? 'AGENT_SERVICE_DISPOSED' : 'AGENT_RUN_CANCELLED' });
+    }
+  }
+  function trackWork<T>(work: Promise<T>): Promise<T> {
+    pendingWork.add(work);
+    void work.then(() => pendingWork.delete(work), () => pendingWork.delete(work));
+    return work;
+  }
+  function dispose(): Promise<void> {
+    if (disposal) return disposal;
+    stopped = true;
+    for (const owner of ownedRuns) owner.controller.abort();
+    for (const key of [...pendingApprovals.keys()]) settleApproval(key, { decision: 'reject', note: '应用正在退出，未回答的审批按拒绝处理。' });
+    disposal = (async () => {
+      while (pendingWork.size > 0) await Promise.allSettled([...pendingWork]);
+    })();
+    return disposal;
+  }
 
   const pendingApprovals = new Map<string, { resolve: (response: { decision: ApprovalDecision; note?: string }) => void; timer: NodeJS.Timeout }>();
 
@@ -218,9 +249,18 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
     return resumeFrom;
   }
 
-  async function run(input: AdmittedAgentRun): Promise<AiAgentRunIpcResult> {
+  function run(input: AdmittedAgentRun): Promise<AiAgentRunIpcResult> {
+    if (stopped) return Promise.resolve(stoppedResult());
+    const owner = { controller: new AbortController(), ownerId: input.ownerId, sessionId: input.sessionId };
+    ownedRuns.add(owner);
+    // Own the preparation promise before any injected host port can run.
+    return trackWork(Promise.resolve().then(() => runAdmitted(input, owner)));
+  }
+
+  async function runAdmitted(input: AdmittedAgentRun, owner: OwnedRun): Promise<AiAgentRunIpcResult> {
     const { ownerId, sessionId, mode, request, citationLines, resumeFrom, authorization } = input;
     const { sampling, contextWindowTokens } = authorization;
+    const { controller } = owner;
         // One CoreToolSession owns the native edit handles, snapshot cache,
         // source watcher and automatic NativeReadProof store for this Agent
         // subject. It is intentionally per-run, so proofs cannot cross Agent
@@ -230,6 +270,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
         let coreSession: CoreToolSession | undefined;
         let executionStarted = false;
         try {
+        assertRunAvailable(owner);
         if (activeWorkspaceSession) {
           const storage = deps.durableStoragePaths(activeWorkspaceSession.meta.workspaceId);
           coreSession = await openAgentCoreToolSession({
@@ -237,10 +278,16 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
             workspaceSession: activeWorkspaceSession,
             ...(activeWorkspaceIndex ? { workspaceIndex: activeWorkspaceIndex } : {}),
             getWorkspaceSession: () => deps.getActiveSession(),
-            getOperationLog: (session) => deps.ensureActiveOperationLog(session),
+            getOperationLog: async (session) => {
+              assertRunAvailable(owner);
+              const store = await deps.ensureActiveOperationLog(session);
+              assertRunAvailable(owner);
+              return store;
+            },
             storage,
             modeCeiling: mode
           });
+          assertRunAvailable(owner);
         }
         const currentAgentContext = createAgentToolContextProvider({
           ...(coreSession ? { coreSession } : {}),
@@ -272,6 +319,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
           let currentRunMode: 'plan' | 'normal' | 'fullPermission' = mode;
           const rawExecuteTool = bridge.executeTool;
           const executeLiveTool = (call: Parameters<typeof rawExecuteTool>[0], extra: Partial<ToolContext> = {}) => {
+            assertRunAvailable(owner);
             return rawExecuteTool(call, {
               // The run's mode is stable for its lifetime; all workspace/RAG/
               // session state is refreshed per tool call by currentAgentContext.
@@ -283,6 +331,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
             });
           };
           bridge.executeTool = async (call, contextOverride = {}) => {
+            assertRunAvailable(owner);
             if (call.name === 'switch_mode') {
               const result = await executeLiveTool(call, contextOverride);
               if (result.ok) {
@@ -340,6 +389,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
             }
             const storage = deps.durableStoragePaths(deps.getActiveSession()!.meta.workspaceId);
             const sourceOperation = await deps.operationLogUtility.get(opId);
+            assertRunAvailable(owner);
             if (!sourceOperation) {
               return executeLiveTool(call, contextOverride);
             }
@@ -350,6 +400,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
               payloadHash: createHash('sha256').update(opId).digest('hex'),
               extraSubjects: [`ROLLBACK_OPERATION:${opId}`]
             });
+            assertRunAvailable(owner);
             if (!confirmation) {
               return {
                 ok: false,
@@ -447,7 +498,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
         }
         const systemPrompt = systemPromptParts.filter((part) => part.trim().length > 0).join('\n\n');
 
-        const controller = new AbortController();
+        assertRunAvailable(owner);
         agentSignal = controller.signal;
         activeAgentRuns.set(sessionId, {
           controller,
@@ -461,6 +512,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
         // accepted, every setup/dispatch path must reach the same cleanup.
         const execution = (async () => {
         authorization.bindTarget();
+        assertRunAvailable(owner);
         sendAgentEvent(sessionId, { type: 'session-accepted', mode });
 
         const permissionMode = mode === 'fullPermission' ? 'full' : mode;
@@ -483,6 +535,10 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
           argumentsJson: string;
         }): Promise<{ decision: ApprovalDecision; note?: string }> =>
           new Promise((resolveApproval) => {
+            if (stopped || controller.signal.aborted) {
+              resolveApproval({ decision: 'reject', note: '任务已取消或应用正在退出，未批准执行。' });
+              return;
+            }
             const key = `${sessionId}:${approvalRequest.callId}`;
             const timer = setTimeout(() => {
               // timed_out 而不是 reject：审计里「用户拒绝了」与「没人回答」是两个
@@ -519,6 +575,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
           toolName: string;
           argumentsJson: string;
         }): Promise<ApprovalDiff | null> => {
+          assertRunAvailable(owner);
           let parsed: unknown;
           try {
             parsed = JSON.parse(input.argumentsJson);
@@ -554,6 +611,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
           const _sessDiff = deps.getActiveSession();
           if (!_sessDiff) return null;
           const writable = await _sessDiff.resolveWritablePathSecure(targetPath, 'overlay');
+          assertRunAvailable(owner);
           if (!writable.ok || typeof writable.absolutePath !== 'string') return null;
           const resolvedPath = writable.absolutePath;
 
@@ -566,6 +624,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
             // 故用 newFile 标记而不是静默当成空文件对比。
             newFile = true;
           }
+          assertRunAvailable(owner);
 
           const unifiedDiff = createUnifiedDiff(beforeText, afterText, {
             fromFile: newFile ? '(新文件)' : targetPath,
@@ -595,6 +654,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
         };
 
         const ragSearchAvailable = request.useRagSearch === true ? await deps.evidence.hasRagSearchCorpus() : false;
+        assertRunAvailable(owner);
 
         const ragWorkspace = activeWorkspaceSession ?? deps.getActiveSession();
         const ragSearch = ragSearchAvailable && ragWorkspace ? createAgentRagSearch({
@@ -620,6 +680,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
             ...(ragSearch ? { ragSearch } : {})
           }
         });
+        assertRunAvailable(owner);
         return authorization.execute(assembly, {
           sessionsDir: agentSessionsBaseDir,
           sessionId,
@@ -638,7 +699,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
         });
         })();
         executionStarted = true;
-        void execution.then((result) => {
+        trackWork(execution.then((result) => {
           activeAgentRuns.delete(sessionId);
           rejectSessionApprovals(sessionId, '会话已结束，未回答的审批按拒绝处理。');
           const relativeRolloutPath = relative(agentSessionsBaseDir, result.rolloutPath).replace(/\\/g, '/');
@@ -655,14 +716,23 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
           });
         }).finally(async () => {
           try { await assembly?.waitForHostOperations(); }
-          finally { coreSession?.close(); }
-        });
+          finally {
+            try { await coreSession?.close(); }
+            finally { ownedRuns.delete(owner); }
+          }
+        }));
 
         return { ok: true, sessionId };
+        } catch (error) {
+          if (stopped) return stoppedResult();
+          throw error;
         } finally {
           // A failure while preparing prompts/context precedes admission and
           // has no background owner to close the already-opened core session.
-          if (!executionStarted) coreSession?.close();
+          if (!executionStarted) {
+            try { await coreSession?.close(); }
+            finally { ownedRuns.delete(owner); }
+          }
         }
 
   }
@@ -748,14 +818,14 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
   }
 
   function closeOwner(ownerId: number): void {
-    for (const [sessionId, entry] of activeAgentRuns) {
+    for (const entry of ownedRuns) {
       if (entry.ownerId !== ownerId) continue;
       entry.controller.abort();
-      rejectSessionApprovals(sessionId, '渲染进程已关闭，未回答的审批按拒绝处理。');
+      rejectSessionApprovals(entry.sessionId, '渲染进程已关闭，未回答的审批按拒绝处理。');
     }
   }
 
-  return Object.freeze({ run, events, cancel, loadResume, listSessions, loadSession, clearState, closeOwner,
+  return Object.freeze({ run, events, cancel, loadResume, listSessions, loadSession, clearState, closeOwner, dispose,
     sessionOwnerMatches, settleApproval, isActive: (sessionId: string) => activeAgentRuns.has(sessionId),
     hasActiveRuns: () => activeAgentRuns.size > 0 });
 }

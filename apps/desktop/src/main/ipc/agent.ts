@@ -86,6 +86,36 @@ const agentPermissionGrants = new Map<string, {
 let boundWebContents: WebContents | null = null;
 let sessionService: AgentSessionService | null = null;
 let evidenceService: AgentEvidenceService | null = null;
+let agentIpcStopped = false;
+let agentIpcDisposal: Promise<void> | null = null;
+const pendingAgentRequests = new Set<Promise<unknown>>();
+
+function stoppedAgentResult(): { ok: false; error: { code: string; message: string } } {
+  return { ok: false, error: { code: 'AGENT_SERVICE_DISPOSED', message: 'Agent 服务已关闭，未启动新任务。' } };
+}
+
+function ownAgentRequest<T>(operation: () => Promise<T>, cancelled: () => T): Promise<T> {
+  if (agentIpcStopped) return Promise.resolve(cancelled());
+  const work = Promise.resolve().then(() => agentIpcStopped ? cancelled() : operation());
+  pendingAgentRequests.add(work);
+  void work.then(() => pendingAgentRequests.delete(work), () => pendingAgentRequests.delete(work));
+  return work;
+}
+
+/** Final shutdown is separate from reusable cache reset. Revoke all admissions
+ * before awaiting any producer; pending IPC preparation also owns a real tail. */
+export function disposeAgentIpcServices(): Promise<void> {
+  if (agentIpcDisposal) return agentIpcDisposal;
+  agentIpcStopped = true;
+  agentPermissionGrants.clear();
+  const sessions = sessionService?.dispose();
+  const embedding = internalRagEmbedding.dispose();
+  agentIpcDisposal = (async () => {
+    await Promise.allSettled([sessions, embedding, ...pendingAgentRequests]);
+    while (pendingAgentRequests.size > 0) await Promise.allSettled([...pendingAgentRequests]);
+  })();
+  return agentIpcDisposal;
+}
 
 function bindAgentOwnerWindow(target: WebContents): void {
   if (boundAgentWindows.has(target)) return;
@@ -168,6 +198,7 @@ export interface AgentIpcDeps {
 }
 
 export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
+  if (agentIpcStopped) throw Object.assign(new Error('Agent 服务已关闭。'), { code: 'AGENT_SERVICE_DISPOSED' });
   const evidence = evidenceService ??= createAgentEvidenceService({
     internalRagEmbedding, operationLogUtility: deps.operationLogUtility,
     getActiveIndex: deps.getActiveIndex, getActiveSession: deps.getActiveSession,
@@ -200,6 +231,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
   deps.handle(
     'ai.agent.permission.request',
     async (event, requestedMode: unknown): Promise<AiAgentPermissionRequestResult> => {
+      if (agentIpcStopped) return stoppedAgentResult();
       if (requestedMode !== 'plan' && requestedMode !== 'normal' && requestedMode !== 'fullPermission') {
         return { ok: false, error: { code: 'INVALID_INPUT', message: 'Agent 权限模式无效。' } };
       }
@@ -215,6 +247,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
           cancelId: 1,
           noLink: true
         });
+        if (agentIpcStopped) return stoppedAgentResult();
         if (confirmation.response !== 0) {
           return { ok: false, error: { code: 'AGENT_PERMISSION_DENIED', message: '用户未授予 Agent 完全权限。' } };
         }
@@ -237,13 +270,15 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
   
   deps.handle(
     'ai.runTool',
-    async (_event, name: string, input: unknown): Promise<ToolResult> => { return local.runTool(name, input); }
+    async (_event, name: string, input: unknown): Promise<ToolResult> => ownAgentRequest(
+      () => local.runTool(name, input), () => ({ ...stoppedAgentResult(), state: 'cancelled' as const })
+    )
   );
 
   deps.handle('rag.embed', async (_event, _input: unknown): Promise<
       | { ok: true; embedded: number; reused: number; failed: number; model: string; dim: number }
       | { ok: false; error: { code: string; message: string } }
-    > => { return evidence.embed(); });
+    > => ownAgentRequest(() => evidence.embed(), stoppedAgentResult));
 
   deps.handle('rag.localModelStatus', async (): Promise<RagLocalModelStatus> => { return evidence.localModelStatus(); });
 
@@ -252,9 +287,10 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       limit?: number;
       families?: readonly RagChunkFamily[];
       expandReferences?: boolean;
-    }): Promise<RagRetrieveResult> => { return evidence.searchEvidence(input); });
+    }): Promise<RagRetrieveResult> => ownAgentRequest(() => evidence.searchEvidence(input),
+      () => ({ ok: false as const, code: 'RAG_UNAVAILABLE' as const, message: '应用正在退出，未启动新检索。' })));
   
-  deps.handle('ai.agent.run', async (_event, request: AiAgentRunRequest): Promise<AiAgentRunIpcResult> => {
+  deps.handle('ai.agent.run', async (_event, request: AiAgentRunRequest): Promise<AiAgentRunIpcResult> => ownAgentRequest(async () => {
       // T6：无工作区也创建会话、调模型（随时可聊）。工作区工具在工具层按工具守卫
       // 失败关闭（WORKSPACE_REQUIRED「这次工具需要先打开 Mod 工作区」），不整次拒绝。
       if (
@@ -294,6 +330,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         }
       }
       const stored = (await deps.modelServiceVault.listConfigs()).find((config) => config.id === request.configId);
+      if (agentIpcStopped) return stoppedAgentResult();
       if (!stored) {
         return { ok: false, error: { code: 'MODEL_SERVICE_CONFIG_NOT_FOUND', message: '模型服务配置不存在。' } };
       }
@@ -304,6 +341,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
         };
       }
       const apiKey = await deps.modelServiceVault.resolveApiKey(stored!.id);
+      if (agentIpcStopped) return stoppedAgentResult();
       if (!apiKey) {
         return {
           ok: false,
@@ -337,6 +375,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
       const contextWindowTokens = stored!.contextWindowTokens;
 
       const resumeFrom = request.resumeSessionPath === undefined ? undefined : await sessions.loadResume(request.resumeSessionPath);
+      if (agentIpcStopped) return stoppedAgentResult();
 
       const sessionId = randomUUID();
       const adapterResult = createConfiguredModelServiceAdapter({ config: modelConfig, apiKey, sessionId });
@@ -355,6 +394,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
           }
         };
       }
+      if (agentIpcStopped) return stoppedAgentResult();
       const permission = consumePermissionGrant(_event, request);
       if (!permission.ok) return permission;
       const mode: ToolContext['mode'] = permission.mode;
@@ -383,7 +423,7 @@ export function registerAgentIpcHandlers(deps: AgentIpcDeps): void {
           })
         }
       });
-    });
+    }, stoppedAgentResult));
 
   deps.handle(
     'ai.agent.events',

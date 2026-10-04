@@ -38,6 +38,35 @@ export interface SemanticRefreshDeps {
 export function createSemanticRefreshService(input: SemanticRefreshDeps) {
   const deps = Object.freeze({ ...input });
   let pendingRefreshOwner: RefreshOwner | null = null;
+  let stopped = false;
+  let disposal: Promise<void> | null = null;
+  const shutdownController = new AbortController();
+  const pendingWork = new Set<Promise<unknown>>();
+  const cancelPostCommit = new Set<() => void>();
+  const disposedError = () => Object.assign(new Error('语义刷新服务已关闭。'), { code: 'SEMANTIC_REFRESH_DISPOSED' });
+  function trackWork<T>(work: Promise<T>): Promise<T> {
+    pendingWork.add(work);
+    void work.then(() => pendingWork.delete(work), () => pendingWork.delete(work));
+    return work;
+  }
+  function dispose(): Promise<void> {
+    if (disposal) return disposal;
+    stopped = true;
+    shutdownController.abort();
+    if (semanticRefreshTimer) clearTimeout(semanticRefreshTimer);
+    semanticRefreshTimer = null;
+    semanticRefreshQueued = false;
+    pendingRefreshOwner = null;
+    semanticRefreshSources.clear();
+    semanticRefreshSymbols.clear();
+    for (const cancel of cancelPostCommit) cancel();
+    disposal = (async () => {
+      // Deadlines may release callers, but their non-cooperative Bridge/store
+      // operations still own dependencies until the real work settles.
+      while (pendingWork.size > 0) await Promise.allSettled([...pendingWork]);
+    })();
+    return disposal;
+  }
 
   function captureRefreshOwner(): RefreshOwner {
     return {
@@ -53,7 +82,7 @@ export function createSemanticRefreshService(input: SemanticRefreshDeps) {
   }
 
   function isRefreshCurrent(owner: RefreshOwner): boolean {
-    return sameRefreshOwner(owner, captureRefreshOwner());
+    return !stopped && sameRefreshOwner(owner, captureRefreshOwner());
   }
 
   function assertRefreshOwner(owner: RefreshOwner): void {
@@ -314,6 +343,7 @@ export function createSemanticRefreshService(input: SemanticRefreshDeps) {
   }
 
   function startSemanticRefresh(): Promise<void> {
+    if (stopped) return Promise.reject(disposedError());
     if (semanticRefreshInFlight) return semanticRefreshInFlight;
     semanticRefreshInFlight = (async () => {
       // Assign the in-flight promise before a stale/no-work batch can finish.
@@ -338,7 +368,7 @@ export function createSemanticRefreshService(input: SemanticRefreshDeps) {
           semanticRefreshSources.clear();
           semanticRefreshSymbols.clear();
           if (owner && isRefreshCurrent(owner)) {
-            await performActiveIndexSemanticRefresh(owner, sourcesForRefresh, symbolsForRefresh);
+            await performActiveIndexSemanticRefresh(owner, sourcesForRefresh, symbolsForRefresh, shutdownController.signal);
           }
         } while (semanticRefreshQueued || semanticRefreshSources.size > 0 || semanticRefreshSymbols.size > 0);
       } finally {
@@ -348,10 +378,11 @@ export function createSemanticRefreshService(input: SemanticRefreshDeps) {
         }
       }
     })();
-    return semanticRefreshInFlight;
+    return trackWork(semanticRefreshInFlight);
   }
 
   function scheduleSemanticRefreshWhenIdle(): void {
+    if (stopped) return;
     if (semanticRefreshTimer) return;
     if (!semanticRefreshQueued && semanticRefreshSources.size === 0 && semanticRefreshSymbols.size === 0) return;
     const delay = deps.hasActiveAgentRuns() ? SEMANTIC_REFRESH_IDLE_POLL_MS : SEMANTIC_REFRESH_DEBOUNCE_MS;
@@ -371,6 +402,7 @@ export function createSemanticRefreshService(input: SemanticRefreshDeps) {
     sourceUris: readonly string[] = [],
     symbolUris: readonly string[] = []
   ): Promise<void> {
+    if (stopped) return Promise.reject(disposedError());
     const owner = captureRefreshOwner();
     if (!owner.session || !owner.sessionId || !deps.getWorkspaceActiveIndex()) return Promise.resolve();
     if (pendingRefreshOwner && !sameRefreshOwner(pendingRefreshOwner, owner)) {
@@ -396,7 +428,15 @@ export function createSemanticRefreshService(input: SemanticRefreshDeps) {
     return startSemanticRefresh();
   }
 
-  async function refreshActiveIndexAfterNativeWrite(
+  function refreshActiveIndexAfterNativeWrite(
+    changedSources: readonly string[] = [],
+    carrier?: KnowledgeRefreshCarrier
+  ): Promise<KnowledgeRefreshResult | void> {
+    if (stopped) return Promise.reject(disposedError());
+    return trackWork(runNativeWriteRefresh(changedSources, carrier));
+  }
+
+  async function runNativeWriteRefresh(
     changedSources: readonly string[] = [],
     carrier?: KnowledgeRefreshCarrier
   ): Promise<KnowledgeRefreshResult | void> {
@@ -422,6 +462,12 @@ export function createSemanticRefreshService(input: SemanticRefreshDeps) {
       NATIVE_KNOWLEDGE_REFRESH_DEADLINE_MS
     );
     refreshTimer.unref?.();
+    const cancel = () => {
+      refreshController.abort();
+      clearTimeout(refreshTimer);
+      rejectRefreshDeadline(disposedError());
+    };
+    cancelPostCommit.add(cancel);
     const assertCurrentGeneration = (): void => {
       if (refreshController.signal.aborted) {
         throw new Error('写后 knowledge refresh 已超时或被取消。');
@@ -449,7 +495,7 @@ export function createSemanticRefreshService(input: SemanticRefreshDeps) {
       // removed before the scan. Reuse it while the scoped analyzer builds fresh
       // source projections, then clone once at publish to keep fresh semantics
       // isolated until freshness checks and RAG persistence pass.
-      const workPromise = (async () => {
+      const workPromise = trackWork((async () => {
         // Idle cleanup belongs to the same bounded workflow. A stalled cleanup
         // must not postpone observing the existing postcommit deadline.
         // Reclaim only idle clients; concurrent native requests stay untouched.
@@ -587,7 +633,7 @@ export function createSemanticRefreshService(input: SemanticRefreshDeps) {
             catalogRevision = deps.getWorkspaceIndexedFilesRevisionState();
           }
         });
-      })();
+      })());
       try {
         // Both branches are observed immediately. If a non-cooperative
         // Bridge/SQLite promise finishes after the deadline, its rejection cannot
@@ -635,6 +681,7 @@ export function createSemanticRefreshService(input: SemanticRefreshDeps) {
         void workPromise.catch(() => undefined);
       }
     } finally {
+      cancelPostCommit.delete(cancel);
       clearTimeout(refreshTimer);
     }
   }
@@ -678,7 +725,7 @@ export function createSemanticRefreshService(input: SemanticRefreshDeps) {
     return [...new Set(resolved)];
   }
 
-  return Object.freeze({ refreshActiveIndexAfterSemanticEvidence, refreshActiveIndexAfterNativeWrite });
+  return Object.freeze({ refreshActiveIndexAfterSemanticEvidence, refreshActiveIndexAfterNativeWrite, dispose });
 }
 
 export type SemanticRefreshService = ReturnType<typeof createSemanticRefreshService>;
