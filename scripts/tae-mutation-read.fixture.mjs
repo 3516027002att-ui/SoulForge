@@ -32,6 +32,44 @@ test('automatic TAE time and field mutation preflight reads query their edited a
   } finally { hooks.deregister(); delete globalThis[symbol]; await rm(root, { recursive: true, force: true }); }
 });
 
+test('expanded TAE fixture declares every appended time slot and preserves original bytes', () => {
+  const { bytes, expected } = distinctTaeFixture(); const original = Buffer.from(bytes);
+  const count = 240; const full = manyEventsFixture(bytes, expected, count);
+  // Independent SDT layout expectations: event entry 24 bytes, each float 4 bytes.
+  const entry = 0xc0; const table = Math.ceil(bytes.length / 8) * 8;
+  const times = table + count * 24; const data = times + count * 2 * 4; const end = data + count * 24;
+  const check = value => {
+    assert.equal(value.length, end); assert.equal(value.readInt32LE(12), end);
+    assert.equal(value.readBigInt64LE(entry), BigInt(table));
+    assert.equal(value.readBigInt64LE(entry + 8), BigInt(end));
+    assert.equal(value.readBigInt64LE(entry + 16), BigInt(times), 'declared time table follows the relocated event table');
+    assert.equal(value.readInt32LE(entry + 32), count); assert.equal(value.readInt32LE(entry + 36), 0);
+    assert.equal(value.readInt32LE(entry + 40), count * 2, 'both floats of every event are declared');
+    assert.equal(value.readInt32LE(entry + 44), 0, 'time-count reserved bytes remain unchanged');
+    for (let index = 0; index < count; index++) {
+      const event = table + index * 24; const body = data + index * 24;
+      assert.equal(value.readBigInt64LE(event), BigInt(times + index * 8));
+      assert.equal(value.readBigInt64LE(event + 8), BigInt(times + index * 8 + 4));
+      assert.equal(value.readBigInt64LE(event + 16), BigInt(body));
+      assert.equal(value.readFloatLE(times + index * 8), index);
+      assert.equal(value.readFloatLE(times + index * 8 + 4), index + 1);
+      assert.equal(value.readInt32LE(body), 9999); assert.equal(value.readBigInt64LE(body + 8), BigInt(body + 16));
+      const parameters = Buffer.alloc(8); parameters.writeInt32LE(index);
+      assert.deepEqual(value.subarray(body + 16, body + 24), parameters);
+    }
+    const restored = Buffer.from(value.subarray(0, bytes.length));
+    for (const [offset, length] of [[12, 4], [entry, 8], [entry + 8, 8], [entry + 16, 8], [entry + 32, 4], [entry + 40, 4]]) {
+      original.copy(restored, offset, offset, offset + length);
+    }
+    assert.deepEqual(restored, original, 'all sibling actions, original time slots, names and opaque bytes are preserved');
+  };
+  check(full); assert.deepEqual(bytes, original, 'fixture expansion does not mutate its input');
+  const staleOffset = Buffer.from(full); staleOffset.writeBigInt64LE(original.readBigInt64LE(entry + 16), entry + 16);
+  assert.throws(() => check(staleOffset), /declared time table follows/);
+  const staleCount = Buffer.from(full); staleCount.writeInt32LE(original.readInt32LE(entry + 40), entry + 40);
+  assert.throws(() => check(staleCount), /both floats of every event/);
+});
+
 test('native TAE mutation readback keeps complete edited actions and supports multi-action batches', async () => {
   const root = await mkdtemp(join(tmpdir(), 'sf-tae-mutation-targets-')); const source = join(root, 'chr/c0000.tae');
   await mkdir(join(root, 'chr'));

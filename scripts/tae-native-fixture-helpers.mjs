@@ -38,7 +38,9 @@ export function manyEventsFixture(bytes, expected, count = 240) {
   full.writeInt32LE(end, 12);
   full.writeBigInt64LE(BigInt(table), expected[0].entry);
   full.writeBigInt64LE(BigInt(end), expected[0].entry + 8);
+  full.writeBigInt64LE(BigInt(times), expected[0].entry + 16);
   full.writeInt32LE(count, expected[0].entry + 32);
+  full.writeInt32LE(count * 2, expected[0].entry + 40);
   for (let i = 0; i < count; i++) {
     const at = data + i * 24;
     full.writeBigInt64LE(BigInt(times + i * 8), table + i * 24);
