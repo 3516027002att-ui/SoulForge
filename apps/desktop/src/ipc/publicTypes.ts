@@ -315,6 +315,8 @@ export type RendererPatchHistoryEntry = Omit<
   'workspaceId' | 'changedPaths'
 > & {
   changedPaths: string[];
+  /** File-scoped inverse transactions applied to these changedPaths positions. */
+  partialRollback?: { rolledBackFileIndexes: number[] };
 };
 
 export type NativeWindowThemeMode = 'opal' | 'obsidian';

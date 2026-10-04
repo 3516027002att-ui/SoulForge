@@ -523,6 +523,15 @@ describe('unified diff 逐行分类', () => {
     ]);
   });
 
+  it('PatchProposal 汇总 diff 的文件分隔符重置 hunk 状态并作为标题显示', () => {
+    const lines = classifyDiffLines(
+      'diff --git a/first.txt b/first.txt\n--- first.txt\n+++ first.txt\n@@ -1 +1 @@\n-old\n+new\n'
+      + 'diff --git a/second.txt b/second.txt\n--- second.txt\n+++ second.txt\n@@ -1 +1 @@\n-before\n+after'
+    );
+    assert.deepEqual(lines.filter(line => line.text.startsWith('diff --git')).map(line => line.kind), ['header', 'header']);
+    assert.equal(lines.map(line => line.text).join('\n').includes('second.txt'), true);
+  });
+
   it('没有文件头或 hunk 的紧凑 diff 保留增删前缀语义', () => {
     assert.deepEqual(
       classifyDiffLines('---flag\n+++counter\n-old\n+new').map((line) => line.kind),
@@ -589,6 +598,24 @@ describe('审批预览只从参数里已有的字段提取', () => {
     assert.equal(preview?.targetPath, 'mods/b.txt');
     assert.equal(preview?.newText, 'body');
     assert.equal(preview?.changeCount, 1);
+  });
+
+  it('PatchProposal 预览完整列出每个目标和非文本改动，不只展示第一项', () => {
+    const preview = extractApprovalPreview(JSON.stringify({
+      changes: [
+        { targetPath: 'mods/first.txt', structuredEdit: { newText: 'first body' } },
+        { targetPath: 'mods/second.txt', structuredEdit: { newText: 'second body' } },
+        { targetUri: 'resource://third', kind: 'binary_replace' }
+      ]
+    }));
+
+    assert.equal(preview?.changeCount, 3);
+    assert.match(preview?.targetPath ?? '', /mods\/first\.txt/);
+    assert.match(preview?.targetPath ?? '', /mods\/second\.txt/);
+    assert.match(preview?.targetPath ?? '', /resource:\/\/third/);
+    assert.match(preview?.newText ?? '', /first body/);
+    assert.match(preview?.newText ?? '', /second body/);
+    assert.match(preview?.newText ?? '', /文本预览不可用/);
   });
 
   it('平铺与嵌套 newText 保留有效空串', () => {

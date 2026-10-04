@@ -141,6 +141,11 @@ export function classifyDiffLines(unifiedDiff: string): DiffLineView[] {
   let afterHeaderIndex = -1;
 
   return lines.map((text, index) => {
+    if (text.startsWith('diff --git ')) {
+      oldRemaining = 0;
+      newRemaining = 0;
+      return { kind: 'header' as const, text };
+    }
     if (text.startsWith('@@')) {
       const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(text);
       oldRemaining = hunk === null ? 0 : Number(hunk[1] ?? 1);
@@ -231,6 +236,35 @@ export function extractApprovalPreview(argumentsJson: string): AgentApprovalPrev
   const record = parsed as Record<string, unknown>;
 
   const changes = Array.isArray(record.changes) ? record.changes : null;
+  if (changes !== null && changes.length > 1) {
+    const targets: string[] = [];
+    const uris: string[] = [];
+    const sections = changes.map((candidate, index) => {
+      const change = typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)
+        ? candidate as Record<string, unknown>
+        : null;
+      const structuredEdit = typeof change?.structuredEdit === 'object'
+        && change.structuredEdit !== null && !Array.isArray(change.structuredEdit)
+        ? change.structuredEdit as Record<string, unknown>
+        : null;
+      const path = pickString(change?.targetPath);
+      const uri = pickString(change?.targetUri);
+      if (uri !== undefined) uris.push(uri);
+      const label = path ?? uri ?? `目标 ${index + 1}（未声明）`;
+      targets.push(label);
+      const text = typeof structuredEdit?.newText === 'string'
+        ? structuredEdit.newText
+        : '文本预览不可用（非文本改动或缺少文本内容）';
+      return `【${index + 1}/${changes.length}】${label}\n${text}`;
+    });
+    return {
+      targetPath: targets.length > 0 ? targets.join('；') : null,
+      targetUri: uris.length > 0 ? uris.join('；') : null,
+      newText: sections.join('\n\n'),
+      truncatedBytes: 0,
+      changeCount: changes.length
+    };
+  }
   const firstChange = changes?.[0];
   const changeRecord = typeof firstChange === 'object' && firstChange !== null
     ? firstChange as Record<string, unknown>

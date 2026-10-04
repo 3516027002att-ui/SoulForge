@@ -3,7 +3,7 @@
 // private credentials, native processes or original game resources.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -157,7 +157,7 @@ async function harness(options = {}) {
     async close() { target.destroyed = true; target.emit('destroyed'); api.clearAgentIpcState(); for (const session of coreSessions) session.close(); journal?.close(); await rm(owned, { recursive: true, force: true }); }
   };
 }
-const ownedCall = name => ({ message: { role: 'assistant', content: '', toolCalls: [{ id: 'owned-call', name, argumentsJson: '{}' }] }, finishReason: 'tool_use', diagnostics: [], usage: { inputTokens: 1, outputTokens: 1 } });
+const ownedCall = (name, argumentsJson = '{}') => ({ message: { role: 'assistant', content: '', toolCalls: [{ id: 'owned-call', name, argumentsJson }] }, finishReason: 'tool_use', diagnostics: [], usage: { inputTokens: 1, outputTokens: 1 } });
 
 test('Agent application services own sessions and evidence without sender or credential authority', () => {
   assert.equal(fs.existsSync(sessionServicePath), true, 'Agent session application service must exist');
@@ -215,6 +215,126 @@ test('exact normal approval resumes one owned call while wrong call and foreign 
     await h.waitEvent('session-done'); assert.equal(h.calls.filter(([name]) => name === 'commitTool').length, 1);
     assert.equal((await h.invoke('ai.agent.approval.respond', { sessionId: accepted.sessionId, callId: 'owned-call', decision: 'once' })).matched, false);
   } finally { await h.close(); }
+});
+test('PatchProposal approval previews every secure target and marks read or permission failures unavailable', async () => {
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'sf-agent-preview-outside-'));
+  let first = true;
+  const h = await harness({ complete: async () => {
+    if (!first) return response('Owned preview complete.');
+    first = false;
+    return ownedCall('commit_owned', JSON.stringify({ changes: [
+      { targetPath: path.join(h.owned, 'first.txt'), structuredEdit: { newText: 'new first body' } },
+      { targetPath: path.join(h.owned, 'second.txt'), structuredEdit: { newText: 'new second body' } },
+      { targetPath: path.join(h.owned, 'read-failure'), structuredEdit: { newText: 'must not be called a new file' } },
+      { targetPath: path.join(h.owned, 'non-text.bin'), targetUri: 'resource://owned/non-text', kind: 'binary' },
+      { targetPath: path.join(outside, 'secret.txt'), structuredEdit: { newText: 'must not expose outside target' } }
+    ] }));
+  } });
+  try {
+    await writeFile(path.join(h.owned, 'first.txt'), 'old first body');
+    await writeFile(path.join(h.owned, 'second.txt'), 'old second body');
+    await writeFile(path.join(h.owned, 'non-text.bin'), 'private non-text target bytes');
+    await mkdir(path.join(h.owned, 'read-failure'));
+    await writeFile(path.join(outside, 'secret.txt'), 'private outside bytes');
+    const session = await realCore.openWorkspaceSession({ overlayRoot: h.owned, game: 'owned-preview' });
+    h.switchWorkspace(session, new realCore.WorkspaceIndex(session.meta.workspaceId));
+    const accepted = await h.request('normal');
+    const approval = await h.waitEvent('approval-requested');
+    const diff = approval.event.diff;
+    assert.ok(diff, 'approval should retain a concrete diff with every target outcome');
+    assert.match(diff.unifiedDiff, /new first body/);
+    assert.match(diff.unifiedDiff, /new second body/);
+    assert.match(diff.unifiedDiff, /read-failure/);
+    assert.match(diff.unifiedDiff, /预览不可用/);
+    assert.match(diff.unifiedDiff, /non-text\.bin/);
+    assert.doesNotMatch(diff.unifiedDiff, /private outside bytes|private non-text target bytes|must not expose outside target/);
+    assert.equal(diff.newFile, false, 'a read failure or denied target is not evidence of a new file');
+    await h.invoke('ai.agent.approval.respond', { sessionId: accepted.sessionId, callId: 'owned-call', decision: 'reject' });
+    await h.waitEvent('session-done');
+  } finally { await h.close(); await rm(outside, { recursive: true, force: true }); }
+});
+
+test('single new-file approval keeps the safe target label instead of the generic new-file header', async () => {
+  let first = true;
+  const h = await harness({ complete: async () => {
+    if (!first) return response('Owned new file preview complete.');
+    first = false;
+    return ownedCall('commit_owned', JSON.stringify({ targetPath: path.join(h.owned, 'created.txt'), newText: 'created body' }));
+  } });
+  try {
+    const session = await realCore.openWorkspaceSession({ overlayRoot: h.owned, game: 'owned-preview' });
+    h.switchWorkspace(session, new realCore.WorkspaceIndex(session.meta.workspaceId));
+    const accepted = await h.request('normal');
+    const approval = await h.waitEvent('approval-requested'), diff = approval.event.diff;
+    assert.equal(diff?.newFile, true);
+    assert.match(diff?.unifiedDiff ?? '', /--- \(新文件\)/);
+    assert.match(diff?.unifiedDiff ?? '', /\+\+\+ created\.txt/);
+    assert.match(diff?.unifiedDiff ?? '', /created body/);
+    await h.invoke('ai.agent.approval.respond', { sessionId: accepted.sessionId, callId: 'owned-call', decision: 'reject' });
+    await h.waitEvent('session-done');
+  } finally { await h.close(); }
+});
+
+test('approval preview from a replaced workspace session cannot publish its stale diff', async () => {
+  const entered = deferred(), release = deferred();
+  let first = true;
+  const h = await harness({ complete: async () => {
+    if (!first) return response('Owned preview superseded.');
+    first = false;
+    return ownedCall('commit_owned', JSON.stringify({ changes: [
+      { targetPath: path.join(h.owned, 'first.txt'), structuredEdit: { newText: 'stale workspace body' } }
+    ] }));
+  } });
+  try {
+    await writeFile(path.join(h.owned, 'first.txt'), 'current body');
+    const base = await realCore.openWorkspaceSession({ overlayRoot: h.owned, game: 'owned-preview' });
+    const session = { ...base, resolveWritablePathSecure: async (...args) => {
+      entered.resolve();
+      await release.promise;
+      return base.resolveWritablePathSecure(...args);
+    } };
+    h.switchWorkspace(session, new realCore.WorkspaceIndex(session.meta.workspaceId));
+    const accepted = await h.request('normal');
+    await entered.promise;
+    await mkdir(path.join(h.owned, 'replacement'));
+    const replacement = await realCore.openWorkspaceSession({ overlayRoot: path.join(h.owned, 'replacement'), game: 'owned-preview' });
+    h.switchWorkspace(replacement, new realCore.WorkspaceIndex(replacement.meta.workspaceId));
+    release.resolve();
+    const approval = await h.waitEvent('approval-requested');
+    assert.equal(approval.event.diff, undefined, 'a result captured by the prior session must be discarded');
+    assert.doesNotMatch(approval.event.diff?.unifiedDiff ?? '', /stale workspace body/);
+    await h.invoke('ai.agent.approval.respond', { sessionId: accepted.sessionId, callId: 'owned-call', decision: 'reject' });
+    await h.waitEvent('session-done');
+  } finally { release.resolve(); await h.close(); }
+});
+
+test('approval preview resumed after cancellation cannot publish its diff', async () => {
+  const entered = deferred(), release = deferred();
+  let first = true;
+  const h = await harness({ complete: async () => {
+    if (!first) return response('Owned preview cancelled.');
+    first = false;
+    return ownedCall('commit_owned', JSON.stringify({ changes: [
+      { targetPath: path.join(h.owned, 'first.txt'), structuredEdit: { newText: 'cancelled preview body' } }
+    ] }));
+  } });
+  try {
+    await writeFile(path.join(h.owned, 'first.txt'), 'current body');
+    const base = await realCore.openWorkspaceSession({ overlayRoot: h.owned, game: 'owned-preview' });
+    const session = { ...base, resolveWritablePathSecure: async (...args) => {
+      entered.resolve();
+      await release.promise;
+      return base.resolveWritablePathSecure(...args);
+    } };
+    h.switchWorkspace(session, new realCore.WorkspaceIndex(session.meta.workspaceId));
+    const accepted = await h.request('normal');
+    await entered.promise;
+    await h.invoke('ai.agent.cancel', accepted.sessionId);
+    release.resolve();
+    await h.waitEvent('session-done');
+    assert.equal(h.target.events.some(({ event }) => event.type === 'approval-requested' && event.diff !== undefined), false);
+    assert.equal(h.calls.filter(([name]) => name === 'commitTool').length, 0);
+  } finally { release.resolve(); await h.close(); }
 });
 test('normal approval rejection and cancellation leave the writer undispatched', async () => {
   for (const cancel of [false, true]) { let first = true; const h = await harness({ complete: async () => { if (first) { first = false; return ownedCall('commit_owned'); } return response('Owned request refused.'); } });

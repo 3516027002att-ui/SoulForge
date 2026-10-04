@@ -142,7 +142,7 @@ export function AgentApprovalPanel({
           {entry.diff !== null && (
             <div className="agent-approval__diff" data-testid="agent-approval-diff">
               <div className="agent-approval__diff-head">
-                <code>{entry.diff.targetPath}</code>
+                <code>{entry.diff.targetPath || entry.preview?.targetPath || entry.preview?.targetUri || '目标信息不可用'}</code>
                 <span className="agent-approval__diff-stat">
                   {entry.diff.newFile ? '新文件 · ' : ''}
                   <span className="is-add">+{entry.diff.addedLines}</span>

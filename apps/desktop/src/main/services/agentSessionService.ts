@@ -2,7 +2,7 @@ import { BoundedEventHistory } from '../../../../../packages/agent/src/eventHist
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { basename, join, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createAgentToolBridge, createConfirmationReceipt, createUnifiedDiff, CoreToolSession, openAgentCoreToolSession, createAgentToolContextProvider, createAgentRagSearch, listRolloutSessions, loadRolloutSession, createAgentRunAssembly, type AgentEvent, type ApprovalDecision, type ApprovalDiff, type ResumedRollout, type AgentSessionRunParams, type ToolContext, type ToolRegistry, type WorkspaceIndex, type WorkspaceSession } from '@soulforge/core';
 import type { ConfirmationReceipt } from '@soulforge/shared';
 import type { AiAgentRunRequest, AiAgentRunIpcResult, AiAgentCancelIpcResult, AiAgentEventEnvelope, AiAgentSessionLifecycleEvent, AiAgentEventReplayIpcResult, AiAgentSessionListIpcResult, AiAgentSessionLoadIpcResult } from '../../ipc/publicTypes.js';
@@ -267,6 +267,9 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
         // identities or a later workspace session.
         const activeWorkspaceSession = deps.getActiveSession();
         const activeWorkspaceIndex = deps.getActiveIndex();
+        const activeWorkspaceSessionId = deps.getActiveWorkspaceSessionId();
+        const isCapturedWorkspaceCurrent = (): boolean => deps.getActiveSession() === activeWorkspaceSession
+          && deps.getActiveWorkspaceSessionId() === activeWorkspaceSessionId;
         let coreSession: CoreToolSession | undefined;
         let executionStarted = false;
         try {
@@ -559,23 +562,24 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
           });
 
         /**
-         * Resolve a unified diff for a pending write.
+         * Resolve a unified diff for every file in a pending write.
          *
-         * Lives in main because it reads the current file — the loop has no
+         * Lives in main because it reads current files — the loop has no
          * filesystem access, and giving it any would soften the "tools are the only
-         * way the agent touches the workspace" boundary.
-         *
-         * Path resolution goes through deps.getActiveSession().resolveWritablePath, so the
-         * opened-workspace write gate is enforced by the existing mechanism
-         * rather than a second check written here. An unresolvable path yields null
-         * (no diff) rather than an error: failing to *preview* a change must never
-         * decide whether it gets approved.
+         * way the agent touches the workspace" boundary. Every path must pass the
+         * captured workspace session's authoritative resolver before it is read.
          */
         const resolveApprovalDiff = async (input: {
           toolName: string;
           argumentsJson: string;
         }): Promise<ApprovalDiff | null> => {
-          assertRunAvailable(owner);
+          const assertApprovalOwnerCurrent = (): void => {
+            assertRunAvailable(owner);
+            if (!isCapturedWorkspaceCurrent()) {
+              throw Object.assign(new Error('审批预览所属工作区已更换，旧预览已丢弃。'), { code: 'AGENT_WORKSPACE_SUPERSEDED' });
+            }
+          };
+          assertApprovalOwnerCurrent();
           let parsed: unknown;
           try {
             parsed = JSON.parse(input.argumentsJson);
@@ -585,71 +589,133 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
           if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
           const record = parsed as Record<string, unknown>;
 
-          // 两种形态都支持:propose_text_patch 的平铺字段,与 PatchProposal 的
-          // changes[0]。只取第一条 —— 一次审批对应一个具体动作。
+          // 两种形态都支持:propose_text_patch 的平铺字段,与完整 PatchProposal。
           const changes = Array.isArray(record.changes) ? record.changes : null;
-          const firstChange = typeof changes?.[0] === 'object' && changes[0] !== null
-            ? changes[0] as Record<string, unknown>
-            : null;
-          const structuredEdit = typeof firstChange?.structuredEdit === 'object'
-            && firstChange.structuredEdit !== null
-            ? firstChange.structuredEdit as Record<string, unknown>
-            : null;
+          if (changes?.length === 0) return null;
+          if (!activeWorkspaceSession) return null;
 
-          const targetPath = typeof record.targetPath === 'string' && record.targetPath !== ''
-            ? record.targetPath
-            : typeof firstChange?.targetPath === 'string' ? firstChange.targetPath : '';
-          const afterText = typeof record.newText === 'string'
-            ? record.newText
-            : typeof structuredEdit?.newText === 'string' ? structuredEdit.newText : null;
-          if (targetPath === '' || afterText === null) return null;
-          if (!deps.getActiveSession()) return null;
-
-          // 用 Secure 版而不是同步版：同步 resolveWritablePath 的注释写明它只是
-          // **词法预检**，权威检查是 resolveWritablePathSecure（会解析 junction 与
-          // symlink）。工作区外路径由权威机制拒绝，不该因为「只是预览」就放宽。
-          const _sessDiff = deps.getActiveSession();
-          if (!_sessDiff) return null;
-          const writable = await _sessDiff.resolveWritablePathSecure(targetPath, 'overlay');
-          assertRunAvailable(owner);
-          if (!writable.ok || typeof writable.absolutePath !== 'string') return null;
-          const resolvedPath = writable.absolutePath;
-
-          let beforeText = '';
-          let newFile = false;
-          try {
-            beforeText = await readFile(resolvedPath, 'utf8');
-          } catch {
-            // 目标不存在:整篇都是新增。这与「读失败」在界面上必须可区分,
-            // 故用 newFile 标记而不是静默当成空文件对比。
-            newFile = true;
-          }
-          assertRunAvailable(owner);
-
-          const unifiedDiff = createUnifiedDiff(beforeText, afterText, {
-            fromFile: newFile ? '(新文件)' : targetPath,
-            toFile: targetPath
-          });
-          const lines = unifiedDiff.split('\n');
-          const { addedLines, removedLines } = countGeneratedTextDiffLines(lines);
-
-          // 上限:几千行的 diff 会把审批卡片变成读不完的墙,而读不完的 diff 等于
-          // 没有 diff。截断必须显式说明截了多少,否则用户会以为改动就这么点。
+          const entries = changes ?? [record];
+          const sections: string[] = [];
+          const targetLabels: string[] = [];
+          const outcomeNewFiles: boolean[] = [];
+          const truncatedFiles: Array<{ label: string; lineCount: number }> = [];
+          let addedLines = 0;
+          let removedLines = 0;
           const MAX_DIFF_LINES = 400;
-          const truncated = lines.length > MAX_DIFF_LINES;
+          const displayPath = (absolutePath: string, index: number): string => {
+            const relativePath = relative(activeWorkspaceSession.layers.overlayRoot, absolutePath);
+            if (relativePath === '') return '.';
+            if (isAbsolute(relativePath) || relativePath === '..' || relativePath.startsWith(`..${sep}`)) {
+              return `工作区内目标 ${index + 1}`;
+            }
+            return relativePath.split(sep).join('/').replace(/[\r\n]/gu, '�');
+          };
+          const unavailableSection = (index: number, reason: string, safeLabel?: string): string => {
+            const label = safeLabel ?? `目标 ${index + 1}`;
+            return `--- ${label}\n+++ ${label}\n[预览不可用：${reason}]`;
+          };
 
+          for (let index = 0; index < entries.length; index++) {
+            assertApprovalOwnerCurrent();
+            const candidate = entries[index];
+            const change = typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)
+              ? candidate as Record<string, unknown>
+              : null;
+            const nested = typeof change?.structuredEdit === 'object'
+              && change.structuredEdit !== null && !Array.isArray(change.structuredEdit)
+              ? change.structuredEdit as Record<string, unknown>
+              : null;
+            const targetPath = typeof change?.targetPath === 'string' && change.targetPath !== ''
+              ? change.targetPath
+              : (changes === null || entries.length === 1)
+                && typeof record.targetPath === 'string' && record.targetPath !== ''
+                ? record.targetPath
+                : '';
+            const afterText = (changes === null || entries.length === 1) && typeof record.newText === 'string'
+              ? record.newText
+              : typeof nested?.newText === 'string' ? nested.newText : null;
+            if (targetPath === '') {
+              targetLabels.push(`目标 ${index + 1}`);
+              outcomeNewFiles.push(false);
+              sections.push(unavailableSection(index, '缺少可安全解析的文件目标。'));
+              continue;
+            }
+
+            assertApprovalOwnerCurrent();
+            let writable: Awaited<ReturnType<WorkspaceSession['resolveWritablePathSecure']>>;
+            try {
+              writable = await activeWorkspaceSession.resolveWritablePathSecure(targetPath, 'overlay');
+            } catch {
+              assertApprovalOwnerCurrent();
+              targetLabels.push(`目标 ${index + 1}`);
+              outcomeNewFiles.push(false);
+              sections.push(unavailableSection(index, '当前工作区安全校验失败。'));
+              continue;
+            }
+            assertApprovalOwnerCurrent();
+            if (!writable.ok || typeof writable.absolutePath !== 'string') {
+              targetLabels.push(`目标 ${index + 1}（安全校验拒绝）`);
+              outcomeNewFiles.push(false);
+              sections.push(unavailableSection(index, '目标不在当前工作区可写范围内。'));
+              continue;
+            }
+
+            const safeTarget = displayPath(writable.absolutePath, index);
+            targetLabels.push(safeTarget);
+            if (afterText === null) {
+              outcomeNewFiles.push(false);
+              sections.push(unavailableSection(index, '缺少文本内容或该改动不支持文本 diff。', safeTarget));
+              continue;
+            }
+
+            let beforeText = '';
+            let newFile = false;
+            try {
+              assertApprovalOwnerCurrent();
+              beforeText = await readFile(writable.absolutePath, 'utf8');
+            } catch (error) {
+              assertApprovalOwnerCurrent();
+              const code = typeof error === 'object' && error !== null && 'code' in error
+                ? (error as NodeJS.ErrnoException).code
+                : undefined;
+              if (code !== 'ENOENT') {
+                outcomeNewFiles.push(false);
+                sections.push(unavailableSection(index, '文件读取失败，未将其当作新文件。', safeTarget));
+                continue;
+              }
+              newFile = true;
+            }
+            assertApprovalOwnerCurrent();
+
+            const unifiedDiff = createUnifiedDiff(beforeText, afterText, {
+              fromFile: newFile ? '(新文件)' : safeTarget,
+              toFile: safeTarget
+            });
+            const lines = unifiedDiff.split('\n');
+            const counts = countGeneratedTextDiffLines(lines);
+            addedLines += counts.addedLines;
+            removedLines += counts.removedLines;
+            outcomeNewFiles.push(newFile);
+            if (lines.length > MAX_DIFF_LINES) truncatedFiles.push({ label: safeTarget, lineCount: lines.length });
+            const boundedDiff = lines.length > MAX_DIFF_LINES ? lines.slice(0, MAX_DIFF_LINES).join('\n') : unifiedDiff;
+            sections.push(entries.length > 1 ? `diff --git a/${safeTarget} b/${safeTarget}\n${boundedDiff}` : boundedDiff);
+          }
+
+          assertApprovalOwnerCurrent();
+          const combinedDiff = sections.join('\n\n');
+          const targetPath = targetLabels.join('；');
+          const note = truncatedFiles.length === 0
+            ? undefined
+            : entries.length === 1
+              ? `diff 共 ${truncatedFiles[0]!.lineCount} 行，此处只显示前 ${MAX_DIFF_LINES} 行；完整改动为 +${addedLines} / -${removedLines} 行。`
+              : `${truncatedFiles.length} 个文件的 diff 超过 ${MAX_DIFF_LINES} 行，已逐文件截断；所有目标及其余预览均保留。`;
           return {
             targetPath,
-            unifiedDiff: truncated ? lines.slice(0, MAX_DIFF_LINES).join('\n') : unifiedDiff,
+            unifiedDiff: combinedDiff,
             addedLines,
             removedLines,
-            newFile,
-            ...(truncated
-              ? {
-                  truncatedNote: `diff 共 ${lines.length} 行，此处只显示前 ${MAX_DIFF_LINES} 行；`
-                    + `完整改动为 +${addedLines} / -${removedLines} 行。`
-                }
-              : {})
+            newFile: outcomeNewFiles.length > 0 && outcomeNewFiles.every(Boolean),
+            ...(note ? { truncatedNote: note } : {})
           };
         };
 
@@ -695,7 +761,16 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
           // the core loop's default approval levels.
           ...(mode === 'fullPermission' ? { approvalRequiredLevels: [] } : {}),
           ...(resumeFrom ? { resumeFrom } : {}),
-          onEvent: (event) => sendAgentEvent(sessionId, event)
+          onEvent: (event) => {
+            if (event.type === 'approval-requested'
+              && (controller.signal.aborted || !isCapturedWorkspaceCurrent())) {
+              const withoutDiff = { ...event };
+              delete withoutDiff.diff;
+              sendAgentEvent(sessionId, withoutDiff);
+              return;
+            }
+            sendAgentEvent(sessionId, event);
+          }
         });
         })();
         executionStarted = true;

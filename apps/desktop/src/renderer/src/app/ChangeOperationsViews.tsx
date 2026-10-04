@@ -48,7 +48,10 @@ export function ChangeOperationsSidebarViews({ operations, sidebarView, hasWorks
                 <p className="empty-hint">尚无已记录操作。写入暂存变更后会记录到持久操作日志。</p>
               )}
               <div className="audit-timeline">
-                {operationHistory.map((entry) => (
+                {operationHistory.map((entry) => {
+                  const rolledBackIndexes = new Set(entry.partialRollback?.rolledBackFileIndexes ?? []);
+                  const isPartiallyRolledBack = rolledBackIndexes.size > 0;
+                  return (
                   <div
                     key={entry.opId}
                     className={
@@ -75,33 +78,42 @@ export function ChangeOperationsSidebarViews({ operations, sidebarView, hasWorks
                         <button
                           type="button"
                           className="btn btn--ghost btn--sm"
-                          disabled={rollbackInFlight === `operation:${entry.opId}`}
+                          disabled={isPartiallyRolledBack || rollbackInFlight === `operation:${entry.opId}`}
+                          title={isPartiallyRolledBack ? '该操作已部分回滚，请继续回滚剩余文件。' : undefined}
                           onClick={() => void rollbackOp(entry.opId)}
                         >
-                          {rollbackInFlight === `operation:${entry.opId}` ? '回滚中…' : '回滚'}
+                          {rollbackInFlight === `operation:${entry.opId}` ? '回滚中…' : isPartiallyRolledBack ? '部分回滚' : '回滚'}
                         </button>
+                        {isPartiallyRolledBack && (
+                          <span className="muted" role="status">部分回滚，请继续回滚剩余文件。</span>
+                        )}
                         <details className="audit-entry__files">
                           <summary>文件级回滚（{entry.fileCount}）</summary>
-                          {entry.changedPaths.map((path) => (
-                            <div key={`${entry.opId}:${path}`} className="audit-entry__file">
-                              <span className="audit-entry__file-path" title={path}>{shortenPath(path)}</span>
-                              {path === '[本机路径已隐藏]' ? null : (
-                                <button
-                                  type="button"
-                                  className="btn btn--ghost btn--sm"
-                                  disabled={rollbackInFlight === `file:${entry.opId}:${path}`}
-                                  onClick={() => void rollbackFileOp(entry.opId, path)}
-                                >
-                                  {rollbackInFlight === `file:${entry.opId}:${path}` ? '回滚中…' : '回滚此文件'}
-                                </button>
-                              )}
-                            </div>
-                          ))}
+                          {entry.changedPaths.map((path, index) => {
+                            const isRolledBack = rolledBackIndexes.has(index);
+                            return (
+                              <div key={`${entry.opId}:${index}`} className="audit-entry__file">
+                                <span className="audit-entry__file-path" title={path}>{shortenPath(path)}</span>
+                                {isRolledBack ? <span className="muted">已回滚</span>
+                                  : path === '[本机路径已隐藏]' ? null : (
+                                    <button
+                                      type="button"
+                                      className="btn btn--ghost btn--sm"
+                                      disabled={rollbackInFlight === `file:${entry.opId}:${path}`}
+                                      onClick={() => void rollbackFileOp(entry.opId, path)}
+                                    >
+                                      {rollbackInFlight === `file:${entry.opId}:${path}` ? '回滚中…' : '回滚此文件'}
+                                    </button>
+                                  )}
+                              </div>
+                            );
+                          })}
                         </details>
                       </div>
                     )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </section>
@@ -119,10 +131,12 @@ export function OperationsWorkbenchView({ operations, preview, onCancelJob }: {
                 opId: entry.opId,
                 status: entry.status,
                 mode: entry.mode,
-                summary: entry.title,
+                summary: entry.partialRollback?.rolledBackFileIndexes.length
+                  ? `${entry.title}（部分回滚，请回滚剩余文件）`
+                  : entry.title,
                 createdAt: entry.createdAt,
                 fileCount: entry.fileCount,
-                canRollback: entry.status === 'committed'
+                canRollback: entry.status === 'committed' && !entry.partialRollback?.rolledBackFileIndexes.length
               }))}
               rollbackBusyOpId={rollbackInFlight?.startsWith('operation:')
                 ? rollbackInFlight.slice('operation:'.length)

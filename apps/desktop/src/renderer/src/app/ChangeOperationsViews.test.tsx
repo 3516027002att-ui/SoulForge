@@ -41,6 +41,34 @@ it('audit keeps per-entry busy locks, hides private paths and forwards native ro
   assert.equal(buttons.filter(n => isValidElement<{children?:ReactNode}>(n) && n.props.children === '回滚此文件').length, 1);
   assert.deepEqual(p.calls, [['rollback','owned-op'],['file','owned-op','resource://owned/file']]);
 });
+it('partial rollback disables whole-operation rollback and marks only the indexed duplicate path', () => {
+  const p = ports(); p.operations.operationHistory = [{ opId: 'owned-op', title: 'Owned operation', mode: 'normal', status: 'committed',
+    author: 'user', createdAt: 'owned-time', fileCount: 2, changedPaths: ['[本机路径已隐藏]', '[本机路径已隐藏]'],
+    partialRollback: { rolledBackFileIndexes: [0] } } as typeof p.operations.operationHistory[number]];
+  const props: ComponentProps<typeof ChangeOperationsSidebarViews> = { operations: p.operations, sidebarView: 'audit', hasWorkspace: true, closeButton: null };
+  const element = ChangeOperationsSidebarViews(props), html = renderToStaticMarkup(<ChangeOperationsSidebarViews {...props} />);
+  assert.match(html, /部分回滚/);
+  assert.match(html, /剩余文件/);
+  const rows = elements(element).filter(
+    (node): node is ReactElement<{ className?: string; children?: ReactNode }> =>
+      isValidElement<{ className?: string; children?: ReactNode }>(node)
+      && node.props.className === 'audit-entry__file'
+  );
+  assert.equal(rows.length, 2);
+  assert.equal(rows.filter(row => elements(row).some(child =>
+    isValidElement<{ children?: ReactNode }>(child) && child.props.children === '已回滚')).length, 1);
+  assert.equal(rows.filter(row => elements(row).some(child =>
+    isValidElement<{ children?: ReactNode }>(child) && child.props.children === '回滚此文件')).length, 0,
+    'masked filesystem paths remain non-actionable even when their labels collide');
+  const wholeRollbackButtons = elements(element).filter(node => isValidElement<{ children?: ReactNode }>(node)
+    && node.type === 'button' && node.props.children === '回滚');
+  assert.equal(wholeRollbackButtons.length, 0, 'partial state must not invoke a whole-operation rollback');
+  assert.equal(p.calls.length, 0);
+  const workbench = OperationsWorkbenchView({ operations: p.operations, preview: null, onCancelJob() {} });
+  assert.ok(isValidElement<ComponentProps<typeof WorkbenchOpsPanel>>(workbench));
+  assert.equal(workbench.props.history[0]?.canRollback, false);
+  assert.match(workbench.props.history[0]?.summary ?? '', /部分回滚.*剩余文件/);
+});
 it('operations workbench projects logical receipts and keeps diagnostics/source identities and callback behavior', async () => {
   const p = ports(); p.operations.operationHistory = [{ opId: 'owned-op', title: 'Owned operation', mode: 'normal', status: 'committed',
     author: 'user', createdAt: 'owned-time', fileCount: 1, changedPaths: ['resource://owned/file'] }];
