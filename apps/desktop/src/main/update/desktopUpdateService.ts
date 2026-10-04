@@ -319,7 +319,7 @@ export class DesktopUpdateService {
     const confirmed = await this.confirmInstall(pending);
     if (!confirmed) {
       const error = stateDiagnostic('UPDATE_INSTALL_DECLINED', 'install', '用户暂未确认安装更新。', true);
-      return commandResult(this.publish({ status: 'error', currentVersion: this.currentVersion, channel: this.channelValue, diagnostic: error }), error);
+      return commandResult(this.publish({ status: 'blocked', currentVersion: this.currentVersion, channel: this.channelValue, info: asProtocolInfo(pending), diagnostic: error }), error);
     }
     return this.resultFromState(await this.machine.install());
   }
