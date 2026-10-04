@@ -149,11 +149,29 @@ test('native insertion changes only its selected animation and copies native tem
   const reread = await session.call('read-tae-document', outputPath);
   assert.notEqual(reread.parseStatus, 'failed', JSON.stringify(reread));
   assert.equal(reread.data.animations[2].events.length, 2);
-  const untouched = Buffer.from(output.subarray(0, bytes.length));
-  bytes.copy(untouched, 12, 12, 16);
-  bytes.copy(untouched, target.entry, target.entry, target.entry + 16);
-  bytes.copy(untouched, target.entry + 32, target.entry + 32, target.entry + 36);
-  assert.deepEqual(untouched, bytes, 'unrelated native bytes must be identical');
+  // Independent complete output: the active time table must now include both
+  // retained and inserted events, not leave two new orphaned float slots.
+  // All offsets follow this fixture's literal 48-byte event records; none are
+  // taken from the writer's response or inferred from its output.
+  const timeAt = (bytes.length + 3) & ~3;
+  const dataAt = timeAt + 16, tableAt = dataAt + 2 * 48;
+  const wanted = Buffer.alloc(tableAt + 48); bytes.copy(wanted);
+  wanted.writeInt32LE(wanted.length, 12);
+  wanted.writeBigInt64LE(BigInt(tableAt), target.entry);
+  wanted.writeBigInt64LE(BigInt(tableAt), target.entry + 8); // Empty group table bounds parameters.
+  wanted.writeBigInt64LE(BigInt(timeAt), target.entry + 16);
+  wanted.writeInt32LE(2, target.entry + 32); wanted.writeInt32LE(4, target.entry + 40);
+  [2, 3, 9, 10].forEach((value, i) => wanted.writeFloatLE(value, timeAt + i * 4));
+  for (let i = 0; i < 2; i++) {
+    const at = dataAt + i * 48, header = tableAt + i * 24;
+    bytes.copy(wanted, at, target.eventData, target.eventData + 48);
+    wanted.writeBigInt64LE(BigInt(at + 16), at + 8);
+    wanted.writeBigInt64LE(BigInt(timeAt + i * 8), header);
+    wanted.writeBigInt64LE(BigInt(timeAt + i * 8 + 4), header + 8);
+    wanted.writeBigInt64LE(BigInt(at), header + 16);
+  }
+  assert.deepEqual(output, wanted, 'complete time table, template, and all unrelated native bytes must match');
+  assert.deepEqual(await readFile(source), bytes);
 }));
 
 test('an empty animation table ending at EOF is valid', async () => withFixture(async ({ source, bytes, session }) => {
