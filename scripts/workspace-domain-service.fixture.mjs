@@ -65,5 +65,26 @@ test('another service factory cannot replace a pending scan storage capability',
 
 test('constructing B cannot replace A embedding callback across actual durable publication',()=>harness(async h=>{const a=[],b=[],ports=directPorts(h);ports.scheduleRagEmbedding=(corpus,store)=>a.push([corpus,store]);const service=h.module.createWorkspaceService(ports);await service.scan({overlaySelectionId:'admitted',clearBase:true},()=>Object.freeze({absolutePath:h.overlay,label:'owned-a',kind:'overlay'}),()=>undefined,()=>{throw new Error('Unexpected auto base');});const durable=deferred(),corpus={workspaceId:h.module.getWorkspaceActiveIndex().workspaceId,chunks:[],references:[],stats:{},availability:'unavailable',diagnostics:[]};let entered=false;const store={mergeRagChunkDelta:async()=>null,replaceReferences:async()=>{entered=true;await durable.promise;}};const publishing=h.module.__testPersistActiveRag(store,corpus);assert.equal(entered,true);h.module.createWorkspaceService({...directPorts(h),scheduleRagEmbedding:(corpus,store)=>b.push([corpus,store])});durable.resolve();await publishing;assert.deepEqual(a,[[corpus,store]]);assert.deepEqual(b,[]);assert.equal(h.module.getWorkspaceRag(),corpus);}));
 test('constructing B cannot replace activated A readiness analysis starter',()=>harness(async h=>{let a=0,b=0;const ports=directPorts(h);ports.ensureActiveOperationLog=async()=>{a++;throw new Error('OWNED_A_DATABASE');};const service=h.module.createWorkspaceService(ports);await service.scan({overlaySelectionId:'admitted',clearBase:true},()=>Object.freeze({absolutePath:h.overlay,label:'owned-a',kind:'overlay'}),()=>undefined,()=>{throw new Error('Unexpected auto base');});h.module.createWorkspaceService({...directPorts(h),ensureActiveOperationLog:async()=>{b++;throw new Error('OWNED_B_DATABASE');}});await h.module.waitForWorkspaceIndexing();assert.equal(a,2,'A owns both background scan and readiness analysis');assert.equal(b,0,'mere B construction cannot run A readiness through B ports');}));
-test('remount activation deliberately binds its service readiness capability',()=>harness(async h=>{let a=0,b=0;const ports=directPorts(h);ports.ensureActiveOperationLog=async()=>{a++;throw new Error('OWNED_A_DATABASE');};const service=h.module.createWorkspaceService(ports);await service.scan({overlaySelectionId:'admitted',clearBase:true},()=>Object.freeze({absolutePath:h.overlay,label:'owned-a',kind:'overlay'}),()=>undefined,()=>{throw new Error('Unexpected auto base');});const next=h.module.createWorkspaceService({...directPorts(h),ensureActiveOperationLog:async()=>{b++;throw new Error('OWNED_B_DATABASE');}});const before=h.module.getActiveWorkspaceSessionGenerationState(),index=h.module.getWorkspaceActiveIndex();await next.remountBase(()=>undefined);assert.ok(h.module.getActiveWorkspaceSessionGenerationState()>before);h.module.applyWorkspaceIndexSnapshot(index);await h.module.waitForWorkspaceIndexing();assert.equal(a,1);assert.equal(b,1,'actual B remount owns the new activation readiness');}));
+test('remount activation deliberately binds its service readiness capability', () => harness(async h => {
+    let a = 0, b = 0;
+    const ports = directPorts(h);
+    ports.ensureActiveOperationLog = async () => { a++; throw new Error('OWNED_A_DATABASE'); };
+    const service = h.module.createWorkspaceService(ports);
+    await service.scan({ overlaySelectionId: 'admitted', clearBase: true },
+        () => Object.freeze({ absolutePath: h.overlay, label: 'owned-a', kind: 'overlay' }),
+        () => undefined, () => { throw new Error('Unexpected auto base'); });
+    const next = h.module.createWorkspaceService({ ...directPorts(h),
+        ensureActiveOperationLog: async () => { b++; throw new Error('OWNED_B_DATABASE'); } });
+    const before = h.module.getActiveWorkspaceSessionGenerationState(), index = h.module.getWorkspaceActiveIndex();
+    await next.remountBase(() => undefined);
+    assert.ok(h.module.getActiveWorkspaceSessionGenerationState() > before);
+    assert.equal(a, 1, 'only A background scan used the previous capability');
+    assert.equal(b, 1, 'B remount owns one background catalog scan before readiness');
+    h.module.applyWorkspaceIndexSnapshot(index);
+    await h.module.waitForWorkspaceIndexing();
+    assert.equal(a, 1, 'readiness must not borrow the previous A capability');
+    assert.equal(b, 2, 'B owns one background scan plus one readiness analysis');
+    await h.module.waitForWorkspaceIndexing();
+    assert.equal(b, 2, 'repeated readiness must not retry the failed analysis generation');
+}));
 test('constructing a service after active reset cannot resurrect analysis startup',()=>harness(async h=>{const service=h.module.createWorkspaceService(directPorts(h));await service.scan({overlaySelectionId:'admitted',clearBase:true},()=>Object.freeze({absolutePath:h.overlay,label:'owned-a',kind:'overlay'}),()=>undefined,()=>{throw new Error('Unexpected auto base');});h.module.clearWorkspaceIpcCaches();let b=0;h.module.createWorkspaceService({...directPorts(h),ensureActiveOperationLog:async()=>{b++;throw new Error('OWNED_B_DATABASE');}});await h.module.waitForWorkspaceIndexing();assert.equal(b,0,'cache reset leaves no readiness starter until another activation');}));
