@@ -7,6 +7,7 @@
  *   node dist/testing/runAuditSf11Smoke.js --layer native
  */
 
+import assert from 'node:assert/strict';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { BridgeResult } from '@soulforge/shared';
@@ -275,13 +276,12 @@ async function runUnitLayer(): Promise<void> {
       fail('taeEventHandleKey 预期 action://c1050/A0200::anim:200::event:0，实际 ' + key);
     }
 
-    // 负向校验
-    try {
-      validateTaeEventHandle({ ...handle, animId: -1 });
-      fail('animId 为负应报错');
-    } catch {
-      // pass
-    }
+    // 负向校验：断言本身必须在被测调用之外，不能被 catch 当作成功吞掉。
+    assert.throws(
+      () => validateTaeEventHandle({ ...handle, animId: -1 }),
+      { code: 'INVALID_INTEGER' },
+      'animId 为负应报错'
+    );
   }
 
   await withSmokeWorkspace('audit-sf11-unit', async (ws) => {
