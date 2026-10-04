@@ -61,8 +61,13 @@ export function openMigratedDatabase(
     database.pragma(`busy_timeout = ${Math.max(0, options.busyTimeoutMs ?? 5_000)}`);
     if (!options.readonly) database.pragma('journal_mode = WAL');
     assertDatabaseIntegrity(database);
-    if (!options.readonly) applyMigrations(database, migrations);
-    assertDatabaseIntegrity(database);
+    if (!options.readonly) {
+      applyMigrations(database, migrations);
+      // Only a writer may have changed the schema/data after the first check.
+      // A read-only connection performs no migration; scanning the same large
+      // database a second time merely blocks workspace remount/close again.
+      assertDatabaseIntegrity(database);
+    }
     return database;
   } catch (error) {
     database.close();
