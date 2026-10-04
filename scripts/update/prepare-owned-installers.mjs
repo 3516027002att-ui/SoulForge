@@ -99,7 +99,11 @@ export async function prepareOwnedInstallers(options, ports = {}) {
   const timeoutMs = options.timeoutMs ?? 25 * 60_000;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60 * 60_000) throw fail('UPDATE_PREPARE_TIMEOUT_INVALID', 'Timeout must be 100..3600000 milliseconds per leg.');
   await mkdir(outputRoot); // No reuse, removal, or replacement of pre-existing output.
-  const owner = await initializeOwnedTemporaryDirectory('update-installers', outputRoot), cancellation = createProcessCancellation();
+  // Only process/job control state is temporary. Artifacts and their approval
+  // evidence must survive this generator's exit for the separate installed probe.
+  const controlRoot = join(outputRoot, '.process-control');
+  await mkdir(controlRoot);
+  const owner = await initializeOwnedTemporaryDirectory('update-installers', controlRoot), cancellation = createProcessCancellation();
   const configs = {}, artifacts = {}, payloads = {}, commands = [];
   const sameInputs = async () => {
     const after = await capture(repositoryRoot, tools);
@@ -167,7 +171,8 @@ export async function prepareOwnedInstallers(options, ports = {}) {
   } finally {
     cancellation.dispose();
     // Retain owned artifacts and diagnostics for the separate installed probe.
-    // No cleanup of a live/uncertain writer or an unrelated output is inferred.
+    // The generic exit handler reclaims only controlRoot after its ownership and
+    // writer-idle checks. Durable output is never inferred to be disposable.
   }
 }
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from 'node:fs/promises';
 import { join, resolve, isAbsolute } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runProcess } from '../subprocess-control.mjs';
 import { validateInstalledManifest } from './installed-a-to-b.mjs';
 import { prepareOwnedInstallers, inspectOwnedPackage } from './prepare-owned-installers.mjs';
@@ -87,6 +87,58 @@ test('prepare binds current HEAD, two owned metadata versions, actual config/art
     await assert.rejects(() => validateInstalledManifest(manifest, { expectedHeadSha: f.state.headSha }), /APPROVAL_REQUIRED/);
     assert.equal(await validateInstalledManifest({ ...manifest, execute: true }, { expectedHeadSha: f.state.headSha }) instanceof Object, true);
   } finally { await f.dispose(); }
+});
+
+test('independent generator exit retains durable artifacts and failure evidence while control scratch converges', async () => {
+  const moduleUrl = pathToFileURL(join(repositoryRoot, 'scripts/update/prepare-owned-installers.mjs')).href;
+  for (const failBuild of [false, true]) {
+    // Real generator/ownership/exit handling in a separate process. Only the
+    // existing builder/PE/ASAR unit ports are stubbed; no NSIS is built or run.
+    const source = `
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from 'node:fs/promises';
+import { join, resolve, isAbsolute } from 'node:path';
+import { prepareOwnedInstallers } from ${JSON.stringify(moduleUrl)};
+const repositoryRoot = ${JSON.stringify(repositoryRoot)};
+const fixture = ${fixture.toString()};
+const f = await fixture();
+if (${failBuild}) f.deps.runProcess = async request => {
+  f.calls.push(request);
+  return { code: 1, stdout: 'partial output', stderr: 'unit failed builder', timedOut: false, cancelled: false };
+};
+let result, error;
+try { result = await prepareOwnedInstallers(f.options, f.deps); }
+catch (failure) { error = failure.code; process.exitCode = 1; }
+process.stdout.write(JSON.stringify({ root: f.root, outputRoot: f.options.outputRoot,
+  controlRoots: f.calls.map(call => call.owner.root), result, error }) + '\\n');
+`;
+    const child = await runProcess({ command: process.execPath, args: ['--input-type=module', '-e', source],
+      cwd: repositoryRoot, timeoutMs: 10000 });
+    assert.equal(child.code, failBuild ? 1 : 0, child.stderr);
+    assert.doesNotMatch(child.stderr, /OWNED_TEMP_CLEANUP_FAILED/);
+    const produced = JSON.parse(child.stdout);
+    try {
+      if (failBuild) {
+        assert.equal(produced.error, 'UPDATE_PREPARE_BUILD_FAILED');
+        assert.equal(JSON.parse(await readFile(join(produced.outputRoot, 'failure.json'), 'utf8')).code, produced.error);
+        assert.equal(await readFile(join(produced.outputRoot, 'a.stderr.txt'), 'utf8'), 'unit failed builder');
+        await assert.rejects(() => readFile(join(produced.outputRoot, 'manifest.json')), { code: 'ENOENT' });
+      } else {
+        const manifest = JSON.parse(await readFile(produced.result.manifestPath, 'utf8'));
+        const receipt = JSON.parse(await readFile(manifest.buildReceiptPath, 'utf8'));
+        assert.deepEqual(JSON.parse(await readFile(join(produced.outputRoot, 'identity.json'), 'utf8')), manifest.identity);
+        await validateInstalledManifest({ ...manifest, execute: true }, { expectedHeadSha: receipt.sourceHead });
+        for (const label of ['a', 'b']) {
+          assert.equal(hash(await readFile(manifest[label].path)), manifest[label].sha256);
+          assert.equal(hash(await readFile(receipt.configs[label].path)), receipt.configs[label].sha256);
+          assert.match(await readFile(join(produced.outputRoot, `${label}.stdout.txt`), 'utf8'), /unit builder stub/);
+        }
+      }
+      for (const root of produced.controlRoots) {
+        assert.equal(root, join(produced.outputRoot, '.process-control'));
+        await assert.rejects(() => readdir(root), { code: 'ENOENT' });
+      }
+    } finally { await rm(produced.root, { recursive: true, force: true }); }
+  }
 });
 
 test('explicit execution approval binds only fresh generated artifacts and each build uses a new validation identity', async () => {
