@@ -577,6 +577,9 @@ export function createSemanticRefreshService(input: SemanticRefreshDeps) {
                 // invalidated baseline. Decode in place instead of duplicating
                 // a large PARAM/MSG projection during post-commit readback.
                 indexOwnership: 'isolated-candidate',
+                // Match workspace.analyze canonical PARAM rows. Scalar fields stay
+                // available through bounded native read_param_fields/editor reads.
+                referenceFieldsOnly: true,
                 sourceFiles: changedFiles,
                 stagingRoot: deps.durableStoragePaths(session.meta.workspaceId).stagingRoot,
                 allowedRoots: [

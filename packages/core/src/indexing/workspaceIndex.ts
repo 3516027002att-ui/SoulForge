@@ -837,6 +837,19 @@ export class WorkspaceIndex {
   mergeParamRows(value: ParamExport): boolean {
     const key = paramExportKey(value);
     const existing = this.paramExports.find((item) => paramExportKey(item) === key);
+    // A row ID may name multiple physical slots. Unknown identity cannot
+    // select one of those slots or add a synthetic third copy of that row.
+    const physicalIdentityByRow = new Map<string, boolean>();
+    for (const batch of [existing?.rows ?? [], value.rows]) {
+      for (const row of batch) {
+        const rowIndex = paramRowPhysicalIndex(row);
+        if (rowIndex === null) return false;
+        const logicalKey = paramRowLogicalKey(row);
+        const known = rowIndex !== undefined;
+        if (physicalIdentityByRow.has(logicalKey) && physicalIdentityByRow.get(logicalKey) !== known) return false;
+        physicalIdentityByRow.set(logicalKey, known);
+      }
+    }
     if (existing && sameProvidedParamExportMetadata(existing, value)
       && value.rows.every((incoming) => {
         const previous = existing.rows.find((row) => paramRowKey(row) === paramRowKey(incoming));
@@ -870,9 +883,13 @@ export class WorkspaceIndex {
       rows.set(key, mergedRow);
     }
     const mergedRows = [...rows.values()];
-    const sourceHashes = new Set(mergedRows.map((row) => row.sourceHash).filter((item): item is string => Boolean(item)));
-    const outerFileHashes = new Set(mergedRows.map((row) => row.outerFileHash).filter((item): item is string => Boolean(item)));
-    const sourceRevisions = new Set(mergedRows.map((row) => row.sourceRevision).filter((item): item is number => item !== undefined));
+    const sourceHashes = new Set([value.sourceHash, ...mergedRows.map((row) => row.sourceHash)].filter((item): item is string => Boolean(item)));
+    const outerFileHashes = new Set([value.outerFileHash, ...mergedRows.map((row) => row.outerFileHash)].filter((item): item is string => Boolean(item)));
+    const sourceRevisions = new Set([value.sourceRevision, ...mergedRows.map((row) => row.sourceRevision)].filter((item): item is number => item !== undefined));
+    // A partial native read must not erase explicit version conflicts by
+    // omitting the export-level identity. Keep the prior snapshot unchanged;
+    // a source refresh must establish one coherent version before publication.
+    if (sourceHashes.size > 1 || outerFileHashes.size > 1 || sourceRevisions.size > 1) return false;
     return this.upsertParamExport({
       ...(value.sourceUri !== undefined ? { sourceUri: value.sourceUri } : existing?.sourceUri !== undefined ? { sourceUri: existing.sourceUri } : {}),
       ...(value.entryIndex !== undefined ? { entryIndex: value.entryIndex } : existing?.entryIndex !== undefined ? { entryIndex: existing.entryIndex } : {}),
@@ -1892,7 +1909,22 @@ function paramExportKey(value: ParamExport): string {
   return `${sourceUri}\u0000${entryIdentity.toLowerCase()}`;
 }
 
-function paramRowKey(value: Pick<ParamRowSymbol, 'sourceUri' | 'entryName' | 'entryIndex' | 'rowId'>): string {
+function paramRowPhysicalIndex(value: Pick<ParamRowSymbol, 'rowIndex' | 'raw'>): number | undefined | null {
+  const top = value.rowIndex;
+  const raw = isRecord(value.raw) ? value.raw.rowIndex : undefined;
+  if (top !== undefined && (!Number.isSafeInteger(top) || top < 0)) return null;
+  if (raw !== undefined && (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw < 0)) return null;
+  if (top !== undefined && raw !== undefined && top !== raw) return null;
+  return top ?? (typeof raw === 'number' ? raw : undefined);
+}
+
+function paramRowKey(value: Pick<ParamRowSymbol, 'sourceUri' | 'entryName' | 'entryIndex' | 'rowId' | 'rowIndex' | 'raw'>): string {
+  const logicalKey = paramRowLogicalKey(value);
+  const rowIndex = paramRowPhysicalIndex(value);
+  return rowIndex === undefined ? logicalKey : `${logicalKey}\u0000@${rowIndex}`;
+}
+
+function paramRowLogicalKey(value: Pick<ParamRowSymbol, 'sourceUri' | 'entryName' | 'entryIndex' | 'rowId'>): string {
   const entryIdentity = value.entryName
     ?? (value.entryIndex === undefined ? '' : `#${value.entryIndex}`);
   return `${value.sourceUri}\u0000${entryIdentity.toLowerCase()}\u0000${value.rowId}`;

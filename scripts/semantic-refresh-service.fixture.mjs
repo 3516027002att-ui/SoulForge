@@ -182,6 +182,7 @@ test('postcommit scan/analysis/native read/persistence retain source and staging
   assert.equal(analysis.exportNativeMsgResources, false); assert.equal(analysis.inspectNativeResources, false);
   const native = h.calls.find(([name]) => name === 'native')[1]; assert.equal(native.workspaceSessionId, 'owned-session');
   assert.equal(native.indexOwnership, 'isolated-candidate'); assert.equal(native.stagingRoot, '/owned/staging');
+  assert.equal(native.referenceFieldsOnly, true, 'postcommit must retain the initial canonical PARAM projection');
   assert.deepEqual(plain(native.allowedRoots), ['/owned/A', '/owned/base']); assert.equal(h.timers.size, 0);
 });
 test('postcommit deadline keeps committed facts and prevents a late projection', async () => {

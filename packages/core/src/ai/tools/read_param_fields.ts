@@ -101,38 +101,58 @@ export function createReadParamFieldsTool(): RegisteredTool {
                         ...(revisions.size === 1 ? { sourceRevision: [...revisions][0] } : {})
                     };
                 };
-                const exportProvenance = provenanceFor(result.fields);
-                const changed = context.workspaceIndex.mergeParamRows({
-                    paramName: table,
-                    ...exportProvenance,
-                    rows: [...rowsByPhysicalKey.values()].map((bucket) => ({
-                        // Duplicate physical rows must stay addressable: append the
-                        // physical rowIndex to the URI when the native read provided one.
-                        uri: `${sourceUri}#${table}/${bucket.rowId}${bucket.rowIndex === undefined ? '' : `@${bucket.rowIndex}`}`,
+                // A user-facing table alias is not a native child identity. Keep
+                // separate returned entries separate, and retain the existing
+                // outer/child/revision checks in WorkspaceIndex.mergeParamRows.
+                const rowBuckets = [...rowsByPhysicalKey.values()];
+                const rowsByNativeEntry = new Map<string, typeof rowBuckets>();
+                for (const bucket of rowBuckets) {
+                    const key = JSON.stringify([bucket.entryName ?? null, bucket.entryIndex ?? null, bucket.fields[0]!.table]);
+                    const entryRows = rowsByNativeEntry.get(key) ?? [];
+                    entryRows.push(bucket);
+                    rowsByNativeEntry.set(key, entryRows);
+                }
+                let changed = false;
+                for (const entryRows of rowsByNativeEntry.values()) {
+                    const nativeEntry = entryRows[0]!;
+                    const nativeTable = nativeEntry.fields[0]!.table;
+                    const exportProvenance = provenanceFor(entryRows.flatMap((bucket) => bucket.fields));
+                    const accepted = context.workspaceIndex.mergeParamRows({
                         sourceUri,
-                        paramName: table,
-                        ...(bucket.entryName ? { entryName: bucket.entryName } : {}),
-                        ...(bucket.entryIndex !== undefined ? { entryIndex: bucket.entryIndex } : {}),
-                        rowId: bucket.rowId,
-                        ...(bucket.rowIndex === undefined ? {} : { rowIndex: bucket.rowIndex }),
-                        ...(bucket.dataHash ? { dataHash: bucket.dataHash } : {}),
-                        ...(bucket.rowName ? { rowName: bucket.rowName } : {}),
-                        ...provenanceFor(bucket.fields),
-                        fields: bucket.fields.map((field) => {
-                            const parsedRefs = field.refs ? parseParamFieldRefs(field.refs) : undefined;
-                            return {
-                                ...(field.fieldId ? { fieldId: field.fieldId } : {}),
-                                name: field.displayName ?? field.fieldId,
-                                ...(field.description ? { description: field.description } : {}),
-                                value: field.value,
-                                // Trusted-metadata provenance only: the refs string came from
-                                // the same native document read as the row bytes.
-                                ...(parsedRefs && parsedRefs.targets.length > 0 ? { refs: parsedRefs.targets, refsProvenance: 'trusted-metadata' as const } : {}),
-                                ...(parsedRefs && parsedRefs.rejected.length > 0 ? { refsRejected: parsedRefs.rejected, refsProvenance: 'trusted-metadata' as const } : {})
-                            };
-                        })
-                    }))
-                });
+                        paramName: nativeTable,
+                        ...(nativeEntry.entryName ? { entryName: nativeEntry.entryName } : {}),
+                        ...(nativeEntry.entryIndex !== undefined ? { entryIndex: nativeEntry.entryIndex } : {}),
+                        ...exportProvenance,
+                        rows: entryRows.map((bucket) => ({
+                            // Duplicate physical rows must stay addressable: append the
+                            // physical rowIndex to the URI when the native read provided one.
+                            uri: `${sourceUri}#${nativeTable}/${bucket.rowId}${bucket.rowIndex === undefined ? '' : `@${bucket.rowIndex}`}`,
+                            sourceUri,
+                            paramName: nativeTable,
+                            ...(bucket.entryName ? { entryName: bucket.entryName } : {}),
+                            ...(bucket.entryIndex !== undefined ? { entryIndex: bucket.entryIndex } : {}),
+                            rowId: bucket.rowId,
+                            ...(bucket.rowIndex === undefined ? {} : { rowIndex: bucket.rowIndex }),
+                            ...(bucket.dataHash ? { dataHash: bucket.dataHash } : {}),
+                            ...(bucket.rowName ? { rowName: bucket.rowName } : {}),
+                            ...provenanceFor(bucket.fields),
+                            fields: bucket.fields.map((field) => {
+                                const parsedRefs = field.refs ? parseParamFieldRefs(field.refs) : undefined;
+                                return {
+                                    ...(field.fieldId ? { fieldId: field.fieldId } : {}),
+                                    name: field.displayName ?? field.fieldId,
+                                    ...(field.description ? { description: field.description } : {}),
+                                    value: field.value,
+                                    // Trusted-metadata provenance only: the refs string came from
+                                    // the same native document read as the row bytes.
+                                    ...(parsedRefs && parsedRefs.targets.length > 0 ? { refs: parsedRefs.targets, refsProvenance: 'trusted-metadata' as const } : {}),
+                                    ...(parsedRefs && parsedRefs.rejected.length > 0 ? { refsRejected: parsedRefs.rejected, refsProvenance: 'trusted-metadata' as const } : {})
+                                };
+                            })
+                        }))
+                    });
+                    changed = accepted || changed;
+                }
                 if (changed) {
                     context.workspaceIndex.rebuildReferences();
                     await context.onSemanticEvidenceUpdated?.([sourceUri]);
