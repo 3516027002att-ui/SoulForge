@@ -83,6 +83,12 @@ test('SFBN fixture enumeration retains its existing fixture reader',async()=>{
 test('DCX-wrapped SFBN retains fixture enumeration after the native format refusal',async()=>{
  const h=harness({header:Buffer.from('DCX\0owned'),bridge:()=>({parseStatus:'failed',diagnostics:[{severity:'error',code:'DCX_DOCUMENT_READ_FAILED',message:'Native BND4 header unsupported'}]})});const out=await h.invoke('listContainerChildrenPage',uri,0,100);assert.equal(out.ok,true);assert.equal(out.totalCount,205);assert.equal(h.calls.filter(([n])=>n==='list').length,1);
 });
+test('native DCX payload prefix preserves a wrapped SFBN BND3 fixture',async()=>{
+ const h=harness({header:Buffer.from('DCX\0owned'),bridge:()=>({parseStatus:'partial',diagnostics:[],data:{format:'DCX',payloadPrefixHex:'424e44335346424e01000000'}})});const out=await h.invoke('listContainerChildrenPage',uri,0,100);assert.equal(out.totalCount,205);assert.equal(h.calls.filter(([n])=>n==='list').length,1);
+});
+test('empty native DCX payload does not trigger another full fixture scan',async()=>{
+ const h=harness({nativeFallback:true,bridge:()=>({parseStatus:'partial',diagnostics:[],data:{format:'DCX',payloadPrefixHex:'464c564552000000'}})});const out=await h.invoke('listContainerChildrenPage',uri,0,100);assert.equal(out.ok,true);assert.equal(out.totalCount,0);assert.equal(h.calls.some(([n])=>n==='list'||n==='readFile'),false);
+});
 test('native format failure stays a failure when the fixture reader has no children',async()=>{
  const h=harness({nativeFallback:true,bridge:()=>({parseStatus:'failed',diagnostics:[{severity:'error',code:'DCX_DOCUMENT_READ_FAILED',message:'Native header unsupported'}]})});const out=await h.invoke('listContainerChildrenPage',uri,0,100);assert.equal(out.ok,false);assert.equal(out.diagnostics[0].code,'DCX_DOCUMENT_READ_FAILED');
 });

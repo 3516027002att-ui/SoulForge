@@ -159,8 +159,8 @@ async function loadContainerChildrenTable(
   }
   const native = await enumerateNativeContainerEntries(file.absolutePath, sourceUri,
     allowedRoots ?? [dirname(file.absolutePath)], kind);
-  if (kind === 'dcx' && !native.ok
-    && native.diagnostics.some(diagnostic => diagnostic.code === 'DCX_DOCUMENT_READ_FAILED')) {
+  if (kind === 'dcx' && (native.fixturePayload === true || (!native.ok
+    && native.diagnostics.some(diagnostic => diagnostic.code === 'DCX_DOCUMENT_READ_FAILED')))) {
     // A valid DCX may wrap an SFBN fixture, whose binder layout is deliberately
     // outside native authority. Only the existing fixture reader can confirm
     // nonempty children; failed/empty native containers and permission refusals
@@ -172,7 +172,7 @@ async function loadContainerChildrenTable(
       return { ok: true, children: fixture.children, diagnostics: fixture.diagnostics };
     }
   }
-  return native;
+  return { ok: native.ok, children: native.children, diagnostics: native.diagnostics };
 }
 
 /** Complete native entry table, projected to logical names and read-only capabilities. */
@@ -185,8 +185,9 @@ async function enumerateNativeContainerEntries(
   ok: boolean;
   children: CachedContainerChildren;
   diagnostics: StructuredDiagnostic[];
+  fixturePayload?: boolean;
 }> {
-  const result = await runBridge<NativeDcxEnvelopeLike & NativeBnd4DocumentLike>({
+  const result = await runBridge<NativeDcxEnvelopeLike & NativeBnd4DocumentLike & { payloadPrefixHex?: string }>({
     command: kind === 'bnd4' ? 'list-bnd4-entries' : 'read-dcx-document',
     filePath: absolutePath,
     resourceUri: 'file:///' + absolutePath.replace(/\\/g, '/'),
@@ -199,10 +200,12 @@ async function enumerateNativeContainerEntries(
   }
   const entries = (kind === 'bnd4' ? result.data?.entries : result.data?.nested?.entries) ?? [];
   if (entries.length === 0) {
-    return { ok: true, children: [], diagnostics: [{
-      severity: 'info', code: 'BND_NATIVE_ENUMERATION_EMPTY',
-      message: 'Bridge returned no native BND4 entries; the payload may not be BND4.', sourceUri
-    }] };
+    return { ok: true, children: [],
+      fixturePayload: kind === 'dcx' && /^424e443[34]5346424e/i.test(result.data?.payloadPrefixHex ?? ''),
+      diagnostics: [{
+        severity: 'info', code: 'BND_NATIVE_ENUMERATION_EMPTY',
+        message: 'Bridge returned no native BND4 entries; the payload may not be BND4.', sourceUri
+      }] };
   }
   const seen = new Set<string>();
   const children = entries.map((entry) => {
