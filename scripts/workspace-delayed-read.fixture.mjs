@@ -75,7 +75,7 @@ for(const [domain,register,clear,channel,extension,args,field] of [
  ['param','registerParamIpcHandlers','clearParamIpcCaches','resource.openParamSession','.param',null,'sourceHash'],
  ['raw','registerRawIpcHandlers','clearRawIpcCaches','resource.listScriptContainerEntriesPage','.luabnd.dcx',[0,100],'scripts'],
  ['event','registerEventIpcHandlers','clearEmevdIpcCaches','resource.readEmevdDocument','.emevd',[],'dataHash'],
-])for(const phase of ['roots','native'])test(`${domain} ${channel} cannot publish a delayed ${phase} read into a replacement workspace`,async()=>{
+])for(const phase of ['roots','native'])test(`${domain} ${channel}${channel==='resource.readParamPage'?(args[3]===true?' with payloads':' without payloads'):''} cannot publish a delayed ${phase} read into a replacement workspace`,async()=>{
  const root=await mkdtemp(join(tmpdir(),'sf-delayed-read-'));const state=fixtureState(extension);globalThis[symbol]=state;
  try{
   const module=await bundle(domain,root);module[register](state.deps);const read=state.handlers.get(channel);
