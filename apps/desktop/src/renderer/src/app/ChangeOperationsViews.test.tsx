@@ -51,3 +51,30 @@ it('operations workbench projects logical receipts and keeps diagnostics/source 
   assert.equal(element.props.rollbackBusyOpId, 'owned-op'); assert.deepEqual(element.props.jobs, []); assert.deepEqual(element.props.diagnostics, []);
   assert.equal(element.props.onCancelJob, cancel); await element.props.onRollback?.('owned-op'); assert.deepEqual(p.calls, [['rollback','owned-op']]);
 });
+it('partial rollback keeps only the remaining file actionable and preserves the original audit paths', async () => {
+  const p = ports();
+  p.operations.operationHistory = [{ opId: 'owned-op', title: 'Two-file operation', mode: 'normal', status: 'committed',
+    author: 'user', createdAt: 'owned-time', fileCount: 2, changedPaths: ['file://first.txt', 'file://second.txt'],
+    partialRollback: { rolledBackPaths: ['file://first.txt'] } }];
+  const props: ComponentProps<typeof ChangeOperationsSidebarViews> = { operations: p.operations, sidebarView: 'audit', hasWorkspace: true, closeButton: null };
+  const html = renderToStaticMarkup(<ChangeOperationsSidebarViews {...props} />);
+  assert.match(html, /部分回滚/); assert.match(html, /已回滚/);
+  assert.match(html, /无法再整项回滚。请回滚剩余文件/);
+  assert.match(html, /file:\/\/first.txt/); assert.match(html, /file:\/\/second.txt/);
+  const buttons = elements(ChangeOperationsSidebarViews(props)).filter(n => n.type === 'button');
+  assert.equal(buttons.length, 2, 'refresh and remaining-file rollback only; whole-operation and restored-file controls stay hidden');
+  assert.ok(isValidElement<{onClick():void}>(buttons[1]));
+  await buttons[1].props.onClick();
+  assert.deepEqual(p.calls, [['file', 'owned-op', 'file://second.txt']]);
+});
+it('operations workbench does not offer a whole rollback after a partial inverse', () => {
+  const p = ports();
+  p.operations.operationHistory = [{ opId: 'owned-op', title: 'Partial operation', mode: 'normal', status: 'committed',
+    author: 'user', createdAt: 'owned-time', fileCount: 2, changedPaths: ['file://first.txt', 'file://second.txt'],
+    partialRollback: { rolledBackPaths: ['file://first.txt'] } }];
+  const element = OperationsWorkbenchView({ operations: p.operations, preview: null, onCancelJob() {} });
+  assert.ok(isValidElement<ComponentProps<typeof WorkbenchOpsPanel>>(element));
+  const entry = element.props.history[0]; assert.ok(entry);
+  assert.equal(entry.canRollback, false);
+  assert.match(entry.summary, /请在审计面板回滚剩余文件/);
+});

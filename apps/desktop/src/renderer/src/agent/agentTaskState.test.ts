@@ -61,6 +61,32 @@ import {
 
 const SESSION = 'session-0001';
 
+it('a later file header remains a header after the previous file hunk was truncated', () => {
+  const lines = classifyDiffLines('diff --git a/a.txt b/a.txt\n--- a.txt\n+++ a.txt\n@@ -1 +1,600 @@\n-old\n+new\ndiff --git a/b.txt b/b.txt\n--- b.txt\n+++ b.txt\n@@ -1 +1 @@\n-before\n+after');
+  assert.equal(lines.find(line => line.text === '--- b.txt')?.kind, 'header');
+  assert.equal(lines.find(line => line.text === '+++ b.txt')?.kind, 'header');
+});
+
+it('shows all multi-file targets and contents when the host cannot produce a diff', () => {
+  const preview = extractApprovalPreview(JSON.stringify({
+    targetPath: 'irrelevant-flat.txt', newText: 'irrelevant flat content',
+    changes: [
+      { targetPath: 'mods/a.txt', structuredEdit: { newText: 'first content' } },
+      { targetPath: 'mods/b.txt', structuredEdit: { newText: 'second content' } },
+      { targetPath: 'mods/c.bin', structuredEdit: { schemaId: 'rawFileReplaceBase64' } }
+    ]
+  }));
+  assert.equal(preview?.changeCount, 3);
+  for (const filename of ['mods/a.txt', 'mods/b.txt', 'mods/c.bin']) {
+    assert.ok(preview?.targetPath?.includes(filename), filename);
+    assert.ok(preview?.newText?.includes(filename), filename);
+  }
+  assert.ok(preview?.newText?.includes('first content'));
+  assert.ok(preview?.newText?.includes('second content'));
+  assert.ok(preview?.newText?.includes('原始参数'));
+  assert.ok(!preview?.newText?.includes('irrelevant flat content'));
+});
+
 /** 按顺序折叠一串事件，模拟推送到达。 */
 function feed(state: AgentTaskState, ...events: AgentTaskEventEnvelope['event'][]): AgentTaskState {
   return events.reduce(

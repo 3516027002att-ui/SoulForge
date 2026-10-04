@@ -61,7 +61,7 @@ export function ChangeOperationsSidebarViews({ operations, sidebarView, hasWorks
                   >
                     <div className="audit-entry__title">{entry.title}</div>
                     <div className="audit-entry__meta">
-                      <span className={`op-status op-status-${entry.status}`}>{operationStatusLabel(entry.status)}</span>
+                      <span className={`op-status op-status-${entry.status}`}>{entry.partialRollback ? '部分回滚' : operationStatusLabel(entry.status)}</span>
                       <span>{entry.fileCount} 个文件 · {entry.committedAt ?? entry.createdAt}</span>
                     </div>
                     <div className="audit-entry__meta" title={entry.changedPaths.join('\n')}>
@@ -72,20 +72,22 @@ export function ChangeOperationsSidebarViews({ operations, sidebarView, hasWorks
                     </div>
                     {entry.status === 'committed' && (
                       <div className="audit-entry__actions">
-                        <button
+                        {entry.partialRollback ? (
+                          <span className="muted">部分内容已回滚，无法再整项回滚。请回滚剩余文件。</span>
+                        ) : <button
                           type="button"
                           className="btn btn--ghost btn--sm"
                           disabled={rollbackInFlight === `operation:${entry.opId}`}
                           onClick={() => void rollbackOp(entry.opId)}
                         >
                           {rollbackInFlight === `operation:${entry.opId}` ? '回滚中…' : '回滚'}
-                        </button>
+                        </button>}
                         <details className="audit-entry__files">
                           <summary>文件级回滚（{entry.fileCount}）</summary>
                           {entry.changedPaths.map((path) => (
                             <div key={`${entry.opId}:${path}`} className="audit-entry__file">
                               <span className="audit-entry__file-path" title={path}>{shortenPath(path)}</span>
-                              {path === '[本机路径已隐藏]' ? null : (
+                              {entry.partialRollback?.rolledBackPaths.includes(path) ? <span className="muted">已回滚</span> : path === '[本机路径已隐藏]' ? null : (
                                 <button
                                   type="button"
                                   className="btn btn--ghost btn--sm"
@@ -119,10 +121,10 @@ export function OperationsWorkbenchView({ operations, preview, onCancelJob }: {
                 opId: entry.opId,
                 status: entry.status,
                 mode: entry.mode,
-                summary: entry.title,
+                summary: entry.partialRollback ? `${entry.title} · 部分回滚（请在审计面板回滚剩余文件）` : entry.title,
                 createdAt: entry.createdAt,
                 fileCount: entry.fileCount,
-                canRollback: entry.status === 'committed'
+                canRollback: entry.status === 'committed' && !entry.partialRollback
               }))}
               rollbackBusyOpId={rollbackInFlight?.startsWith('operation:')
                 ? rollbackInFlight.slice('operation:'.length)

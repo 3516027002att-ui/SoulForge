@@ -49,7 +49,7 @@ async function harness(options = {}) {
   registry.register({ name: 'inspect_owned', description: 'Read owned fixture state.', permission: 'read', proofPolicy: 'none', inputSchema: {},
     run: async (_input, context) => { calls.push(['readTool', context]); return options.read ? options.read(context) : { ok: true, content: '{"owned":true}' }; } });
   registry.register({ name: 'commit_owned', description: 'Commit owned fixture state.', permission: 'commit', proofPolicy: 'none', inputSchema: {},
-    run: async (_input, context) => { calls.push(['commitTool', context]); return options.commit ? options.commit(context) : { ok: true, content: '{"committed":true,"opId":"owned-op"}' }; } });
+    run: async (_input, context) => { calls.push(['commitTool', context, _input]); return options.commit ? options.commit(context) : { ok: true, content: '{"committed":true,"opId":"owned-op"}' }; } });
   registry.register({ name: 'rollback_operation', description: 'Owned rollback dialogue fixture.', permission: 'rollback', proofPolicy: 'none', inputSchema: {},
     run: async () => { calls.push(['rollbackTool']); return { ok: true, data: {} }; } });
   const utility = { openAppDatabase: async value => { calls.push(['openAppDatabase', value]); if (options.usageError) throw options.usageError; },
@@ -270,6 +270,85 @@ test('normal approval rejection and cancellation leave the writer undispatched',
       else await h.invoke('ai.agent.approval.respond', { sessionId: accepted.sessionId, callId: 'owned-call', decision: 'reject' });
       await h.waitEvent('session-done'); assert.equal(h.calls.filter(([name]) => name === 'commitTool').length, 0);
     } finally { await h.close(); } }
+});
+
+test('multi-file approval previews every text change and approves the original complete proposal', { timeout: 5000 }, async () => {
+  const proposal = { changes: [
+    { targetPath: 'a.txt', structuredEdit: { newText: 'after a\n' } },
+    { targetPath: 'b.txt', structuredEdit: { newText: 'after b\n' } }
+  ] };
+  const argumentsJson = JSON.stringify(proposal); let first = true, resolvedArguments, resolvedDiff;
+  const paths = [];
+  const h = await harness({
+    complete: async () => {
+      if (!first) return response('Owned multi-file call completed.');
+      first = false; const call = ownedCall('commit_owned'); call.message.toolCalls[0].argumentsJson = argumentsJson; return call;
+    },
+    runner: async params => {
+      h.switchWorkspace({ meta: { workspaceId: 'owned', game: 'sekiro' }, layers: { overlayRoot: h.owned },
+        resolveWritablePathSecure: async (target, layer) => {
+          paths.push([target, layer]); assert.ok(['a.txt', 'b.txt'].includes(target));
+          return { ok: true, absolutePath: path.join(h.owned, target) };
+        } }, null);
+      return realCore.runAgentSession({ ...params, resolveApprovalDiff: async input => {
+        resolvedArguments = input.argumentsJson; resolvedDiff = await params.resolveApprovalDiff(input); return resolvedDiff;
+      } });
+    }
+  });
+  try {
+    await fs.promises.writeFile(path.join(h.owned, 'a.txt'), 'before a\n');
+    await fs.promises.writeFile(path.join(h.owned, 'b.txt'), 'before b\n');
+    const accepted = await h.request('normal'); const { event } = await h.waitEvent('approval-requested');
+    assert.deepEqual(paths, [['a.txt', 'overlay'], ['b.txt', 'overlay']]);
+    assert.equal(resolvedArguments, argumentsJson);
+    for (const filename of ['a.txt', 'b.txt']) {
+      assert.ok(resolvedDiff.targetPath.includes(filename)); assert.ok(event.diff.unifiedDiff.includes(filename));
+    }
+    for (const text of ['before a', 'after a', 'before b', 'after b']) assert.ok(event.diff.unifiedDiff.includes(text), text);
+    assert.equal(event.diff.addedLines, 2); assert.equal(event.diff.removedLines, 2);
+    assert.equal(h.calls.filter(([kind]) => kind === 'commitTool').length, 0);
+    await h.invoke('ai.agent.approval.respond', { sessionId: accepted.sessionId, callId: 'owned-call', decision: 'once' });
+    await h.waitEvent('session-done');
+    const commits = h.calls.filter(([kind]) => kind === 'commitTool'); assert.equal(commits.length, 1);
+    assert.deepEqual(plain(commits[0][2]), proposal);
+  } finally { await h.close(); }
+});
+
+test('truncated approval diffs retain later targets and disclose unreadable or non-text changes', { timeout: 5000 }, async () => {
+  const longText = Array.from({ length: 600 }, (_value, index) => `line ${index}`).join('\n');
+  const argumentsJson = JSON.stringify({ changes: [
+    { targetPath: 'a.txt', structuredEdit: { newText: longText } },
+    { targetPath: 'b.txt', structuredEdit: { newText: 'visible later change' } },
+    { targetPath: 'binary.bin', structuredEdit: { schemaId: 'rawFileReplaceBase64', contentBase64: 'AQI=' } },
+    { targetPath: 'denied.txt', structuredEdit: { newText: 'must not read' } },
+    { targetPath: 'unreadable.txt', structuredEdit: { newText: 'must not claim a new file' } }
+  ] });
+  let preview; const paths = [];
+  const h = await harness({ runner: async params => {
+    h.switchWorkspace({ meta: { workspaceId: 'owned', game: 'sekiro' }, layers: { overlayRoot: h.owned },
+      resolveWritablePathSecure: async target => {
+        paths.push(target);
+        if (target === 'denied.txt') return { ok: false, diagnostics: [{ code: 'WRITE_OUTSIDE_OVERLAY' }] };
+        return { ok: true, absolutePath: target === 'unreadable.txt' ? h.owned : path.join(h.owned, target) };
+      } }, null);
+    preview = await params.resolveApprovalDiff({ toolName: 'commit_owned', argumentsJson });
+    return realCore.runAgentSession(params);
+  } });
+  try {
+    await fs.promises.writeFile(path.join(h.owned, 'a.txt'), 'old a');
+    await fs.promises.writeFile(path.join(h.owned, 'b.txt'), 'old b');
+    await h.request(); await h.waitEvent('session-done');
+    for (const filename of ['a.txt', 'b.txt', 'binary.bin', 'denied.txt', 'unreadable.txt']) {
+      assert.ok(preview.targetPath.includes(filename), filename); assert.ok(preview.unifiedDiff.includes(filename), filename);
+    }
+    assert.ok(preview.unifiedDiff.includes('visible later change'));
+    assert.ok(preview.truncatedNote.includes('a.txt')); assert.ok(preview.truncatedNote.includes('binary.bin'));
+    assert.ok(preview.truncatedNote.includes('denied.txt')); assert.ok(preview.truncatedNote.includes('unreadable.txt'));
+    assert.equal(preview.addedLines, 601); assert.equal(preview.removedLines, 2);
+    assert.equal(preview.newFile, false, 'failed reads must not be labeled as new files');
+    assert.ok(paths.includes('denied.txt')); assert.ok(paths.includes('unreadable.txt'));
+    assert.equal(h.calls.filter(([kind]) => kind === 'commitTool').length, 0);
+  } finally { await h.close(); }
 });
 test('event replay is sender-bound, ordered and rejects invalid sequence inputs', async () => {
   const h = await harness(); try { const accepted = await h.request(); await h.waitEvent('session-done');

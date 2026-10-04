@@ -309,6 +309,8 @@ export type RendererPatchHistoryEntry = Omit<
   'workspaceId' | 'changedPaths'
 > & {
   changedPaths: string[];
+  /** Logical labels restored by committed file inverses; original audit paths remain intact. */
+  partialRollback?: { rolledBackPaths: string[] };
 };
 
 export type NativeWindowThemeMode = 'opal' | 'obsidian';

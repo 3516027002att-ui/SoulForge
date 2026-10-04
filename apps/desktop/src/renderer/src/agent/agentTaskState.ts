@@ -141,6 +141,11 @@ export function classifyDiffLines(unifiedDiff: string): DiffLineView[] {
   let afterHeaderIndex = -1;
 
   return lines.map((text, index) => {
+    if (text.startsWith('diff --git ')) {
+      oldRemaining = 0;
+      newRemaining = 0;
+      return { kind: 'header' as const, text };
+    }
     if (text.startsWith('@@')) {
       const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(text);
       oldRemaining = hunk === null ? 0 : Number(hunk[1] ?? 1);
@@ -231,6 +236,21 @@ export function extractApprovalPreview(argumentsJson: string): AgentApprovalPrev
   const record = parsed as Record<string, unknown>;
 
   const changes = Array.isArray(record.changes) ? record.changes : null;
+  if (changes !== null && changes.length > 1) {
+    const files = changes.map((value, index) => {
+      const change = typeof value === 'object' && value !== null && !Array.isArray(value)
+        ? value as Record<string, unknown> : {};
+      const label = pickString(change.targetPath) ?? pickString(change.targetUri) ?? `(change ${index + 1})`;
+      const edit = typeof change.structuredEdit === 'object' && change.structuredEdit !== null
+        ? change.structuredEdit as Record<string, unknown> : null;
+      return { label, text: typeof edit?.newText === 'string' ? edit.newText : '文本预览不可用，请查看原始参数。' };
+    });
+    return {
+      targetPath: files.map(file => file.label).join('、'), targetUri: null,
+      newText: files.map(file => `${file.label}\n${file.text}`).join('\n\n'),
+      truncatedBytes: 0, changeCount: changes.length
+    };
+  }
   const firstChange = changes?.[0];
   const changeRecord = typeof firstChange === 'object' && firstChange !== null
     ? firstChange as Record<string, unknown>

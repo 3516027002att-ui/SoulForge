@@ -523,69 +523,71 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
           if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
           const record = parsed as Record<string, unknown>;
 
-          // 两种形态都支持:propose_text_patch 的平铺字段,与 PatchProposal 的
-          // changes[0]。只取第一条 —— 一次审批对应一个具体动作。
+          // A PatchProposal approves its entire changes array. Preserve every
+          // target in the preview, including changes without a text diff.
           const changes = Array.isArray(record.changes) ? record.changes : null;
-          const firstChange = typeof changes?.[0] === 'object' && changes[0] !== null
-            ? changes[0] as Record<string, unknown>
-            : null;
-          const structuredEdit = typeof firstChange?.structuredEdit === 'object'
-            && firstChange.structuredEdit !== null
-            ? firstChange.structuredEdit as Record<string, unknown>
-            : null;
-
-          const targetPath = typeof record.targetPath === 'string' && record.targetPath !== ''
-            ? record.targetPath
-            : typeof firstChange?.targetPath === 'string' ? firstChange.targetPath : '';
-          const afterText = typeof record.newText === 'string'
-            ? record.newText
-            : typeof structuredEdit?.newText === 'string' ? structuredEdit.newText : null;
-          if (targetPath === '' || afterText === null) return null;
-          if (!deps.getActiveSession()) return null;
-
-          // 用 Secure 版而不是同步版：同步 resolveWritablePath 的注释写明它只是
-          // **词法预检**，权威检查是 resolveWritablePathSecure（会解析 junction 与
-          // symlink）。工作区外路径由权威机制拒绝，不该因为「只是预览」就放宽。
-          const _sessDiff = deps.getActiveSession();
-          if (!_sessDiff) return null;
-          const writable = await _sessDiff.resolveWritablePathSecure(targetPath, 'overlay');
-          if (!writable.ok || typeof writable.absolutePath !== 'string') return null;
-          const resolvedPath = writable.absolutePath;
-
-          let beforeText = '';
-          let newFile = false;
-          try {
-            beforeText = await readFile(resolvedPath, 'utf8');
-          } catch {
-            // 目标不存在:整篇都是新增。这与「读失败」在界面上必须可区分,
-            // 故用 newFile 标记而不是静默当成空文件对比。
-            newFile = true;
+          const targets = changes?.length ? changes : [record];
+          const session = deps.getActiveSession();
+          if (!session) return null;
+          const previews: Array<ApprovalDiff & { unavailable?: string }> = [];
+          const notes: string[] = [];
+          // Share the text budget across files so a large first file cannot
+          // remove subsequent files from the approval surface.
+          const maxLinesPerFile = Math.max(4, Math.floor(400 / targets.length));
+          for (const [index, value] of targets.entries()) {
+            const change = typeof value === 'object' && value !== null && !Array.isArray(value)
+              ? value as Record<string, unknown> : {};
+            const targetPath = typeof change.targetPath === 'string' && change.targetPath !== ''
+              ? change.targetPath : `(第 ${index + 1} 项：目标不可用)`;
+            const structuredEdit = typeof change.structuredEdit === 'object' && change.structuredEdit !== null
+              ? change.structuredEdit as Record<string, unknown> : null;
+            const afterText = targets === changes
+              ? typeof structuredEdit?.newText === 'string' ? structuredEdit.newText : null
+              : typeof record.newText === 'string' ? record.newText : null;
+            const unavailable = (reason: string) => {
+              previews.push({ targetPath, unifiedDiff: `# ${targetPath}\n# 文本预览不可用：${reason}。请查看原始参数。`,
+                addedLines: 0, removedLines: 0, newFile: false, unavailable: reason });
+              notes.push(`${targetPath}：${reason}；行数统计仅包含可用的文本差异。`);
+            };
+            if (typeof change.targetPath !== 'string' || change.targetPath === '') {
+              unavailable('缺少目标路径'); continue;
+            }
+            if (afterText === null) { unavailable('非文本改动'); continue; }
+            // Secure resolution enforces the opened-workspace boundary for
+            // every read, including junction/symlink and root authorization.
+            let writable: Awaited<ReturnType<WorkspaceSession['resolveWritablePathSecure']>>;
+            try { writable = await session.resolveWritablePathSecure(targetPath, 'overlay'); }
+            catch { unavailable('无法解析目标'); continue; }
+            if (!writable.ok || typeof writable.absolutePath !== 'string') {
+              unavailable('目标未通过安全路径校验'); continue;
+            }
+            let beforeText = '';
+            let newFile = false;
+            try { beforeText = await readFile(writable.absolutePath, 'utf8'); }
+            catch (error) {
+              if ((error as NodeJS.ErrnoException).code === 'ENOENT') newFile = true;
+              else { unavailable('无法读取当前文件'); continue; }
+            }
+            const unifiedDiff = createUnifiedDiff(beforeText, afterText, {
+              fromFile: newFile ? '(新文件)' : targetPath, toFile: targetPath
+            });
+            const lines = unifiedDiff.split('\n');
+            const { addedLines, removedLines } = countGeneratedTextDiffLines(lines);
+            if (lines.length > maxLinesPerFile) {
+              notes.push(`${targetPath}：diff 共 ${lines.length} 行，此处显示前 ${maxLinesPerFile} 行；完整文本差异为 +${addedLines} / -${removedLines} 行。`);
+            }
+            previews.push({ targetPath, unifiedDiff: lines.slice(0, maxLinesPerFile).join('\n'), addedLines, removedLines, newFile });
           }
-
-          const unifiedDiff = createUnifiedDiff(beforeText, afterText, {
-            fromFile: newFile ? '(新文件)' : targetPath,
-            toFile: targetPath
-          });
-          const lines = unifiedDiff.split('\n');
-          const { addedLines, removedLines } = countGeneratedTextDiffLines(lines);
-
-          // 上限:几千行的 diff 会把审批卡片变成读不完的墙,而读不完的 diff 等于
-          // 没有 diff。截断必须显式说明截了多少,否则用户会以为改动就这么点。
-          const MAX_DIFF_LINES = 400;
-          const truncated = lines.length > MAX_DIFF_LINES;
-
+          if (previews.length === 1 && previews[0]!.unavailable) return null;
           return {
-            targetPath,
-            unifiedDiff: truncated ? lines.slice(0, MAX_DIFF_LINES).join('\n') : unifiedDiff,
-            addedLines,
-            removedLines,
-            newFile,
-            ...(truncated
-              ? {
-                  truncatedNote: `diff 共 ${lines.length} 行，此处只显示前 ${MAX_DIFF_LINES} 行；`
-                    + `完整改动为 +${addedLines} / -${removedLines} 行。`
-                }
-              : {})
+            targetPath: previews.map(preview => preview.targetPath).join('、'),
+            unifiedDiff: previews.map(preview => previews.length > 1
+              ? `diff --git ${JSON.stringify('a/' + preview.targetPath)} ${JSON.stringify('b/' + preview.targetPath)}\n${preview.unifiedDiff}`
+              : preview.unifiedDiff).join('\n\n'),
+            addedLines: previews.reduce((total, preview) => total + preview.addedLines, 0),
+            removedLines: previews.reduce((total, preview) => total + preview.removedLines, 0),
+            newFile: previews.some(preview => preview.newFile),
+            ...(notes.length ? { truncatedNote: notes.join('\n') } : {})
           };
         };
 

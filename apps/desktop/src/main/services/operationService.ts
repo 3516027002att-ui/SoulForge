@@ -84,14 +84,34 @@ export function createOperationService(input: OperationServiceDeps) {
         const history = await owner.log.history(owner.workspaceId);
         if (!owner.isCurrent())
             return [];
-        const reversedOperationIds = new Set(history
-            .filter((entry) => entry.status === 'committed' && entry.inverseOfOpId)
-            .map((entry) => entry.inverseOfOpId!));
-        // 逆事务属于实现细节，不作为第二条逻辑历史展示；原操作保留并标记为
-        // rolled_back。这样 UI 不会给 inverseOfOpId/rollbackScope 再渲染回滚按钮。
+        const inverses = new Map<string, { wholeOperation: boolean; filePaths: Set<string> }>();
+        for (const entry of history) {
+            if (entry.status !== 'committed' || !entry.inverseOfOpId)
+                continue;
+            const inverse = inverses.get(entry.inverseOfOpId) ?? { wholeOperation: false, filePaths: new Set<string>() };
+            // Unscoped legacy inverses were whole-operation rollbacks.
+            if (!entry.rollbackScope || entry.rollbackScope === 'operation')
+                inverse.wholeOperation = true;
+            else if (entry.rollbackScope === 'file')
+                entry.changedPaths.forEach(path => inverse.filePaths.add(path));
+            inverses.set(entry.inverseOfOpId, inverse);
+        }
+        // Keep inverse transactions out of the logical history. Only complete
+        // reversal marks the original rolled_back; partial file state stays actionable.
         return history
             .filter((entry) => !entry.inverseOfOpId && !entry.rollbackScope)
-            .map((entry) => toRendererHistoryEntry(reversedOperationIds.has(entry.opId) ? { ...entry, status: 'rolled_back' } : entry, owner.receiptFiles));
+            .map((entry) => {
+                const inverse = inverses.get(entry.opId);
+                // Compare physical identities before masking: hidden labels can be identical.
+                const fullyReversed = inverse?.wholeOperation || (entry.fileCount > 0
+                    && entry.changedPaths.length === entry.fileCount
+                    && entry.changedPaths.every(path => inverse?.filePaths.has(path)));
+                const projected = toRendererHistoryEntry(fullyReversed ? { ...entry, status: 'rolled_back' } : entry, owner.receiptFiles);
+                if (inverse && projected.status === 'committed') {
+                    projected.partialRollback = { rolledBackPaths: projected.changedPaths.filter((_path, index) => inverse.filePaths.has(entry.changedPaths[index]!)) };
+                }
+                return projected;
+            });
     };
     const rollback = async (requestConfirmation: ResourceWriteConfirmation, opId: string): Promise<RollbackOperationIpcResult> => {
         _forensicsRbInc('rollback:main:operation.rollback:count');
