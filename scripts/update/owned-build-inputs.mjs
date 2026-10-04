@@ -33,15 +33,19 @@ export async function resolveOwnedInstallerTools(builderCli) {
     asarModulePath, asarModuleSha256 };
 }
 
-async function filesUnder(root) {
+async function filesUnder(root, repositoryRoot, filter) {
   const rows = [];
   const visit = async path => {
     const stat = await lstat(path);
-    if (stat.isSymbolicLink()) throw fail('UPDATE_PREPARE_INPUT_UNSAFE', 'Packaged inputs cannot contain links.');
+    // Match before inspecting/traversing selected content, as builder-util.walk
+    // does. Excluded compiler caches and Windows aliases are not package input.
+    if (filter && !filter(path, stat)) return;
+    const label = relative(repositoryRoot, path).replaceAll('\\', '/') || '.';
+    if (stat.isSymbolicLink()) throw fail('UPDATE_PREPARE_INPUT_UNSAFE', `Packaged inputs cannot contain links: ${label}`);
     if (stat.isDirectory()) {
       for (const name of (await readdir(path)).sort()) await visit(join(path, name));
     } else if (stat.isFile()) rows.push({ path: relative(root, path).replaceAll('\\', '/'), sha256: await hashFile(path), bytes: stat.size });
-    else throw fail('UPDATE_PREPARE_INPUT_UNSAFE', 'Packaged inputs must be regular files/directories.');
+    else throw fail('UPDATE_PREPARE_INPUT_UNSAFE', `Packaged inputs must be regular files/directories: ${label}`);
   };
   await visit(root); return rows;
 }
@@ -56,13 +60,31 @@ export async function captureOwnedBuildInputs(repositoryRoot, tools) {
   const config = JSON.parse(configBytes), project = join(repositoryRoot, 'apps/desktop');
   const buildResourcesRoot = resolve(project, config.directories?.buildResources ?? 'build');
   if (!within(repositoryRoot, buildResourcesRoot)) throw fail('UPDATE_PREPARE_INPUT_UNSAFE', 'Build resources must remain within this checkout.');
-  const buildResourcesSha256 = hash(JSON.stringify(await filesUnder(buildResourcesRoot)));
+  const buildResourcesSha256 = hash(JSON.stringify(await filesUnder(buildResourcesRoot, repositoryRoot)));
+  const toolRequire = createRequire(tools.builderCli);
+  const matcherPath = toolRequire.resolve('app-builder-lib/out/fileMatcher.js');
+  const filterPath = join(dirname(matcherPath), 'util/filter.js');
+  const { FileMatcher } = toolRequire(matcherPath);
+  if (typeof FileMatcher !== 'function') throw fail('UPDATE_PREPARE_BUILDER_INVALID', 'Pinned electron-builder FileMatcher is required.');
+  const expand = pattern => {
+    if (pattern.includes('${')) throw fail('UPDATE_PREPARE_INPUT_UNSAFE', 'Resource macros require an explicit owned A/B binding.');
+    return pattern;
+  };
   const resources = [];
   for (const resource of [...(config.extraResources ?? []), ...(config.win?.extraResources ?? [])]) {
     if (typeof resource !== 'object' || typeof resource.from !== 'string') throw fail('UPDATE_PREPARE_INPUT_UNSAFE', 'Extra resources require explicit source paths.');
     const path = resolve(project, resource.from);
     if (!within(repositoryRoot, path)) throw fail('UPDATE_PREPARE_INPUT_UNSAFE', 'Packaging resources must remain within this checkout.');
-    resources.push({ source: relative(repositoryRoot, path).replaceAll('\\', '/'), files: await filesUnder(path) });
+    const sourceStat = await lstat(path);
+    let filter;
+    // electron-builder copyFiles copies an explicit single-file source directly.
+    // Directory sources use FileMatcher, including its all/ignore defaults.
+    if (sourceStat.isDirectory()) {
+      const matcher = new FileMatcher(path, path, expand, resource.filter);
+      if (matcher.isEmpty() || matcher.containsOnlyIgnore()) matcher.prependPattern('**/*');
+      filter = matcher.createFilter();
+    }
+    resources.push({ source: relative(repositoryRoot, path).replaceAll('\\', '/'), files: await filesUnder(path, repositoryRoot, filter) });
   }
   return { headSha: head.stdout.trim().toLowerCase(), agentSourceSha256: agent.current.source.sha256, agentOutputSha256: agent.current.output.sha256,
     agentManifestSha256: await hashFile(agent.manifestPath), bridgeSourceSha256: bridge.current.source.sha256,
@@ -72,5 +94,6 @@ export async function captureOwnedBuildInputs(repositoryRoot, tools) {
     desktopPackageSha256: await hashFile(join(project, 'package.json')), lockfileSha256: await hashFile(join(repositoryRoot, 'package-lock.json')),
     prepareEntrypointSha256: await hashFile(fileURLToPath(new URL('./prepare-owned-installers.mjs', import.meta.url))),
     bindingHelperSha256: await hashFile(fileURLToPath(import.meta.url)), builderCliSha256: await hashFile(tools.builderCli),
+    builderFileMatcherSha256: await hashFile(matcherPath), builderFilterSha256: await hashFile(filterPath),
     builderPackageSha256: await hashFile(join(dirname(tools.builderCli), 'package.json')), asarModuleSha256: await hashFile(tools.asarModulePath) };
 }

@@ -139,6 +139,31 @@ async function sourceBoundManifestFixture() {
   await writeFile(join(tool, 'cli.js'), '// unit fixture; never a builder execution');
   await writeFile(join(asar, 'package.json'), JSON.stringify({ name: '@electron/asar', main: 'asar.cjs' }));
   await writeFile(join(asar, 'asar.cjs'), 'exports.extractFile=()=>{throw new Error("unit archive must never execute");};');
+  // A unit matcher port for the synthetic builder; actual pinned FileMatcher is
+  // loaded by production and separately exercised against the owned real input.
+  const matcherRoot = join(fixture.root, 'tools/node_modules/app-builder-lib/out');
+  await mkdir(join(matcherRoot, 'util'), { recursive: true });
+  await writeFile(join(matcherRoot, 'util/filter.js'), '// unit matcher port');
+  await writeFile(join(matcherRoot, 'fileMatcher.js'), `
+const path=require('node:path');
+exports.FileMatcher=class {
+  constructor(from,to,expand,patterns){this.from=from;this.patterns=patterns==null?[]:Array.isArray(patterns)?patterns:[patterns];}
+  isEmpty(){return this.patterns.length===0;}
+  containsOnlyIgnore(){return this.patterns.length>0&&this.patterns.every(p=>p.startsWith('!'));}
+  prependPattern(pattern){this.patterns.unshift(pattern);}
+  createFilter(){return (file,stat)=>{
+    if(file===this.from)return true;
+    const name=path.relative(this.from,file).split(path.sep).join('/');
+    let match=false;
+    for(const pattern of this.patterns){const negate=pattern.startsWith('!');if(match!==negate)continue;
+      const body=negate?pattern.slice(1):pattern;
+      const found=body==='**/*'||body===name||(body.endsWith('/**/*')&&(name===body.slice(0,-5)||name.startsWith(body.slice(0,-4))))||(stat.isDirectory()&&body.startsWith(name+'/'));
+      match=negate?!found:found;
+    }
+    return match;
+  };}
+};
+`);
   await writeAgentProductionBuildManifest(repo); await writeBridgeProductionBuildReceipt(repo);
   const tools = await resolveOwnedInstallerTools(join(tool, 'cli.js'));
   const inputs = await captureOwnedBuildInputs(repo, tools);
@@ -196,6 +221,49 @@ test('fresh replacement receipts at the same HEAD do not rebind old installers; 
       assert.equal(report.status, 'blocked_environment'); assert.equal(report.cases[0].executed, false);
       assert.equal(report.commands.length, 0); assert.match(report.blockers.join(' '), /BUILD_RECEIPT_INVALID.*INPUT_CHANGED/i);
     }
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+
+async function nativeResourceFilterFixture() {
+  const f = await sourceBoundManifestFixture();
+  await f.seed('apps/desktop/electron-builder.json', JSON.stringify({ extraResources: [{ from: '.native', to: 'native',
+    filter: ['better_sqlite3.node', 'better_sqlite3.json'] }] }));
+  return { ...f, before: await captureOwnedBuildInputs(f.repo, f.tools) };
+}
+
+test('excluded native rebuild/cache bytes do not invalidate actual filtered packaging inputs', async () => {
+  const f = await nativeResourceFilterFixture();
+  try {
+    await f.seed('apps/desktop/.native/electron-rebuild/cache/header.h', 'excluded header bytes');
+    assert.deepEqual(await captureOwnedBuildInputs(f.repo, f.tools), f.before);
+    await f.seed('apps/desktop/.native/electron-rebuild/cache/header.h', 'changed excluded header bytes');
+    assert.deepEqual(await captureOwnedBuildInputs(f.repo, f.tools), f.before);
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+
+test('excluded native rebuild alias is not followed or rejected and preserves its target', async () => {
+  const f = await nativeResourceFilterFixture();
+  try {
+    const target = join(f.root, 'existing-target'), cache = join(f.repo, 'apps/desktop/.native/electron-rebuild');
+    await mkdir(target); await mkdir(cache); await writeFile(join(target, 'preserved.txt'), 'existing bytes');
+    await symlink(target, join(cache, 'windows-alias'), process.platform === 'win32' ? 'junction' : 'dir');
+    assert.deepEqual(await captureOwnedBuildInputs(f.repo, f.tools), f.before);
+    assert.equal(await readFile(join(target, 'preserved.txt'), 'utf8'), 'existing bytes');
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+
+test('included native bytes remain source-bound and selected links report their repo-relative identity', async () => {
+  const f = await nativeResourceFilterFixture();
+  try {
+    await f.seed('apps/desktop/.native/better_sqlite3.node', 'changed included binding');
+    await writeAgentProductionBuildManifest(f.repo);
+    assert.notEqual((await captureOwnedBuildInputs(f.repo, f.tools)).extraResourcesSha256, f.before.extraResourcesSha256);
+    const target = join(f.root, 'included-target'); await mkdir(target); await writeFile(join(target, 'kept.txt'), 'preserved bytes');
+    await f.seed('apps/desktop/electron-builder.json', JSON.stringify({ extraResources: [{ from: '.native', to: 'native',
+      filter: ['better_sqlite3.node', 'better_sqlite3.json', 'selected-link'] }] }));
+    await symlink(target, join(f.repo, 'apps/desktop/.native/selected-link'), process.platform === 'win32' ? 'junction' : 'dir');
+    await assert.rejects(() => captureOwnedBuildInputs(f.repo, f.tools), /UPDATE_PREPARE_INPUT_UNSAFE.*apps\/desktop\/\.native\/selected-link/);
+    assert.equal(await readFile(join(target, 'kept.txt'), 'utf8'), 'preserved bytes');
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });
 
