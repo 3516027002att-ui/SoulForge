@@ -95,7 +95,7 @@ async function disposeTestTree(owner, record, seen = new Set()) {
       if (!match) continue;
       const pending = await readReceipt(join(owner.root, name));
       if (pending.schema !== childSchema || pending.id !== match[1] || pending.parentToken !== record.token) throw new Error('OWNED_TEST_CHILD_RECEIPT_INVALID');
-      let child;
+      let child, ownedChild;
       try { child = await readReceipt(join(owner.root, name.replace('.pending.json', '.json'))); }
       catch (error) { throw new Error(`OWNED_TEST_CHILD_ADMISSION_UNCERTAIN: ${owner.root}: ${error.message}`); }
       if (child.schema !== childSchema || child.id !== pending.id || child.parentToken !== record.token) throw new Error('OWNED_TEST_CHILD_RECEIPT_INVALID');
@@ -105,7 +105,7 @@ async function disposeTestTree(owner, record, seen = new Set()) {
       || ![`sf-owned-${record.scope}-test-operation-`, `sft-${record.scope}-`].some(prefix => basename(child.root).startsWith(prefix))
         || typeof child.token !== 'string' || !child.token) throw new Error('OWNED_TEST_CHILD_RECEIPT_INVALID');
       try {
-        const ownedChild = await readTestOwner(child.root, child.token);
+        ownedChild = await readTestOwner(child.root, child.token);
         if (ownedChild.record.scope !== record.scope || ownedChild.record.observer !== record.observer) throw new Error('OWNED_TEST_CHILD_RECEIPT_INVALID');
         let parentReceipt;
         try { parentReceipt = await readReceipt(join(child.root, '.soulforge-test-parent.json')); }
@@ -114,6 +114,25 @@ async function disposeTestTree(owner, record, seen = new Set()) {
           || parentReceipt.parentToken !== record.token || parentReceipt.childToken !== child.token) throw new Error('OWNED_TEST_CHILD_RECEIPT_INVALID');
         await disposeTestTree(ownedChild.handle, ownedChild.record, seen);
       } catch (error) {
+        // Carry Linux tree uncertainty into every ancestor owner record as well
+        // as the child ledger. Generic retention preserves only its first
+        // reason and direct owner.dispose() does not veto on that field; the
+        // existing uncertainTrees proof is independently honored by dispose,
+        // exit cleanup, and stale sweep.
+        if (process.platform === 'linux' && ownedChild && /OWNED_TEMP_PROCESS_UNCERTAIN/.test(error.message)) {
+          try {
+            // Recursive disposal may have propagated grandchild uncertainty
+            // into this owner after the snapshot above was read. Re-read and
+            // revalidate the same receipt before carrying it into our parent.
+            const latestChild = await readTestOwner(child.root, child.token);
+            if (latestChild.record.scope !== record.scope || latestChild.record.observer !== record.observer) {
+              throw new Error('OWNED_TEST_CHILD_RECEIPT_INVALID');
+            }
+            for (const pid of latestChild.record.uncertainTrees ?? []) await owner.trackProcess(pid, { uncertainTree: true });
+          } catch (propagationError) {
+            throw new Error(`${error.message}; OWNED_TEST_TREE_PROPAGATION_FAILED: ${propagationError.message}`);
+          }
+        }
         // A normally completed nested wrapper may already have disposed itself.
         if (error.code === 'ENOENT') {
           try { await lstat(child.root); } catch (missing) { if (missing.code === 'ENOENT') continue; }

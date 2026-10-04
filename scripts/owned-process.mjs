@@ -7,26 +7,76 @@ import { ownedTemporaryDirectoryObserver, prepareOwnedWindowsJob, recordOwnedPro
 
 const helperPath = fileURLToPath(import.meta.url);
 
+function isCompleteProcessResult(value) {
+  return value && typeof value === 'object' && Number.isSafeInteger(value.code)
+    && typeof value.stdout === 'string' && typeof value.stderr === 'string'
+    && typeof value.stdoutTruncated === 'boolean' && typeof value.stderrTruncated === 'boolean'
+    && typeof value.cancelled === 'boolean' && typeof value.timedOut === 'boolean'
+    && (value.signal === null || typeof value.signal === 'string')
+    && (value.terminationReason === null || typeof value.terminationReason === 'string');
+}
+
+function isNormalProcessResult(value) {
+  return isCompleteProcessResult(value) && value.signal === null
+    && value.cancelled === false && value.timedOut === false
+    && (value.terminationReason === null || value.terminationReason === 'spawn-error');
+}
+
 /** Persist a waiting supervisor before it can start work in an owned directory. */
 export async function runOwnedProcess({ owner, signal, onStdout, onStderr, ...options }) {
   const supervisor = fork(helperPath, ['--worker'], {
     env: options.env, execArgv: [], detached: process.platform !== 'win32', windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe', 'ipc']
   });
-  let result, reason = null, error;
+  let result, reason = null, error, ticket;
   supervisor.stdout.on('data', chunk => onStdout?.(chunk));
   supervisor.stderr.on('data', chunk => onStderr?.(chunk));
   const closed = new Promise(resolveClosed => {
     supervisor.on('error', value => { error = value.message; });
     supervisor.on('message', value => {
-      if (value.type === 'result') result = reason === 'timeout'
-        ? { ...value.result, timedOut: true, cancelled: false, terminationReason: 'timeout' } : value.result;
+      if (value.type === 'result') result = value.result;
     });
-    supervisor.on('close', (code, closeSignal) => resolveClosed(result ?? {
-      code: code ?? 1, signal: closeSignal, stdout: '', stderr: error ?? 'Owned process supervisor interrupted',
-      stdoutTruncated: false, stderrTruncated: false, timeoutMs: options.timeoutMs,
-      cancelled: reason === 'cancelled', timedOut: reason === 'timeout', terminationReason: reason ?? 'supervisor-exit'
-    }));
+    supervisor.on('close', (code, closeSignal) => {
+      let finalResult = result ?? {
+        // The supervisor close code is not the writer's receipt. In
+        // particular, close(0) without a result must never be process-success.
+        // Preserve a real nonzero code for diagnostics, but map missing/zero
+        // close status to a failure and expose the missing receipt explicitly.
+        code: Number.isSafeInteger(code) && code !== 0 ? code : 1,
+        signal: closeSignal, stdout: '', stderr: error ?? 'Owned process supervisor interrupted',
+        stdoutTruncated: false, stderrTruncated: false, timeoutMs: options.timeoutMs,
+        cancelled: reason === 'cancelled', timedOut: reason === 'timeout', terminationReason: reason ?? 'supervisor-exit',
+        outputError: 'OWNED_TEST_RESULT_UNAVAILABLE', supervisorExitCode: code, supervisorSignal: closeSignal
+      };
+      if (reason === 'timeout' && result) finalResult = { ...result, timedOut: true, cancelled: false, terminationReason: 'timeout' };
+      else if (reason === 'cancelled' && result) finalResult = { ...result, timedOut: false, cancelled: true, terminationReason: 'cancelled' };
+
+      const completeResult = isCompleteProcessResult(finalResult);
+      const expectedSupervisorCode = Number.isSafeInteger(finalResult.code) ? finalResult.code || 0 : null;
+      const supervisorClosedNormally = closeSignal === null && code === expectedSupervisorCode;
+      if (result && (!completeResult || !supervisorClosedNormally)) {
+        finalResult = { ...finalResult, code: finalResult.code || 1, terminationReason: 'supervisor-exit',
+          outputError: error ?? `Owned process supervisor exit did not match its result (${code ?? 'null'}, ${closeSignal ?? 'none'})` };
+      }
+
+      // On Linux the worker only reports the writer result. The owner process
+      // alone may retire its uncertain-tree ticket, and only after receiving a
+      // complete normal receipt and observing the supervisor close normally.
+      // Cancellation/timer state is sampled here so a late receipt cannot
+      // erase uncertainty after the parent has already interrupted the run.
+      if (process.platform === 'linux' && ticket && reason === null && signal?.aborted !== true
+        && isNormalProcessResult(finalResult) && supervisorClosedNormally) {
+        try {
+          for (const item of [ticket].flat()) recordOwnedProcess(item, supervisor.pid, { finished: true });
+        }
+        catch (value) {
+          error = value.message;
+          finalResult = { ...finalResult, code: finalResult.code || 1, terminationReason: 'supervisor-exit',
+            outputError: `OWNED_TEMP_TREE_RECEIPT_PUBLISH_FAILED: ${error}` };
+        }
+      }
+      resolveClosed(finalResult);
+    });
   });
   const cancel = value => {
     reason ??= value;
@@ -36,8 +86,8 @@ export async function runOwnedProcess({ owner, signal, onStdout, onStderr, ...op
   signal?.addEventListener('abort', onAbort, { once: true });
   let timer;
   try {
-    const ticket = await owner.trackProcess(supervisor.pid, {
-      processGroup: process.platform !== 'win32', uncertainTree: process.platform === 'win32'
+    ticket = await owner.trackProcess(supervisor.pid, {
+      processGroup: process.platform !== 'win32', uncertainTree: process.platform === 'win32' || process.platform === 'linux'
     });
     if (signal?.aborted) cancel('cancelled');
     if (options.timeoutMs) timer = setTimeout(() => cancel('timeout'), options.timeoutMs);
@@ -91,7 +141,7 @@ if (process.argv[1] === helperPath && process.argv[2] === '--worker') {
         onStderr: chunk => { if (process.connected) process.stderr.write(chunk); } });
       // Windows has no POSIX group observer. A killed/uncertain tree remains
       // marked rather than being inferred dead from its former cmd PID.
-      if (process.platform !== 'win32' || result.terminationReason === 'spawn-error' || result.treeTerminated) {
+      if (process.platform === 'win32' && (result.terminationReason === 'spawn-error' || result.treeTerminated)) {
         for (const ticket of [message.ticket].flat()) recordOwnedProcess(ticket, process.pid, { finished: true });
       }
       // A large result can still be queued after send() returns. Disconnecting
@@ -99,6 +149,9 @@ if (process.argv[1] === helperPath && process.argv[2] === '--worker') {
       if (process.connected) await new Promise((resolveSent, rejectSent) => {
         process.send({ type: 'result', result }, error => error ? rejectSent(error) : resolveSent());
       });
+      // Linux uncertainty is cleared by the owner side only after it receives
+      // this complete result and observes our normal close. A lost IPC receipt,
+      // parent interruption, cancellation, or timeout remains retained.
       process.exitCode = result.code || 0;
     } catch (error) {
       console.error(error.message); process.exitCode = 1;

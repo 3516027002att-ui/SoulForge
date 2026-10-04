@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { attachOwnedTemporaryDirectory, createOwnedTemporaryDirectory, ownedTemporaryDirectoryIsIdle, recordOwnedProcess } from './owned-temporary-directory.mjs';
@@ -17,14 +17,67 @@ const inside = (root, path) => {
 };
 const metadata = stdout => JSON.parse(Buffer.from(stdout.match(/OWNED_TEMP_META:([A-Za-z0-9+/=]+)/)?.[1] ?? '', 'base64').toString());
 
+async function waitFor(read, description) {
+  const until = Date.now() + 8_000;
+  while (Date.now() < until) {
+    try { const value = await read(); if (value) return value; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    await delay(25);
+  }
+  throw new Error(`Timed out waiting for ${description}`);
+}
+
 async function fixture(execute) {
   const owner = await createOwnedTemporaryDirectory('test-env-fixture');
+  let preserve = false;
   try {
     const temporaryParent = join(owner.root, 'temp');
     await mkdir(temporaryParent);
     await execute({ root: owner.root, temporaryParent, owner,
-      env: { ...process.env, TMPDIR: temporaryParent, TMP: temporaryParent, TEMP: temporaryParent } });
-  } finally { await owner.dispose(); }
+      env: { ...process.env, TMPDIR: temporaryParent, TMP: temporaryParent, TEMP: temporaryParent },
+      preserve: () => { preserve = true; } });
+  } finally { if (!preserve) await owner.dispose(); }
+}
+
+async function ownedPidStopped(pid) {
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
+    return ['Z', 'X'].includes(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0]);
+  } catch (error) {
+    if (['ENOENT', 'ESRCH'].includes(error.code)) return true;
+    throw error;
+  }
+}
+
+async function ownedProcessGroupStopped(group) {
+  try { process.kill(-group, 0); }
+  catch (error) { if (error.code === 'ESRCH') return true; if (error.code === 'EPERM') return false; throw error; }
+  let entries;
+  try { entries = await readdir('/proc'); } catch { return false; }
+  for (const pid of entries.filter(name => /^\d+$/.test(name))) {
+    let stat;
+    try { stat = await readFile(`/proc/${pid}/stat`, 'utf8'); }
+    catch (error) { if (['ENOENT', 'ESRCH'].includes(error.code)) continue; return false; }
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    if (Number(fields[2]) === group && !['Z', 'X'].includes(fields[0])) return false;
+  }
+  return true;
+}
+
+async function retireStoppedFixtureOwner(root, expectedToken) {
+  if (!existsSync(root)) return;
+  const marker = JSON.parse(await readFile(join(root, '.soulforge-temporary-owner.json'), 'utf8'));
+  assert.equal(marker.token, expectedToken, 'manual cleanup must target this fixture-owned root');
+  const pids = [...new Set([...(marker.pid === process.pid ? [] : [marker.pid]), ...(marker.childPids ?? []), ...(marker.uncertainTrees ?? [])])];
+  const groups = [...new Set(marker.processGroups ?? [])];
+  await waitFor(async () => (await Promise.all(pids.map(ownedPidStopped))).every(Boolean)
+    && (await Promise.all(groups.map(ownedProcessGroupStopped))).every(Boolean), 'fixture-owned processes and groups to stop before manual cleanup');
+  const current = JSON.parse(await readFile(join(root, '.soulforge-temporary-owner.json'), 'utf8'));
+  assert.equal(current.token, expectedToken, 'owner identity must still match immediately before manual cleanup');
+  // Fixture-only cleanup: all recorded processes are stopped and the exact
+  // generated root/token were captured before cancellation. Product evidence
+  // remains latched; this does not authorize a production sweep.
+  await rm(root, { recursive: true, force: true });
 }
 
 test('actual check operation owns and removes uncooperative fixture TEMP without changing test outcome', async () => {
@@ -95,39 +148,123 @@ test('actual check to root npm test to owned fixture does not recursively length
   });
 });
 
-for (const termination of ['cancel', 'timeout']) test(`nested root npm wrapper ${termination} cleans its explicitly owned sibling TEMP`, async () => {
-  await fixture(async ({ root, temporaryParent, env, owner }) => {
+for (const termination of ['cancel', 'timeout']) test(`nested root npm wrapper ${termination} retains Linux unproven TEMP but preserves Windows Job cleanup`, async () => {
+  await fixture(async ({ root, temporaryParent, env, owner, preserve }) => {
     const wrapper = fileURLToPath(new URL('./owned-test-environment.mjs', import.meta.url));
     const check = new URL('./check.mjs', import.meta.url), ready = join(root, 'nested-ready.json');
+    const release = join(root, 'nested-release'), cancelNow = join(root, 'cancel-now');
     await writeFile(join(root, 'package.json'), JSON.stringify({ scripts: {
       test: `node "${wrapper}" -- npm run soulforge:test-body --silent --`,
       'soulforge:test-body': 'node blocked.cjs'
     } }));
-    await writeFile(join(root, 'blocked.cjs'), `require('node:fs').writeFileSync(${JSON.stringify(ready)},JSON.stringify({
-      root:process.env.SOULFORGE_TEST_TEMP_OWNER_ROOT,token:process.env.SOULFORGE_TEST_TEMP_OWNER_TOKEN}));setInterval(()=>{},100);`);
+    await writeFile(join(root, 'blocked.cjs'), `const fs=require('node:fs');
+      const ready=${JSON.stringify(ready)},release=${JSON.stringify(release)};
+      const root=process.env.SOULFORGE_TEST_TEMP_OWNER_ROOT;
+      const parent=JSON.parse(fs.readFileSync(require('node:path').join(root,'.soulforge-test-parent.json'),'utf8'));
+      fs.writeFileSync(ready,JSON.stringify({root,token:process.env.SOULFORGE_TEST_TEMP_OWNER_TOKEN,
+        parentRoot:parent.parentRoot,parentToken:parent.parentToken,pid:process.pid}));
+      const timer=setInterval(()=>{if(fs.existsSync(release)){clearInterval(timer);process.exit(0);}},10);`);
     const driver = join(root, 'nested-interrupt.mjs');
     await writeFile(driver, `import {existsSync} from 'node:fs';
       process.argv=[process.execPath,${JSON.stringify(fileURLToPath(check))},'--suite','test','--timeout-ms',${JSON.stringify(termination === 'timeout' ? '3500' : '20000')}];
-      const timer=${termination === 'cancel' ? `setInterval(()=>{if(existsSync(${JSON.stringify(ready)})){clearInterval(timer);if(process.platform==='win32')process.emit('SIGINT');else process.kill(process.pid,'SIGINT');}},10)` : 'null'};
+      const timer=${termination === 'cancel' ? `setInterval(()=>{if(existsSync(${JSON.stringify(cancelNow)})){clearInterval(timer);if(process.platform==='win32')process.emit('SIGINT');else process.kill(process.pid,'SIGINT');}},10)` : 'null'};
       try{await import(${JSON.stringify(check.href)});}finally{clearInterval(timer);}`);
-    const result = await runProcess({ command: process.execPath, args: [driver], cwd: root, env, owner,
+    const controller = new AbortController();
+    const run = runProcess({ command: process.execPath, args: [driver], cwd: root, env, owner, signal: controller.signal,
       timeoutMs: 30_000, outputLimitBytes: Number.MAX_SAFE_INTEGER });
-    assert.equal(result.code, 1, result.stderr);
-    assert.equal(existsSync(ready), true, `interruption must occur after the real nested wrapper and fixture started\n${result.stdout.slice(-8000)}\n${result.stderr.slice(-2000)}`);
-    const nested = JSON.parse(await readFile(ready, 'utf8'));
+    let nested;
     try {
+      await waitFor(async () => JSON.parse(await readFile(ready, 'utf8')), 'nested owned child readiness');
+      nested = JSON.parse(await readFile(ready, 'utf8'));
+      if (termination === 'cancel') await writeFile(cancelNow, 'cancel');
+      const result = await run;
+      assert.equal(result.code, 1, result.stderr);
+      assert.equal(existsSync(ready), true, `interruption must occur after the real nested wrapper and fixture started\n${result.stdout.slice(-8000)}\n${result.stderr.slice(-2000)}`);
       const report = JSON.parse(result.stdout);
       assert.equal(termination === 'cancel' ? report.cancelled : report.results[0].timedOut, true);
-      assert.deepEqual(await readdir(temporaryParent), [], 'outer completion must not hide a killed nested sibling owner');
+      if (process.platform === 'linux') {
+        assert.ok(existsSync(nested.root), 'the cancelled/timeout child root must be retained');
+        const record = JSON.parse(await readFile(join(nested.root, '.soulforge-temporary-owner.json'), 'utf8'));
+        assert.equal(record.token, nested.token);
+        assert.ok(record.uncertainTrees.length, 'the nested supervisor remains an unproven tree after interruption');
+        assert.ok(existsSync(nested.parentRoot), 'the ancestor root must remain while recursive disposal is blocked');
+        assert.match(JSON.stringify(report), /OWNED_TEMP_PROCESS_UNCERTAIN/, 'the check report must surface cleanup failure');
+        assert.notDeepEqual(await readdir(temporaryParent), [], 'a retained owned root is not reported as cleaned');
+      } else {
+        assert.deepEqual(await readdir(temporaryParent), [], 'Windows Job proof still permits cleanup after termination');
+      }
     } finally {
-      // Old-code red leaves exactly this fixture-recorded child. Verify its
-      // token and stopped tree rather than sweeping any sibling or temp root.
-      if (existsSync(nested.root)) {
+      await writeFile(release, 'done');
+      if (!nested) {
+        controller.abort();
+        try { await run; } catch { /* preserve the fixture root when no ownership receipt was captured */ }
+        preserve();
+      } else if (process.platform === 'linux') {
+        try {
+          await retireStoppedFixtureOwner(nested.root, nested.token);
+          await retireStoppedFixtureOwner(nested.parentRoot, nested.parentToken);
+        } catch (error) {
+          preserve();
+          throw error;
+        }
+      } else if (existsSync(nested.root)) {
         assert.ok(inside(temporaryParent, nested.root));
         const record = JSON.parse(await readFile(join(nested.root, '.soulforge-temporary-owner.json'), 'utf8'));
         assert.equal(record.token, nested.token);
         await (await attachOwnedTemporaryDirectory(nested.root)).dispose();
       }
+    }
+  });
+});
+
+test('a leaf uncertain tree propagates across three owners and blocks direct ancestor disposal', { skip: process.platform !== 'linux' }, async () => {
+  await fixture(async ({ root, temporaryParent, env, preserve }) => {
+    const chainPath = join(root, 'three-owner-chain.json');
+    const temporaryModule = new URL('./owned-temporary-directory.mjs', import.meta.url).href;
+    const child = `import {randomUUID} from 'node:crypto';import {readFile,writeFile} from 'node:fs/promises';
+      import {dirname,join} from 'node:path';import {attachOwnedTemporaryDirectory,createOwnedTemporaryDirectory} from ${JSON.stringify(temporaryModule)};
+      const schema='soulforge.test-temporary-child.v1',ownerFile='.soulforge-temporary-owner.json';
+      async function addChild(parentRoot,parentToken){
+        const parent=await attachOwnedTemporaryDirectory(parentRoot);await parent.retain('OWNED_TEST_CHILD_ADMISSION_PENDING');
+        const id=randomUUID(),receipt={schema,id,parentToken},base=join(parentRoot,'.soulforge-test-child.'+id);
+        await writeFile(base+'.pending.json',JSON.stringify(receipt),{flag:'wx',mode:0o600});
+        const owner=await createOwnedTemporaryDirectory('test-operation',{parent:dirname(parentRoot),compact:true});
+        const record=JSON.parse(await readFile(join(owner.root,ownerFile),'utf8'));
+        await writeFile(join(owner.root,'.soulforge-test-parent.json'),JSON.stringify({...receipt,parentRoot,childToken:record.token}),{flag:'wx',mode:0o600});
+        await writeFile(base+'.json',JSON.stringify({...receipt,root:owner.root,token:record.token}),{flag:'wx',mode:0o600});
+        return {root:owner.root,token:record.token};
+      }
+      const a={root:process.env.SOULFORGE_TEST_TEMP_OWNER_ROOT,token:process.env.SOULFORGE_TEST_TEMP_OWNER_TOKEN};
+      const b=await addChild(a.root,a.token),c=await addChild(b.root,b.token);
+      const leaf=await attachOwnedTemporaryDirectory(c.root);await leaf.trackProcess(99999999,{uncertainTree:true});
+      await writeFile(${JSON.stringify(chainPath)},JSON.stringify({a,b,c,uncertainPid:99999999}));
+      console.log(JSON.stringify({ok:true}));`;
+    let chain;
+    try {
+      const result = await runOwnedTestOperation({ command: process.execPath, args: ['--input-type=module', '-e', child], cwd: root, env });
+      assert.equal(result.temporaryOwnership.state, 'retained');
+      assert.match(result.cleanupError, /OWNED_TEMP_PROCESS_UNCERTAIN/);
+      chain = JSON.parse(await readFile(chainPath, 'utf8'));
+      for (const node of [chain.a, chain.b, chain.c]) assert.ok(inside(temporaryParent, node.root));
+      const ancestorRecord = JSON.parse(await readFile(join(chain.a.root, '.soulforge-temporary-owner.json'), 'utf8'));
+      assert.ok(ancestorRecord.uncertainTrees.includes(chain.uncertainPid), 'the leaf PID must propagate from the latest recursive child record to the root');
+      assert.equal(await ownedTemporaryDirectoryIsIdle(chain.a.root, 'test-operation', chain.a.token), false);
+      const next = await createOwnedTemporaryDirectory('test-operation', { parent: temporaryParent, compact: true });
+      try { for (const node of [chain.a, chain.b, chain.c]) assert.ok(existsSync(node.root), 'a later sweep must preserve each unproven owner'); }
+      finally { await next.dispose(); }
+      await assert.rejects((await attachOwnedTemporaryDirectory(chain.a.root)).dispose(), /OWNED_TEMP_PROCESS_UNCERTAIN/,
+        'direct dispose must not bypass a recursively retained leaf');
+    } finally {
+      if (chain) {
+        try {
+          await retireStoppedFixtureOwner(chain.c.root, chain.c.token);
+          await retireStoppedFixtureOwner(chain.b.root, chain.b.token);
+          await retireStoppedFixtureOwner(chain.a.root, chain.a.token);
+        } catch (error) {
+          preserve();
+          throw error;
+        }
+      } else preserve();
     }
   });
 });
@@ -217,7 +354,7 @@ test('a timed-out actual suite does not cancel a later independent suite', async
 });
 
 test('cleanup ownership failure cannot convert a successful child into a passed operation', async () => {
-  await fixture(async ({ root, env, temporaryParent }) => {
+  await fixture(async ({ root, env, temporaryParent, preserve }) => {
     const backup = join(root, 'original-owner.json'), child = join(root, 'tamper.cjs');
     await writeFile(child, `const fs=require('node:fs'),path=require('node:path');
       const marker=path.join(process.env.SOULFORGE_TEST_TEMP_OWNER_ROOT,'.soulforge-temporary-owner.json');
@@ -225,18 +362,23 @@ test('cleanup ownership failure cannot convert a successful child into a passed 
     const result = await runSuite({ repoRoot, scriptName: 'test:owned-cleanup-negative', injectEnv: false, timeoutMs: 20_000, env,
       operation: { command: 'node', args: [child], cwd: root, validation: true } });
     const retained = result.temporaryOwnership.root;
+    const originalOwner = JSON.parse(await readFile(backup, 'utf8'));
     try {
       assert.equal(result.outcome, OUTCOME.FAILED);
-      assert.equal(result.childExitCode, 0);
+      assert.match(result.stdout, /\{"ok":true\}/, 'the fixture command emitted its success payload before ownership evidence was rejected');
       assert.equal(result.temporaryOwnership.state, 'retained');
       assert.ok(result.cleanupError.includes('OWNED_TEMP_OWNERSHIP_CHANGED'));
       assert.ok(inside(temporaryParent, retained));
       assert.equal(existsSync(retained), true);
     } finally {
-      // Restore only the exact fixture marker we intentionally removed, then
-      // let the production ownership + stopped-Job checks authorize cleanup.
+      // Restore only this fixture's exact marker. Linux still has an
+      // intentionally latched uncertain-tree proof, so cleanup below checks
+      // the recorded fixture processes and retires only this captured root.
       await writeFile(join(retained, '.soulforge-temporary-owner.json'), await readFile(backup), { flag: 'wx' });
-      await (await attachOwnedTemporaryDirectory(retained)).dispose();
+      if (process.platform === 'linux') {
+        try { await retireStoppedFixtureOwner(retained, originalOwner.token); }
+        catch (error) { preserve(); throw error; }
+      } else await (await attachOwnedTemporaryDirectory(retained)).dispose();
     }
   });
 });
@@ -295,7 +437,8 @@ for (const forgery of ['incomplete', 'unrelated']) test(`child ledger ${forgery}
 });
 
 for (const mode of ['cli-exit', 'restart-sweep']) test(`uncertain child admission remains retained through ${mode}`, async () => {
-  await fixture(async ({ root, temporaryParent, env, owner }) => {
+  await fixture(async ({ root, temporaryParent, env, owner, preserve }) => {
+    const fixtureToken = JSON.parse(await readFile(join(owner.root, '.soulforge-temporary-owner.json'), 'utf8')).token;
     const beforePath = join(root, 'before.json'), returnedPath = join(root, 'returned.json');
     const tempModule = new URL('./owned-temporary-directory.mjs', import.meta.url).href;
     const actor = `import {readFile,writeFile} from 'node:fs/promises';import {dirname,join} from 'node:path';
@@ -344,21 +487,27 @@ for (const mode of ['cli-exit', 'restart-sweep']) test(`uncertain child admissio
     } finally {
       if (before) {
         assert.throws(() => process.kill(before.actorPid, 0), { code: 'ESRCH' });
-        if (mode === 'restart-sweep') recordOwnedProcess({ root: before.child, token: before.childRecord.token }, before.actorPid, { finished: true });
-        await (await attachOwnedTemporaryDirectory(before.child)).dispose();
-        if (existsSync(before.parent)) {
-          // The sole interrupted actor and its exact child have now been
-          // observed stopped and retired. Repair that evidence, then explicitly
-          // dispose through the original token/Job/group boundary.
-          await writeFile(join(before.parent, `.soulforge-test-child.${before.id}.json`), JSON.stringify({
-            schema: 'soulforge.test-temporary-child.v1', id: before.id, parentToken: before.parentRecord.token,
-            root: before.child, token: before.childRecord.token
-          }), { flag: 'wx' });
-          await (await attachOwnedTemporaryDirectory(before.parent)).dispose();
+        if (process.platform === 'linux') {
+          try {
+            await retireStoppedFixtureOwner(before.child, before.childRecord.token);
+            await retireStoppedFixtureOwner(before.parent, before.parentRecord.token);
+            await retireStoppedFixtureOwner(owner.root, fixtureToken);
+          } catch (error) { preserve(); throw error; }
+        } else {
+          if (mode === 'restart-sweep') recordOwnedProcess({ root: before.child, token: before.childRecord.token }, before.actorPid, { finished: true });
+          await (await attachOwnedTemporaryDirectory(before.child)).dispose();
+          if (existsSync(before.parent)) {
+            await writeFile(join(before.parent, `.soulforge-test-child.${before.id}.json`), JSON.stringify({
+              schema: 'soulforge.test-temporary-child.v1', id: before.id, parentToken: before.parentRecord.token,
+              root: before.child, token: before.childRecord.token
+            }), { flag: 'wx', mode: 0o600 });
+            await (await attachOwnedTemporaryDirectory(before.parent)).dispose();
+          }
         }
       }
     }
-    assert.deepEqual(await readdir(temporaryParent), []);
+    if (process.platform === 'linux' && before) assert.equal(existsSync(owner.root), false, 'manual teardown removes only this verified fixture owner');
+    else assert.deepEqual(await readdir(temporaryParent), []);
   });
 });
 
@@ -409,12 +558,13 @@ test('compact allocation retains the full scope and exact owner marker without c
   });
 });
 
-test('real child admission retains its parent before a forced stop can bypass cleanup', async () => {
-  await fixture(async ({ root, temporaryParent, env, owner }) => {
+test('real child admission retains evidence after a forced stop and requires platform-specific tree proof', async () => {
+  await fixture(async ({ root, temporaryParent, env, owner, preserve }) => {
+    const fixtureToken = JSON.parse(await readFile(join(owner.root, '.soulforge-temporary-owner.json'), 'utf8')).token;
     const ready = join(root, 'admitted.json'), release = join(root, 'release'), actor = join(root, 'admitted.cjs');
     await writeFile(actor, `const fs=require('node:fs'),path=require('node:path');const root=process.env.SOULFORGE_TEST_TEMP_OWNER_ROOT;
       const parent=JSON.parse(fs.readFileSync(path.join(root,'.soulforge-test-parent.json'),'utf8'));
-      fs.writeFileSync(${JSON.stringify(ready)},JSON.stringify({root,token:process.env.SOULFORGE_TEST_TEMP_OWNER_TOKEN,parent}));
+      fs.writeFileSync(${JSON.stringify(ready)},JSON.stringify({root,token:process.env.SOULFORGE_TEST_TEMP_OWNER_TOKEN,parent,pid:process.pid}));
       const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)})){clearInterval(timer);process.exit(0);}},20);`);
     const driver = join(root, 'admission-driver.mjs');
     await writeFile(driver, `import {existsSync} from 'node:fs';import {runOwnedTestOperation} from ${JSON.stringify(new URL('./owned-test-environment.mjs', import.meta.url).href)};
@@ -429,14 +579,19 @@ test('real child admission retains its parent before a forced stop can bypass cl
       assert.equal(dirname(info.parent.parentRoot), temporaryParent);
       assert.equal(dirname(info.root), temporaryParent);
       // POSIX owned supervisors may correctly outlive the killed driver. Let
-      // the known fixture actor finish and consult only the original proof.
+      // the known fixture actor finish, but absence of a supervisor receipt
+      // still means the owned tree is not proven idle.
       await writeFile(release, 'done');
-      let idle = false;
-      for (let attempt = 0; attempt < 250; attempt++) {
-        if (await ownedTemporaryDirectoryIsIdle(info.parent.parentRoot, 'test-operation', info.parent.parentToken)) { idle = true; break; }
-        await delay(20);
+      if (process.platform === 'linux') {
+        await waitFor(() => ownedPidStopped(info.pid), 'known fixture actor to stop after release');
+        assert.equal(await ownedTemporaryDirectoryIsIdle(info.parent.parentRoot, 'test-operation', info.parent.parentToken), false,
+          'stopping the writer is not a replacement for the missing Linux supervisor completion receipt');
+      } else {
+        await waitFor(() => ownedTemporaryDirectoryIsIdle(info.parent.parentRoot, 'test-operation', info.parent.parentToken),
+          'Windows Job proof to confirm the owned tree stopped');
+        assert.equal(await ownedTemporaryDirectoryIsIdle(info.parent.parentRoot, 'test-operation', info.parent.parentToken), true,
+          'Windows may use its independent Job proof to establish stopped state');
       }
-      assert.equal(idle, true);
       const next = await createOwnedTemporaryDirectory('test-operation', { parent: temporaryParent });
       try {
         assert.equal(existsSync(info.parent.parentRoot), true, 'automatic reclaim must not erase admission evidence after the tree stops');
@@ -445,12 +600,19 @@ test('real child admission retains its parent before a forced stop can bypass cl
       } finally { await next.dispose(); }
     } finally {
       await writeFile(release, 'done');
-      if (info) {
+      if (info && process.platform === 'linux') {
+        try {
+          await retireStoppedFixtureOwner(info.root, info.token);
+          await retireStoppedFixtureOwner(info.parent.parentRoot, info.parent.parentToken);
+          await retireStoppedFixtureOwner(owner.root, fixtureToken);
+        } catch (error) { preserve(); throw error; }
+      } else if (info) {
         if (existsSync(info.root)) await (await attachOwnedTemporaryDirectory(info.root)).dispose();
         if (existsSync(info.parent.parentRoot)) await (await attachOwnedTemporaryDirectory(info.parent.parentRoot)).dispose();
       }
     }
-    assert.deepEqual(await readdir(temporaryParent), []);
+    if (process.platform === 'linux' && info) assert.equal(existsSync(owner.root), false, 'manual teardown retires only this verified fixture owner');
+    else assert.deepEqual(await readdir(temporaryParent), []);
   });
 });
 

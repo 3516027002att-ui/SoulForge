@@ -110,6 +110,7 @@ async function main() {
   const workspace = await createOwnedTemporaryDirectory('hksc-build');
   const cancellation = createProcessCancellation();
   const temp = workspace.root;
+  let failure;
   try {
     const outputOwnerIndex = process.argv.indexOf('--owned-output-root');
     const outputOwner = outputOwnerIndex < 0 ? null : await attachOwnedTemporaryDirectory(process.argv[outputOwnerIndex + 1]);
@@ -131,40 +132,50 @@ async function main() {
       if (!processSucceeded(result) || !existsSync(output)) {
         throw new Error(`FIRST_PARTY_HKS_NATIVE_BUILD_FAILED: cc exit ${result.code} (${result.terminationReason ?? result.stderr})`);
       }
-      return;
     }
-    const responseFile = join(temp, 'cl.rsp');
-    const commandFile = join(temp, 'build.cmd');
-    const args = [
-      '/nologo',
-      '/LD',
-      '/O2',
-      '/D_CRT_SECURE_NO_WARNINGS',
-      '/DLUA_BUILD_AS_DLL',
-      '/DLUA_CORE',
-      `/I"${sourceRoot}"`,
-      `/Fe:"${join(outputDir, 'SoulForge.Hksc.Native.dll')}"`,
-      `/Fo"${temp}\\\\"`,
-      ...sourceFiles.map((file) => `"${join(sourceRoot, file)}"`)
-    ];
-    await writeFile(responseFile, `${args.join('\r\n')}\r\n`, 'ascii');
-    const devCmd = findVisualStudioDevCmd();
-    await writeFile(commandFile, `@echo off\r\ncall "${devCmd}" -arch=x64\r\nif errorlevel 1 exit /b %errorlevel%\r\ncl @"${responseFile}"\r\n`, 'ascii');
-    const result = await runProcess({ command: 'cmd.exe', args: ['/d', '/c', commandFile],
-      cwd: temp,
-      env: createWindowsCompilerEnvironment(),
-      owner: processOwner, signal: cancellation.signal,
-      onStdout: chunk => process.stdout.write(chunk), onStderr: chunk => process.stderr.write(chunk)
-    });
-    if (!processSucceeded(result)) {
-      throw new Error(`FIRST_PARTY_HKS_NATIVE_BUILD_FAILED: cl exit ${result.code} (${result.terminationReason ?? result.stderr})`);
+    else {
+      const responseFile = join(temp, 'cl.rsp');
+      const commandFile = join(temp, 'build.cmd');
+      const args = [
+        '/nologo',
+        '/LD',
+        '/O2',
+        '/D_CRT_SECURE_NO_WARNINGS',
+        '/DLUA_BUILD_AS_DLL',
+        '/DLUA_CORE',
+        `/I"${sourceRoot}"`,
+        `/Fe:"${join(outputDir, 'SoulForge.Hksc.Native.dll')}"`,
+        `/Fo"${temp}\\\\"`,
+        ...sourceFiles.map((file) => `"${join(sourceRoot, file)}"`)
+      ];
+      await writeFile(responseFile, `${args.join('\r\n')}\r\n`, 'ascii');
+      const devCmd = findVisualStudioDevCmd();
+      await writeFile(commandFile, `@echo off\r\ncall "${devCmd}" -arch=x64\r\nif errorlevel 1 exit /b %errorlevel%\r\ncl @"${responseFile}"\r\n`, 'ascii');
+      const result = await runProcess({ command: 'cmd.exe', args: ['/d', '/c', commandFile],
+        cwd: temp,
+        env: createWindowsCompilerEnvironment(),
+        owner: processOwner, signal: cancellation.signal,
+        onStdout: chunk => process.stdout.write(chunk), onStderr: chunk => process.stderr.write(chunk)
+      });
+      if (!processSucceeded(result)) {
+        throw new Error(`FIRST_PARTY_HKS_NATIVE_BUILD_FAILED: cl exit ${result.code} (${result.terminationReason ?? result.stderr})`);
+      }
+      const output = join(outputDir, 'SoulForge.Hksc.Native.dll');
+      if (!existsSync(output)) throw new Error(`FIRST_PARTY_HKS_NATIVE_OUTPUT_MISSING: ${output}`);
     }
-    const output = join(outputDir, 'SoulForge.Hksc.Native.dll');
-    if (!existsSync(output)) throw new Error(`FIRST_PARTY_HKS_NATIVE_OUTPUT_MISSING: ${output}`);
+  } catch (error) {
+    failure = error;
   } finally {
     cancellation.dispose();
-    await workspace.dispose();
+    try { await workspace.dispose(); }
+    catch (cleanupError) {
+      if (failure) {
+        const operationMessage = failure instanceof Error ? failure.message : String(failure);
+        failure = new Error(`${operationMessage}\nFIRST_PARTY_HKS_NATIVE_CLEANUP_FAILED: ${cleanupError.message}`);
+      } else failure = cleanupError;
+    }
   }
+  if (failure) throw failure;
 }
 
 main().catch((error) => {
