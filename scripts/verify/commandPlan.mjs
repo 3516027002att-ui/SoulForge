@@ -53,6 +53,14 @@ export function parseNpmForward(tokens) {
   return result;
 }
 
+/** One transparent process wrapper; its child remains the check's source. */
+export function unwrapOwnedTestCommand(tokens) {
+  if (tokens[0] !== 'node' || tokens[2] !== '--') return null;
+  const file = tokens[1]?.replaceAll('\\', '/');
+  return file && (file === 'scripts/owned-test-environment.mjs' || file.endsWith('/scripts/owned-test-environment.mjs'))
+    && tokens.length > 3 ? tokens.slice(3) : null;
+}
+
 export function forwardTargets(workspaces, forward, currentDir = '') {
   if (forward.workspaces) return [...workspaces.byName.values()];
   if (forward.workspace !== null) {
@@ -101,6 +109,9 @@ export function planScript(repoRoot, workspaces, scriptName, { args = [], env = 
     const segments = tokenizeCommands(scripts[name]);
     if (scripts[`pre${name}`] || scripts[`post${name}`] || !segments
       || (extraArgs.length > 0 && segments.length !== 1) || kind === 'barrier') return opaque();
+    // Keep npm's real lifecycle, forwarded argv and && semantics. Unwrapping is
+    // for source classification, never permission to claim the body ran.
+    if (segments.some(tokens => unwrapOwnedTestCommand(tokens))) return opaque();
     stack.add(id);
     const steps = [];
     try {

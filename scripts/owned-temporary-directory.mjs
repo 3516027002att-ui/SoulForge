@@ -48,6 +48,9 @@ process.once('exit', () => {
       }
       const current = JSON.parse(readFileSync(join(root, markerName), 'utf8'));
       if (current.token !== record.token || current.directory !== basename(root)) throw new Error('OWNED_TEMP_OWNERSHIP_CHANGED');
+      // Retention never grants deletion authority; it only disables implicit
+      // cleanup until a caller repairs the evidence and explicitly disposes.
+      if (Object.hasOwn(current, 'retention')) continue;
       if (current.uncertainTrees?.some(pid => !windowsJobProvesStopped(current, pid, root))) throw new Error('OWNED_TEMP_PROCESS_UNCERTAIN');
       if (childrenAreLive(current, root)) throw new Error('OWNED_TEMP_PROCESS_LIVE');
       rmSync(root, removalOptions);
@@ -162,20 +165,21 @@ async function readOwner(root, owner) {
 }
 
 /** Reclaim only this checkout/owner's marked dead predecessors, never sf-* by convention. */
-export async function createOwnedTemporaryDirectory(owner, { parent = tmpdir() } = {}) {
+export async function createOwnedTemporaryDirectory(owner, { parent = tmpdir(), compact = false } = {}) {
   if (!/^[A-Za-z0-9._-]{1,100}$/.test(owner)) throw new Error('OWNED_TEMP_OWNER_INVALID');
+  if (typeof compact !== 'boolean') throw new Error('OWNED_TEMP_COMPACT_INVALID');
   const parentMetadata = await lstat(parent);
   if (!parentMetadata.isDirectory() || parentMetadata.isSymbolicLink()) throw new Error('OWNED_TEMP_PARENT_INVALID');
   parent = await realpath(parent);
-  const prefix = `sf-owned-${scope}-${owner}-`;
+  const legacyPrefix = `sf-owned-${scope}-${owner}-`, compactPrefix = `sft-${scope}-`;
   for (const entry of await readdir(parent, { withFileTypes: true })) {
-    if (!entry.name.startsWith(prefix) || !entry.isDirectory() || entry.isSymbolicLink()) continue;
+    if (![legacyPrefix, compactPrefix].some(prefix => entry.name.startsWith(prefix)) || !entry.isDirectory() || entry.isSymbolicLink()) continue;
     const candidate = join(parent, entry.name);
     const previous = await readOwner(candidate, owner);
-    if (!previous || !observer || previous.observer !== observer || processIsLive(previous.pid) || childrenAreLive(previous, candidate)) continue;
+    if (!previous || Object.hasOwn(previous, 'retention') || !observer || previous.observer !== observer || processIsLive(previous.pid) || childrenAreLive(previous, candidate)) continue;
     await rm(candidate, removalOptions);
   }
-  const root = await mkdtemp(join(parent, prefix));
+  const root = await mkdtemp(join(parent, compact ? compactPrefix : legacyPrefix));
   try { return await initializeOwnedTemporaryDirectory(owner, root); }
   catch (error) { await rm(root, removalOptions); throw error; }
 }
@@ -252,6 +256,18 @@ function directoryHandle(root, owner, record) {
     async trackProcessGroup(group) {
       if (!Number.isSafeInteger(group) || group <= 0) throw new Error('OWNED_TEMP_PROCESS_GROUP_INVALID');
       return updateProcesses(value => { if (!value.processGroups.includes(group)) value.processGroups.push(group); });
+    },
+    async retain(reason) {
+      if (typeof reason !== 'string' || !reason.trim()) throw new Error('OWNED_TEMP_RETENTION_INVALID');
+      await updateProcesses(value => {
+        if (Object.hasOwn(value, 'retention')) {
+          const existing = value.retention;
+          if (!existing || existing.schema !== 'soulforge.temporary-retention.v1'
+            || typeof existing.reason !== 'string' || !existing.reason || existing.reason.length > 512) throw new Error('OWNED_TEMP_RETENTION_INVALID');
+          return; // Repeated retention keeps the first bounded failure reason.
+        }
+        value.retention = { schema: 'soulforge.temporary-retention.v1', reason: reason.slice(0, 512) };
+      });
     },
     async dispose() {
       const current = await readOwner(root, owner);

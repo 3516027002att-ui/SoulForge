@@ -94,7 +94,11 @@ if (process.argv[1] === helperPath && process.argv[2] === '--worker') {
       if (process.platform !== 'win32' || result.terminationReason === 'spawn-error' || result.treeTerminated) {
         for (const ticket of [message.ticket].flat()) recordOwnedProcess(ticket, process.pid, { finished: true });
       }
-      if (process.connected) process.send({ type: 'result', result });
+      // A large result can still be queued after send() returns. Disconnecting
+      // first loses the receipt even when the writer exited successfully.
+      if (process.connected) await new Promise((resolveSent, rejectSent) => {
+        process.send({ type: 'result', result }, error => error ? rejectSent(error) : resolveSent());
+      });
       process.exitCode = result.code || 0;
     } catch (error) {
       console.error(error.message); process.exitCode = 1;

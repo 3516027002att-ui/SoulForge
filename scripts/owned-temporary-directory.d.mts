@@ -2,9 +2,10 @@ export interface OwnedTemporaryDirectory {
   root: string;
   trackProcess(pid: number, options?: { processGroup?: boolean; uncertainTree?: boolean }): Promise<{ root: string; token: string }>;
   trackProcessGroup(group: number): Promise<{ root: string; token: string }>;
+  retain(reason: string): Promise<void>;
   dispose(): Promise<void>;
 }
-export function createOwnedTemporaryDirectory(owner: string, options?: { parent?: string }): Promise<OwnedTemporaryDirectory>;
+export function createOwnedTemporaryDirectory(owner: string, options?: { parent?: string; compact?: boolean }): Promise<OwnedTemporaryDirectory>;
 export function initializeOwnedTemporaryDirectory(owner: string, root: string, options?: { ownerPid?: number; token?: string }): Promise<OwnedTemporaryDirectory>;
 export function attachOwnedTemporaryDirectory(root: string): Promise<OwnedTemporaryDirectory>;
 export function ownedTemporaryDirectoryIsIdle(root: string, owner: string, token?: string): Promise<boolean>;

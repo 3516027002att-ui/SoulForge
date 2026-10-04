@@ -5,6 +5,7 @@ import { loadWorkspaces } from './verify/scriptGraph.mjs';
 import { discoverChecks } from './verify/checkRegistry.mjs';
 import { runPlannedSuite, OUTCOME } from './verify/runner.mjs';
 import { summarizePlan } from './verify/commandPlan.mjs';
+import { createProcessCancellation } from './subprocess-control.mjs';
 
 const checkTiers = ['governance','unit','synthetic','native','release','e2e'];
 function parseCheckTiers(value, option) {
@@ -64,7 +65,14 @@ for (const name of names) {
 }
 const modernStatus = outcome => outcome === OUTCOME.PASSED ? 'passed' : outcome === OUTCOME.FAILED ? 'failed'
   : outcome === OUTCOME.NOT_ATTEMPTED ? 'not_run' : 'unavailable';
-if (!options.list && !options.audit) for (const entry of plan) {
+const cancellation = !options.list && !options.audit ? createProcessCancellation() : null;
+try { if (cancellation) for (const entry of plan) {
+  if (cancellation.signal.aborted) {
+    cache.clear();
+    results.push({scriptName:entry.scriptName,tier:entry.tier,status:'not_run',reason:'cancelled',
+      steps:entry.steps.map(step => ({...step,execution:'not_run',reason:'cancelled'}))});
+    continue;
+  }
   try {
     if (entry.buildInput && !entry.steps.some(step => step.kind === 'prepare')
       && entry.steps.some(step => !existsSync(resolve(step.cwd,step.args.at(-1))))) {
@@ -73,20 +81,20 @@ if (!options.list && !options.audit) for (const entry of plan) {
       continue;
     }
     const result = await runPlannedSuite({repoRoot,entry,timeoutMs:options.timeoutMs,cache,
-      injectEnv:workspaces.rootScripts['check'] !== undefined});
+      injectEnv:workspaces.rootScripts['check'] !== undefined,signal:cancellation.signal});
     results.push({...result,stdout:undefined,stderr:undefined,tier:entry.tier,status:modernStatus(result.outcome),
       ...(result.outcome !== OUTCOME.PASSED ? {tailStdout:result.stdout.slice(-8192),tailStderr:result.stderr.slice(-8192)}:{})});
   } catch (error) {results.push({scriptName:entry.scriptName,tier:entry.tier,status:'failed',reason:error.message,steps:[]});}
-}
+} } finally { cancellation?.dispose(); }
 const counts = Object.fromEntries(['passed','failed','unavailable','not_run'].map(status => [status,results.filter(r => r.status === status).length]));
 const blocking = results.filter(r => r.status === 'failed' || r.status === 'not_run'
   || (r.status === 'unavailable' && (options.requireExecuted || options.requiredTiers.includes(r.tier) || options.requiredSuites.includes(r.scriptName))));
-const ok = auditFindings.every(f => f.severity !== 'error') && blocking.length === 0
+const ok = cancellation?.signal.aborted !== true && auditFindings.every(f => f.severity !== 'error') && blocking.length === 0
   && (options.list || options.audit || results.some(r => r.status === 'passed'));
 const completionVerified = ok && !options.list && !options.audit && counts.passed > 0
   && counts.unavailable === 0 && counts.not_run === 0;
 const report = {ok,completionVerified,mode:options.list ? 'list':options.audit ? 'audit':'run',counts,auditFindings,
-  scheduling:summarizePlan(plan),...(options.list ? {suites:plan}:{}),results};
+  scheduling:summarizePlan(plan),...(options.list ? {suites:plan}:{}),...(cancellation?.signal.aborted ? {cancelled:true}:{}),results};
 if (options.jsonOut) {const path = resolve(repoRoot,options.jsonOut);mkdirSync(dirname(path),{recursive:true});writeFileSync(path,`${JSON.stringify(report,null,2)}\n`);}
 console.log(JSON.stringify(report,null,2));
 process.exitCode = ok ? 0 : 1;

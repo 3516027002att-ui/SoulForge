@@ -8,12 +8,36 @@ import { createRequire } from 'node:module';
 import test from 'node:test';
 import { mkdirSync } from 'node:fs';
 import { discoverChecks } from './verify/checkRegistry.mjs';
-import { loadWorkspaces } from './verify/scriptGraph.mjs';
+import { loadWorkspaces, resolveScriptEntries } from './verify/scriptGraph.mjs';
 import { planScript } from './verify/commandPlan.mjs';
 import { classifyOutcome, OUTCOME } from './verify/runner.mjs';
+import { createOwnedTemporaryDirectory } from './owned-temporary-directory.mjs';
 
 const runner = fileURLToPath(new URL('./check.mjs', import.meta.url));
 const compatibilityRunner = fileURLToPath(new URL('./verify.mjs', import.meta.url));
+test('transparent wrapper preserves actual lifecycle sources, requirements and opaque operation identity', async () => {
+  const owner = await createOwnedTemporaryDirectory('check-wrapper-graph');
+  const root = owner.root;
+  try {
+    for (const file of ['before.mjs', 'body.mjs', 'after.mjs']) {
+      writeFileSync(join(root, file), file === 'body.mjs' ? 'console.log(process.env.SOULFORGE_NATIVE_FIXTURE_ROOT);' : 'console.log("fixture");');
+    }
+    const packagePath = join(root, 'package.json');
+    writeFileSync(packagePath, JSON.stringify({ scripts: { pretest: 'node before.mjs', test: 'node body.mjs', posttest: 'node after.mjs' } }));
+    const before = loadWorkspaces(root), beforeEntry = discoverChecks(root, before).get('test');
+    writeFileSync(packagePath, JSON.stringify({ scripts: {
+      test: 'node scripts/owned-test-environment.mjs -- npm run soulforge:test-body --silent --',
+      'presoulforge:test-body': 'node before.mjs', 'soulforge:test-body': 'node body.mjs', 'postsoulforge:test-body': 'node after.mjs'
+    } }));
+    const after = loadWorkspaces(root), afterRegistry = discoverChecks(root, after), afterEntry = afterRegistry.get('test');
+    assert.deepEqual(resolveScriptEntries(root, after, 'test').entryFiles.sort(), resolveScriptEntries(root, before, 'test').entryFiles.sort());
+    assert.deepEqual(afterEntry.requirements, beforeEntry.requirements);
+    assert.equal(afterEntry.tier, beforeEntry.tier);
+    assert.deepEqual(planScript(root, after, 'test'), planScript(root, before, 'test'));
+    assert.equal(afterRegistry.has('soulforge:test-body'), false, 'private lifecycle body is not a second discovered suite');
+  } finally { await owner.dispose(); }
+});
+
 test('discovered desktop noEmit smokes use their source runners and execute actual assertions', () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
   const registry = discoverChecks(root, loadWorkspaces(root));

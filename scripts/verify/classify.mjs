@@ -11,7 +11,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { parseNpmForward, tokenizeCommands } from './commandPlan.mjs';
+import { parseNpmForward, tokenizeCommands, unwrapOwnedTestCommand } from './commandPlan.mjs';
 
 /** 环境变量 → 需求类别。未列出的 SOULFORGE_* 不构成外部依赖。 */
 const ENV_REQUIREMENT = Object.freeze({
@@ -55,7 +55,8 @@ const DOTNET_MODULE_HINTS = Object.freeze([
 export function parseScriptCommand(command, workspaceDir) {
   const entries = [];
   const forwards = [];
-  for (const tokens of tokenizeCommands(command) ?? []) {
+  for (const originalTokens of tokenizeCommands(command) ?? []) {
+    const tokens = unwrapOwnedTestCommand(originalTokens) ?? originalTokens;
     const forward = parseNpmForward(tokens);
     if (forward) {
       const { args, ...target } = forward;
