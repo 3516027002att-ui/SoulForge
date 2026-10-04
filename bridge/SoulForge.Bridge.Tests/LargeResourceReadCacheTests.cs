@@ -98,6 +98,44 @@ public sealed class LargeResourceReadCacheTests
     }
 
     [Fact]
+    public async Task ColdCacheUsesShortOwnedStagingBeforeHashBoundPublication()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "sf-large-cache-staging-" + Guid.NewGuid()); Directory.CreateDirectory(Path.Combine(root, "source"));
+        var source = Path.Combine(root, "source", "effects.ffxbnd.dcx");
+        var sourceBytes = new byte[] { 1, 2, 3 }; await File.WriteAllBytesAsync(source, sourceBytes);
+        var sourceHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(sourceBytes)).ToLowerInvariant();
+        var cacheRoot = Path.Combine(root, "cache");
+        string? staging = null;
+        var fixture = new FixtureUnpacker(source);
+        var tool = new ControlledUnpacker(async (snapshot, destination, token) => {
+            staging = Path.GetDirectoryName(snapshot)!;
+            Assert.Equal(cacheRoot, Path.GetDirectoryName(staging));
+            Assert.Matches("^\\.pending-[0-9a-f]{32}$", Path.GetFileName(staging));
+            Assert.True(staging.Length <= cacheRoot.Length + 42, "Tool CWD must not inherit the two SHA-256 cache-key components.");
+            Assert.Equal(Path.Combine(staging, "unpacked"), destination);
+            Assert.NotEqual(source, snapshot);
+            Assert.Equal(sourceBytes, await File.ReadAllBytesAsync(snapshot, token));
+            await fixture.UnpackAsync(snapshot, destination, token);
+        });
+        try
+        {
+            var cache = new LargeResourceReadCache(cacheRoot, tool);
+            var result = await cache.GetAsync(source, new[] { Path.GetDirectoryName(source)! }, CancellationToken.None);
+            Assert.Equal(Path.Combine(cacheRoot, sourceHash, tool.Identity), result.Root);
+            Assert.True(File.Exists(Path.Combine(result.Root, "manifest.json")));
+            Assert.False(File.Exists(Path.Combine(result.Root, Path.GetFileName(source))));
+            Assert.NotNull(staging);
+            Assert.False(Directory.Exists(staging));
+            Assert.Equal(new[] { Path.Combine(cacheRoot, sourceHash) }, Directory.GetDirectories(cacheRoot));
+            Assert.Equal(new byte[] { 4, 5, 6 }, result.ReadEntry(Assert.Single(result.Entries)));
+            await cache.GetAsync(source, new[] { Path.GetDirectoryName(source)! }, CancellationToken.None);
+            Assert.Equal(1, fixture.Calls);
+            Assert.Equal(sourceBytes, await File.ReadAllBytesAsync(source));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Fact]
     public async Task MissingUnpackerAndUnsafeManifestFailWithStructuredReasons()
     {
         var root = Path.Combine(Path.GetTempPath(), "sf-large-cache-negative-" + Guid.NewGuid());
@@ -246,17 +284,26 @@ public sealed class LargeResourceReadCacheTests
     {
         var root = Path.Combine(Path.GetTempPath(), "sf-large-cache-cancel-" + Guid.NewGuid()); Directory.CreateDirectory(Path.Combine(root, "source"));
         var source = Path.Combine(root, "source", "source.dcx"); await File.WriteAllBytesAsync(source, new byte[] { 1 });
+        var cacheRoot = Path.Combine(root, "cache");
+        string? staging = null;
         using var cancellation = new CancellationTokenSource();
-        var tool = new ControlledUnpacker(async (_, destination, token) => {
+        var tool = new ControlledUnpacker(async (snapshot, destination, token) => {
+            staging = Path.GetDirectoryName(snapshot)!;
             await File.WriteAllBytesAsync(Path.Combine(destination, "partial.fxr"), new byte[] { 4 }, token);
             cancellation.Cancel();
             await Task.Delay(Timeout.Infinite, token);
         });
         try
         {
-            var cache = new LargeResourceReadCache(Path.Combine(root, "cache"), tool);
+            var cache = new LargeResourceReadCache(cacheRoot, tool);
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cache.GetAsync(source, new[] { Path.GetDirectoryName(source)! }, cancellation.Token));
-            Assert.Empty(Directory.GetFiles(Path.Combine(root, "cache"), "*", SearchOption.AllDirectories));
+            Assert.NotNull(staging);
+            Assert.Equal(cacheRoot, Path.GetDirectoryName(staging));
+            Assert.False(Directory.Exists(staging));
+            Assert.Empty(Directory.GetFiles(cacheRoot, "*", SearchOption.AllDirectories));
+            Assert.Empty(Directory.GetDirectories(cacheRoot, "*pending*", SearchOption.AllDirectories));
+            var sourceHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(new byte[] { 1 })).ToLowerInvariant();
+            Assert.False(Directory.Exists(Path.Combine(cacheRoot, sourceHash, tool.Identity)));
             Assert.Equal(new byte[] { 1 }, await File.ReadAllBytesAsync(source));
         }
         finally { Directory.Delete(root, true); }

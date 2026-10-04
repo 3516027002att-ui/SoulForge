@@ -220,7 +220,9 @@ internal sealed class LargeResourceReadCache(string cacheRoot, ILargeResourceUnp
         }
         RejectLinksInAncestors(parent);
         Directory.CreateDirectory(parent);
-        var pending = Path.Combine(parent, identity + ".pending-" + Guid.NewGuid());
+        // The snapshot directory is the tool's CWD. Keep it short for Windows
+        // CreateProcess; only the published cache needs both SHA-256 components.
+        var pending = Path.Combine(root, ".pending-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(pending);
         try
         {
