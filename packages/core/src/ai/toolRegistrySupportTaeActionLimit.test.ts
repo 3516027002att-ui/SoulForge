@@ -25,6 +25,7 @@ async function search(chunks: RagChunk[], limit: number) {
   return result.data as {
     totalHits: number;
     hits: Array<{ address: string; sourceUri: string; events: RagChunk[]; eventsComplete: boolean;
+      indexedEventsComplete: boolean; eventsTruncated: boolean;
       pagination: { totalCount: number | null; returnedCount: number; hasMore: boolean } }>;
   };
 }
@@ -43,12 +44,17 @@ test('TAE RAG duplicate events beyond the retrieval cap do not hide another acti
   chunks.push(event('A0020', 0, 'lower-ranked needle', 1));
   const result = await search(chunks, 2);
   assert.equal(result.totalHits, 2);
-  assert.equal(result.hits[0]?.eventsComplete, true);
+  assert.equal(result.hits[0]?.eventsComplete, false, 'a complete index is not a complete delivered window');
+  assert.equal(result.hits[0]?.indexedEventsComplete, true);
+  assert.equal(result.hits[0]?.eventsTruncated, true);
   assert.equal(result.hits[0]?.pagination.totalCount, 40);
   assert.equal(result.hits[0]?.pagination.returnedCount, 16);
   assert.equal(result.hits[0]?.pagination.hasMore, true);
   assert.deepEqual(result.hits[0]?.events.map(chunk => Number(/\/e(\d+)$/.exec(chunk.symbolUri)?.[1])),
     Array.from({ length: 16 }, (_, index) => index));
+  assert.equal(result.hits[1]?.indexedEventsComplete, true);
+  assert.equal(result.hits[1]?.eventsComplete, true);
+  assert.equal(result.hits[1]?.eventsTruncated, false);
 });
 
 test('TAE RAG action grouping keeps source identity, siblings and unknown native counts', async () => {
@@ -61,6 +67,8 @@ test('TAE RAG action grouping keeps source identity, siblings and unknown native
   assert.deepEqual(action.events.map(chunk => chunk.symbolUri),
     ['action://c0000/entry/2/A0010/e0', 'action://c0000/entry/2/A0010/e2']);
   assert.equal(action.eventsComplete, false);
+  assert.equal(action.indexedEventsComplete, false);
+  assert.equal(action.eventsTruncated, true);
   assert.equal(action.pagination.totalCount, null);
   assert.equal(action.pagination.hasMore, true);
 });

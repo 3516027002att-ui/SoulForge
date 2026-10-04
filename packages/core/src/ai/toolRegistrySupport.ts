@@ -1265,8 +1265,10 @@ export async function ragSearchFallback(context: ToolContext, query: string, fam
       const size = Math.max(1, Math.min(16, Math.floor(20000 / Math.max(1, ...events.map((event) => Buffer.byteLength(JSON.stringify(event), 'utf8'))))));
       const nativeCounts = new Set(events.map(e => e.taeActionEventCount).filter((n): n is number => n !== undefined));
       const totalCount = nativeCounts.size === 1 ? [...nativeCounts][0]! : null;
-      const eventsComplete = totalCount !== null && totalCount === events.length && events.every(e => e.taeActionEventsComplete === true);
-      return { ...action, evidence: 'rag-candidate', events: events.slice(0, size), eventsComplete,
+      const indexedEventsComplete = totalCount !== null && totalCount === events.length && events.every(e => e.taeActionEventsComplete === true);
+      const delivered = events.slice(0, size);
+      const eventsComplete = indexedEventsComplete && delivered.length === totalCount;
+      return { ...action, evidence: 'rag-candidate', events: delivered, indexedEventsComplete, eventsComplete, eventsTruncated: !eventsComplete,
         pagination: { offset: 0, totalCount, returnedCount: Math.min(size, events.length),
           pageNumber: 1, totalPages: totalCount === null ? null : Math.ceil(totalCount / size), hasMore: !eventsComplete || events.length > size,
           nextRead: { tool: 'read_tae_events', args: { file: action.sourceUri, addresses: [action.address], pageSize: size } } } };

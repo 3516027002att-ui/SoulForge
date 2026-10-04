@@ -68,6 +68,10 @@ export function searchTaeActionPage(sources:()=>Iterable<TaeExport>,scoreEvent:(
     // Omit its preview and leave a one-event native continuation instead.
     const size=Math.max(1,previewSize);
     events.length=Math.min(events.length,previewSize);
+    // Index coverage and delivered-window coverage are different contracts.
+    const indexedEventsComplete=animation.eventCount!==undefined && animation.events.length===animation.eventCount
+      && animation.events.every((event,index)=>event.index===index);
+    const eventsComplete=indexedEventsComplete && events.length===animation.eventCount;
     const selector=animation.taeEntryIndex!==undefined?{taeEntryIndex:animation.taeEntryIndex}
       :animation.taeEntryId!==undefined?{taeEntryId:animation.taeEntryId}
       :animation.taeEntryName!==undefined?{taeEntryName:animation.taeEntryName}
@@ -76,8 +80,7 @@ export function searchTaeActionPage(sources:()=>Iterable<TaeExport>,scoreEvent:(
       item:{...animation,sourceUri:source.sourceUri,chrId:source.chrId,
         address:formatActionAddress({chr:source.chrId,animId:animation.animId,...selector}),
         sourceHash:source.outerFileHash??source.sourceHash,sourceRevision:source.sourceRevision,readerSchemaRevision:source.readerSchemaRevision,
-        eventsComplete:animation.eventCount!==undefined && animation.events.length===animation.eventCount
-          && animation.events.every((event,index)=>event.index===index),
+        indexedEventsComplete,eventsComplete,eventsTruncated:!eventsComplete,
         events,eventPageSize:size}};
   });
   const last=page.candidates.at(-1);
