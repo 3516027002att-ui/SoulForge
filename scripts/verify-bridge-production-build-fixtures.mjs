@@ -49,6 +49,7 @@ try {
   await seed('scripts/subprocess-control.mjs', '// controlled compiler lifecycle\n');
   await seed('scripts/owned-process.mjs', '// gated owned process\n');
   await seed('scripts/owned-windows-job.ps1', '# first-party Windows owned job\n');
+  await seed('scripts/owned-windows-job-status.ps1', '# atomic Windows job receipt\n');
   await seed('bridge/native/hksc/compiler.c', '// native compiler source\n');
   await seed('bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Hksc.Native.dll', 'native compiler v1\n');
   await seed('bridge/SoulForge.Bridge/Program.cs', 'class Program { }\n');
@@ -71,7 +72,7 @@ try {
   const written = await writeBridgeProductionBuildReceipt(root);
   assert.equal(written.manifestPath, join(root, BRIDGE_PRODUCTION_BUILD_RECEIPT));
   const fresh = await assertBridgeProductionBuildFresh(root);
-  assert.equal(fresh.current.source.fileCount, 13);
+  assert.equal(fresh.current.source.fileCount, 14);
   assert.equal(fresh.current.executable.sha256, written.receipt.executable.sha256);
 
   await seed('bridge/SoulForge.Bridge/bin/ignored-source.cs', 'ignored changed\n');
@@ -105,6 +106,10 @@ try {
   await writeBridgeProductionBuildReceipt(root);
   await expectStale('Windows job helper changes invalidate compiler lifecycle inputs', async () => {
     await seed('scripts/owned-windows-job.ps1', '# changed owned job\n');
+  });
+  await writeBridgeProductionBuildReceipt(root);
+  await expectStale('Windows job receipt helper changes invalidate compiler lifecycle inputs', async () => {
+    await seed('scripts/owned-windows-job-status.ps1', '# changed atomic job receipt\n');
   });
 
   await writeBridgeProductionBuildReceipt(root);
@@ -148,7 +153,7 @@ try {
 
   console.log(JSON.stringify({
     ok: true,
-    checks: 16,
+    checks: 17,
     message: 'Bridge production receipt fixtures passed'
   }));
 } finally {

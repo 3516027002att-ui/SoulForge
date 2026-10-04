@@ -86,6 +86,7 @@ test('Linux publish receipts bind native apphost and selected publish inputs', a
     await seed('scripts/subprocess-control.mjs', '// controlled compiler lifecycle');
     await seed('scripts/owned-process.mjs', '// gated owned process');
     await seed('scripts/owned-windows-job.ps1', '# first-party Windows owned job');
+    await seed('scripts/owned-windows-job-status.ps1', '# atomic Windows job receipt');
     await seed('bridge/native/hksc/compiler.c', '// native source');
     await seed('bridge/SoulForge.Bridge/Program.cs', '// source');
     await seed('package.json', JSON.stringify({ scripts: { 'bridge:publish': 'publish win-x64', 'bridge:publish:linux': 'publish linux-x64' } }));
@@ -99,6 +100,9 @@ test('Linux publish receipts bind native apphost and selected publish inputs', a
     await assertBridgeProductionBuildFresh(root, linux);
     await seed(winExe, 'unrelated Windows rebuild');
     await assertBridgeProductionBuildFresh(root, linux);
+    await seed('scripts/owned-windows-job-status.ps1', '# changed atomic job receipt');
+    await assert.rejects(assertBridgeProductionBuildFresh(root, linux), { code: 'BRIDGE_PRODUCTION_BUILD_STALE' });
+    await writeBridgeProductionBuildReceipt(root, linux);
     await seed('bridge/native/hksc/compiler.c', '// changed native source');
     await assert.rejects(assertBridgeProductionBuildFresh(root, linux), { code: 'BRIDGE_PRODUCTION_BUILD_STALE' });
     await writeBridgeProductionBuildReceipt(root, linux);

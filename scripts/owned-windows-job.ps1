@@ -110,12 +110,14 @@ $assigned = [Action[int]] {
 }
 $finished = [Action] {
   foreach ($path in $proofs.Keys) {
-    $proof = $proofs[$path]; $proof.state = 'finished'
+    $proof = $proofs[$path]
+    $assignedText = $proof | ConvertTo-Json -Compress
+    $proof.state = 'finished'
     $pending = "$path.$([Guid]::NewGuid()).next"
-    [IO.File]::WriteAllText($pending, ($proof | ConvertTo-Json -Compress), $utf8)
-    # Plain $null binds to an empty string for this .NET string parameter.
-    # NullString preserves the required null backup path on Windows PowerShell.
-    [IO.File]::Replace($pending, $path, [System.Management.Automation.Language.NullString]::Value)
+    $bytes = $utf8.GetBytes(($proof | ConvertTo-Json -Compress))
+    $file = [IO.File]::Open($pending, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try { $file.Write($bytes, 0, $bytes.Length); $file.Flush($true) } finally { $file.Dispose() }
+    Publish-SoulForgeOwnedJobProof -Pending $pending -Path $path -AssignedText $assignedText
   }
 }
 try {

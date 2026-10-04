@@ -259,6 +259,54 @@ test('Windows normal driver completion atomically records a finished proof in a 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('Windows finished proof survives a temporary reader without exposing partial JSON', { skip: process.platform !== 'win32' && 'Windows job API unavailable' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sf-owned-windows-proof-reader-'));
+  const owner = await createOwnedTemporaryDirectory('windows-proof-reader', { parent: root });
+  const driverReady = join(root, 'driver-ready'), driverRelease = join(root, 'driver-release');
+  const readerReady = join(root, 'reader-ready'), readerRelease = join(root, 'reader-release');
+  let reader, running, readerClosed;
+  try {
+    running = runProcess({ command: process.execPath, args: ['-e', `
+      const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(driverReady)},'ready');
+      const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(driverRelease)})){clearInterval(timer);process.exit(0);}},10);`],
+      cwd: owner.root, env: process.env, owner, timeoutMs: 15000 });
+    await waitFor(() => readFile(driverReady, 'utf8'), 'driver behind assigned proof');
+    const marker = JSON.parse(await readFile(join(owner.root, '.soulforge-temporary-owner.json'), 'utf8'));
+    const path = join(owner.root, `.soulforge-windows-job.${marker.windowsJobs[0].id}.json`);
+    const quote = value => `'${value.replaceAll("'", "''")}'`;
+    const source = `$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';
+      $reader=[IO.File]::Open(${quote(path)},[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read);
+      try {[IO.File]::WriteAllText(${quote(readerReady)},'ready');$until=[DateTime]::UtcNow.AddSeconds(10);
+        while(-not [IO.File]::Exists(${quote(readerRelease)})) {
+          if([DateTime]::UtcNow -gt $until){throw 'reader release timed out'};[Threading.Thread]::Sleep(10)
+        }
+      } finally {$reader.Dispose()}`;
+    reader = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')],
+      { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    readerClosed = once(reader, 'close');
+    let readerError = ''; reader.stderr.on('data', chunk => { readerError += chunk; });
+    await waitFor(() => readFile(readerReady, 'utf8'), 'proof reader lock');
+    await writeFile(driverRelease, 'done');
+    const pending = await waitFor(async () => (await readdir(owner.root)).find(name => name.startsWith('.soulforge-windows-job.') && name.endsWith('.next')), 'pending finished proof');
+    // The reader denies delete-sharing. Publication must keep the old receipt
+    // intact until an atomic replacement can succeed, not truncate/delete it.
+    assert.equal(JSON.parse(await readFile(path, 'utf8')).state, 'assigned');
+    assert.equal(JSON.parse(await readFile(join(owner.root, pending), 'utf8')).state, 'finished');
+    await delay(75);
+    assert.equal(JSON.parse(await readFile(path, 'utf8')).state, 'assigned');
+    await writeFile(readerRelease, 'done');
+    assert.equal((await readerClosed)[0], 0, readerError);
+    const result = await running;
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(JSON.parse(await readFile(path, 'utf8')).state, 'finished');
+    assert.ok(!(await readdir(owner.root)).some(name => name.endsWith('.next')));
+  } finally {
+    await writeFile(readerRelease, 'done'); await writeFile(driverRelease, 'done');
+    await stop(reader); if (running) await running;
+    await owner.dispose(); await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('Windows owned job ends lingering descendants after successful and failed drivers', { skip: process.platform !== 'win32' && 'Windows job API unavailable' }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'sf-owned-windows-job-test-'));
   try {

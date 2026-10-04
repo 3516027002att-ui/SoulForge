@@ -77,7 +77,8 @@ if (process.argv[1] === helperPath && process.argv[2] === '--worker') {
           return value && !/[\s"]/.test(value) ? value : `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1')}"`;
         };
         const commandLine = [options.command, ...options.args].map(quote).join(' ');
-        const source = await readFile(new URL('./owned-windows-job.ps1', import.meta.url), 'utf8');
+        const source = (await Promise.all(['owned-windows-job-status.ps1', 'owned-windows-job.ps1']
+          .map(name => readFile(new URL(name, import.meta.url), 'utf8')))).join('\n');
         options = { ...options, command: 'powershell.exe',
           args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')],
           stdinData: JSON.stringify({ ...message.options, commandLine, id, supervisorPid: process.pid,
