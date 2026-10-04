@@ -373,7 +373,7 @@ async function realScriptChannelLeg(source: string, channelPageSize: number): Pr
   };
 }
 
-/** bnd4 channel mirror: TS list → native read-dcx-document fallback for real BND. */
+/** Real DCX-wrapped BND4 for the bnd4 channel: page the native read-dcx-document entry table. */
 async function realBnd4ChannelLeg(source: string, pageSize: number): Promise<RealCorpusResult> {
   const tsResult = await listContainerChildren(source, { relativePath: 'menu.msgbnd.dcx' });
   const header = await readFile(source);
@@ -387,7 +387,7 @@ async function realBnd4ChannelLeg(source: string, pageSize: number): Promise<Rea
   if (!realNative) {
     throw new Error('真实 msgbnd 未识别为原生 BND 容器。');
   }
-  // Mirror ipc.ts enumerateNativeContainerEntries.
+  // Mirror the DCX branch of rawResourceService.enumerateNativeContainerEntries.
   const dcx = await runBridge<{
     nested?: {
       entryCount?: number;
@@ -429,7 +429,7 @@ async function realBnd4ChannelLeg(source: string, pageSize: number): Promise<Rea
     total: children.length,
     pageCount,
     pageSizes: windowSizes(children.length, pageSize),
-    notes: ['TS 枚举 0 子项 → 原生 read-dcx-document 全量条目表；read/replace 对真实 BND 仍失败关闭']
+    notes: ['真实 DCX→BND4 条目表经 read-dcx-document 枚举；read/replace 对真实 BND 仍失败关闭']
   };
 }
 
@@ -674,6 +674,8 @@ function assertIpcSharesWindowHelper(): void {
       .sort()
       .map((name) => readFileSync(resolve(ipcRoot, name), 'utf8'))
   ].join('\n');
+  const rawResourceService = readFileSync(resolve(root, 'apps/desktop/src/main/services/rawResourceService.ts'), 'utf8');
+  const paramService = readFileSync(resolve(root, 'apps/desktop/src/main/services/paramService.ts'), 'utf8');
   // The desktop main must import the shared window helper (single authority) and
   // must not define a private copy that could drift from this smoke.
   if (!ipc.includes('normalizePageWindow')) throw new Error('ipc.ts 必须使用共享 normalizePageWindow。');
@@ -683,15 +685,29 @@ function assertIpcSharesWindowHelper(): void {
   // 五个分页通道是否真的注册、preload 是否真的把对应方法接到它们上，改由
   // npm run test:desktop-ipc-contract 真实执行观测（含双向对账）。此处再做
   // 一遍子串匹配只会两处漂移：那边改名这边照过，实测已证明过一次。
-  // param channel: real-corpus read must pass an explicit empty options object
-  // (C# InvalidOperationException guard) and must not throw on payload-less rows.
-  if (!ipc.includes('commandOptions: {}') || !ipc.includes('typeof row.dataBase64 === \'string\'')) {
-    throw new Error('readParamPage 必须显式传空 commandOptions 且对无 payload 行保持安全。');
+  // Real-corpus PARAM reads stay payload-null-safe. The explicit empty object
+  // avoids relying on Bridge defaults; loadAll is the only full-payload path.
+  if (!/commandOptions:\s*loadAll\s*\?\s*\{\s*includeAllPayloads:\s*true\s*\}\s*:\s*\{\s*\}/.test(paramService)
+    || !paramService.includes('typeof row.dataBase64 === \'string\'')) {
+    throw new Error('readParamPage must send empty default commandOptions, explicitly request load-all payloads, and stay payload-null-safe');
   }
-  // bnd4 channel: real (non-SFBN) BND containers must fall back to native
-  // full entry-table enumeration so real corpus is not an empty table.
-  for (const token of ['isRealNativeBndContainer', 'enumerateNativeContainerEntries', 'BND_NATIVE_ENUMERATION_COMPLETE']) {
-    if (!ipc.includes(token)) throw new Error(`listContainerChildrenPage 缺少原生枚举 ${token}。`);
+  // Requested-page bytes must be fetched from the same normalized window that
+  // produced the visible rows; a whole-table index read carries no row payload.
+  if (!paramService.includes('rowPage: bridgePage') || !paramService.includes('rowPageSize: window.size')) {
+    throw new Error('readParamPage 必须按当前页下传 rowPage/rowPageSize，不能以全表索引读代替当页行字节。');
+  }
+  // Native container routing lives in the RAW service; behavior ports remain in
+  // raw-domain-service.fixture (short reads, refusal/no-fallback, exact SFBN gate).
+  const nativeBnd4Route = "command: kind === 'bnd4' ? 'list-bnd4-entries' : 'read-dcx-document'";
+  for (const token of [
+    'async function probeNativeContainerKind',
+    "magic === 'BND3' || magic === 'BND4'",
+    "return magic === 'DCX\\0' ? 'dcx' : null;",
+    nativeBnd4Route,
+    "code: 'BND3_NATIVE_ENUMERATION_UNSUPPORTED'",
+    "code: 'BND_NATIVE_ENUMERATION_COMPLETE'"
+  ]) {
+    if (!rawResourceService.includes(token)) throw new Error(`rawResourceService 容器路由缺少 ${token}。`);
   }
 }
 

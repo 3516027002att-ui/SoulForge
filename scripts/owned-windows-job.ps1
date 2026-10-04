@@ -113,7 +113,9 @@ $finished = [Action] {
     $proof = $proofs[$path]
     $assignedText = $proof | ConvertTo-Json -Compress
     $proof.state = 'finished'
-    $pending = "$path.$([Guid]::NewGuid()).next"
+    # Keep only the temporary sibling basename short: owned TEMP roots may already
+    # be nested, while the published proof path remains part of owner identity.
+    $pending = [IO.Path]::Combine([IO.Path]::GetDirectoryName($path), ".sf-wjob.$([Guid]::NewGuid()).next")
     $bytes = $utf8.GetBytes(($proof | ConvertTo-Json -Compress))
     $file = [IO.File]::Open($pending, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
     try { $file.Write($bytes, 0, $bytes.Length); $file.Flush($true) } finally { $file.Dispose() }

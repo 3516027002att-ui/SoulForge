@@ -441,6 +441,45 @@ test('Windows normal driver completion atomically records a finished proof in a 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('Windows finished proof uses a short pending path when the legacy name exceeds MAX_PATH', { skip: process.platform !== 'win32' && 'Windows job API unavailable' }, async () => {
+  const outer = await mkdtemp(join(tmpdir(), 'sf-wjob-max-path-'));
+  let owner, ownerRoot;
+  try {
+    // The checker gives each operation a private TEMP. Choose a fixed parent
+    // length so the final proof remains below MAX_PATH while the old appended
+    // GUID suffix would put the pending sibling above it.
+    const base = resolve(outer), parentLength = 125;
+    const paddingLength = parentLength - base.length - 1;
+    assert.ok(paddingLength > 0 && paddingLength < 240, 'the owned test TEMP must leave room for a bounded path probe');
+    const parent = join(base, 'p'.repeat(paddingLength));
+    assert.equal(parent.length, parentLength);
+    await mkdir(parent);
+    owner = await createOwnedTemporaryDirectory('windows-job-path-limit', { parent });
+    ownerRoot = owner.root;
+    const sentinelId = '00000000-0000-0000-0000-000000000000';
+    const legacyProof = join(owner.root, '.soulforge-windows-job.' + sentinelId + '.json');
+    const legacyPending = legacyProof + '.' + sentinelId + '.next';
+    const shortPending = join(owner.root, '.sf-wjob.' + sentinelId + '.next');
+    assert.ok(legacyProof.length < 260, 'the owner identity and published proof path must remain valid');
+    assert.ok(legacyPending.length > 260, 'the former appended-GUID pending name must cross MAX_PATH');
+    assert.ok(shortPending.length < 260, 'the same-directory random pending basename must remain bounded');
+
+    const result = await runProcess({ command: process.execPath, args: ['-e', 'process.exit(0)'],
+      cwd: owner.root, env: process.env, owner, timeoutMs: 15000 });
+    assert.equal(result.code, 0, result.stderr);
+    const marker = JSON.parse(await readFile(join(owner.root, '.soulforge-temporary-owner.json'), 'utf8'));
+    assert.equal(marker.windowsJobs.length, 1);
+    const proofPath = join(owner.root, '.soulforge-windows-job.' + marker.windowsJobs[0].id + '.json');
+    assert.ok(proofPath.length < 260);
+    assert.equal(JSON.parse(await readFile(proofPath, 'utf8')).state, 'finished');
+    assert.ok(!(await readdir(owner.root)).some(name => name.endsWith('.next')));
+    await owner.dispose(); owner = undefined;
+    await assert.rejects(lstat(ownerRoot), { code: 'ENOENT' });
+  } finally {
+    if (owner) await owner.dispose();
+    await rm(outer, { recursive: true, force: true });
+  }
+});
 test('Windows finished proof survives a temporary reader without exposing partial JSON', { skip: process.platform !== 'win32' && 'Windows job API unavailable' }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'sf-owned-windows-proof-reader-'));
   const owner = await createOwnedTemporaryDirectory('windows-proof-reader', { parent: root });
@@ -469,7 +508,25 @@ test('Windows finished proof survives a temporary reader without exposing partia
     let readerError = ''; reader.stderr.on('data', chunk => { readerError += chunk; });
     await waitFor(() => readFile(readerReady, 'utf8'), 'proof reader lock');
     await writeFile(driverRelease, 'done');
-    const pending = await waitFor(async () => (await readdir(owner.root)).find(name => name.startsWith('.soulforge-windows-job.') && name.endsWith('.next')), 'pending finished proof');
+    const observation = await Promise.race([
+      waitFor(async () => (await readdir(owner.root)).find(name => name.startsWith('.sf-wjob.') && name.endsWith('.next')), 'pending finished proof')
+        .then(pending => ({ kind: 'pending', pending }), error => ({ kind: 'timeout', error })),
+      running.then(result => ({ kind: 'writer', result }), error => ({ kind: 'writer-error', error }))
+    ]);
+    if (observation.kind !== 'pending') {
+      // Do not hide an early PowerShell failure behind the pending-file timeout.
+      await writeFile(readerRelease, 'done');
+      await readerClosed;
+      const result = observation.kind === 'writer' ? observation.result
+        : await running.catch(error => ({ code: null, stderr: error.message }));
+      let finalState;
+      try { finalState = JSON.parse(await readFile(path, 'utf8')).state; }
+      catch (error) { finalState = 'unreadable: ' + error.message; }
+      const cause = observation.kind === 'timeout' ? observation.error.message
+        : observation.kind === 'writer-error' ? observation.error.message : 'writer completed before pending was visible';
+      throw new Error(cause + '; writer code=' + result.code + '; stderr=' + result.stderr + '; final proof=' + finalState);
+    }
+    const pending = observation.pending;
     // The reader denies delete-sharing. Publication must keep the old receipt
     // intact until an atomic replacement can succeed, not truncate/delete it.
     assert.equal(JSON.parse(await readFile(path, 'utf8')).state, 'assigned');
@@ -484,7 +541,7 @@ test('Windows finished proof survives a temporary reader without exposing partia
     assert.ok(!(await readdir(owner.root)).some(name => name.endsWith('.next')));
   } finally {
     await writeFile(readerRelease, 'done'); await writeFile(driverRelease, 'done');
-    await stop(reader); if (running) await running;
+    await stop(reader); if (running) await running.catch(() => {});
     await owner.dispose(); await rm(root, { recursive: true, force: true });
   }
 });

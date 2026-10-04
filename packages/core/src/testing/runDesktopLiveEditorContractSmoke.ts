@@ -30,6 +30,7 @@ function main(): void {
       .sort()
       .map((name) => readFileSync(resolve(root, 'apps/desktop/src/main/services', name), 'utf8'))
   ].join('\n');
+  const rawResourceService = readFileSync(resolve(root, 'apps/desktop/src/main/services/rawResourceService.ts'), 'utf8');
   const paramService = readFileSync(resolve(root, 'apps/desktop/src/main/services/paramService.ts'), 'utf8');
   const bridgeStaging = readFileSync(
     resolve(root, 'packages/core/src/editing/bridgeStaging.ts'),
@@ -80,10 +81,19 @@ function main(): void {
       + ' a full-table read alone never carries payloads (C# gates payloads per page)'
     );
   }
-  // Real (non-SFBN) BND4 containers must fall back to native full entry-table
-  // enumeration so the bnd4 editor gets complete bounded access on real corpus.
-  for (const token of ['isRealNativeBndContainer', 'enumerateNativeContainerEntries', 'BND_NATIVE_ENUMERATION_COMPLETE']) {
-    if (!ipc.includes(token)) throw new Error(`ipc missing bnd4 native enumeration ${token}`);
+  // RAW service owns native container routing. This guard stays anchored to the
+  // current bounded header route; raw-domain-service.fixture exercises read,
+  // refusal, and narrowly permitted SFBN fallback behavior without cloning the parser.
+  const nativeBnd4Route = "command: kind === 'bnd4' ? 'list-bnd4-entries' : 'read-dcx-document'";
+  for (const token of [
+    'async function probeNativeContainerKind',
+    "magic === 'BND3' || magic === 'BND4'",
+    "return magic === 'DCX\\0' ? 'dcx' : null;",
+    nativeBnd4Route,
+    "code: 'BND3_NATIVE_ENUMERATION_UNSUPPORTED'",
+    "code: 'BND_NATIVE_ENUMERATION_COMPLETE'"
+  ]) {
+    if (!rawResourceService.includes(token)) throw new Error(`RAW container routing contract missing ${token}`);
   }
   if (!ipc.includes("game: 'sekiro'")
     || !ipc.includes('rejectNonSekiroNativeWrite(sourceUri, file)')) {
@@ -109,7 +119,7 @@ function main(): void {
       'stable LOCALAPPDATA staging root with cleanup',
       'shared normalizePageWindow windowing authority (no private copy)',
       'readParamPage: payload-null-safe rows + explicit per-page row byte fetch (rowPage/rowPageSize)',
-      'listContainerChildrenPage: native BND4 full enumeration fallback for real containers'
+      'listContainerChildrenPage: bounded header routing (loose BND4 native list, DCX document, BND3 unavailable)'
     ],
     rendererUi: 'verified-by-separate-renderer-suites',
     delegatedTo: 'npm run test:desktop-ipc-contract（分页 channel 注册 / preload 分页方法接线 / 双向对账，真实执行观测）'
