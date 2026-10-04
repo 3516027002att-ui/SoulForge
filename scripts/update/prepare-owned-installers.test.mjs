@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {ownedInstallerIdentity,ownedInstallerConfig,prepareOwnedInstallers} from './prepare-owned-installers.mjs';
+import {ownedInstallerIdentity,ownedInstallerConfig,prepareOwnedInstallers,productionBuildIdentity} from './prepare-owned-installers.mjs';
 
 test('owned A/B configs override every official install identity and forbid publishing/elevation',()=>{
   const identity=ownedInstallerIdentity('a'.repeat(32));
@@ -19,4 +19,12 @@ test('owned A/B configs override every official install identity and forbid publ
 
 test('generating an executable installation manifest requires explicit isolated-install intent',async()=>{
   await assert.rejects(()=>prepareOwnedInstallers({repositoryRoot:process.cwd()}),/allow-owned-installation/);
+});
+
+test('installer fingerprints read the actual nested production manifest and reject guessed aliases',()=>{
+  const source='a'.repeat(64),output='b'.repeat(64);
+  assert.deepEqual(productionBuildIdentity({schemaVersion:1,source:{sha256:source},output:{sha256:output}}),
+    {productionSourceHash:source,productionOutputHash:output});
+  for(const manifest of [{schemaVersion:1,sourceHash:source,outputHash:output},{schemaVersion:1,source:{sha256:source}},
+    {schemaVersion:1,source:{sha256:source},output:{sha256:''}}])assert.throws(()=>productionBuildIdentity(manifest),/fingerprints/);
 });

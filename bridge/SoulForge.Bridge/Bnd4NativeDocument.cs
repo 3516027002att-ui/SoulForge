@@ -53,6 +53,10 @@ internal sealed class Bnd4NativeDocument
             if (compressedSize < 0 || uncompressedSize < 0 || compressedSize > int.MaxValue
                 || entryDataOffset > source.Length || entryDataOffset + compressedSize > source.Length)
                 throw new InvalidDataException($"BND4 第 {index} 个子项范围越界。");
+            // A payload aliasing a header would let table updates change an
+            // untouched entry, or same-size writes corrupt container fields.
+            if (compressedSize > 0 && entryDataOffset < tableEnd)
+                throw new InvalidDataException($"BND4_PAYLOAD_OVERLAPS_HEADER: 第 {index} 个子项与容器头或条目头表重叠。");
             var name = ReadNullTerminatedUtf8(source, checked((int)nameOffset));
             seenNames.TryGetValue(name, out var duplicateIndex);
             var duplicateOrdinal = seenNames.ContainsKey(name) ? duplicateIndex + 1 : 0;

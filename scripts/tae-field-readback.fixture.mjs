@@ -14,6 +14,8 @@ globalThis[key] = {
   read: async input => {
     assert.equal(input.command, 'read-tae-document');
     const isAfter = fixture.commits.length > 0;
+    if (fixture.readReject === (isAfter ? 'after' : 'before'))
+      throw Object.assign(new Error('owned native artifact read rejection C:\\private\\owned-credential-placeholder'), {code:'BRIDGE_REQUEST_TIMEOUT'});
     if (isAfter && fixture.readFailure) return {parseStatus:'failed', diagnostics:[{severity:'error', code:'OWNED_READBACK_FAILURE', message:'owned readback failure'}]};
     return {parseStatus:'parsed', diagnostics:[], data:{sourceHash:'owned-hash', identityProjectionVersion:2,
       animations:[{animId:10, events:[{eventTypeId:100, startTime:0, endTime:1, parameterDecoded:isAfter ? fixture.decoded : true,
@@ -40,20 +42,31 @@ const hooks = registerHooks({
     return next(url, context);
   }
 });
-const {setTaeEventFields} = await import('../packages/core/dist/editing/taeEdit.js?field-readback');
+const {setTaeEventFields, setTaeEventTimes, insertTaeEvents} = await import('../packages/core/dist/editing/taeEdit.js?field-readback');
 hooks.deregister();
 const sizes = {b:1, u8:1, s8:1, u16:2, s16:2, u32:4, s32:4, s64:8, f32:4};
 const field = (type, value, extra = {}) => ({index:0, name:'OwnedField', type, size:sizes[type], offset:0, value, ...extra});
-async function verify({type='s32', requested, observed, expected, beforeExtra, afterExtra, decoded=true, readFailure=false, rejected=false}) {
+async function verify({type='s32', requested, observed, expected, beforeExtra, afterExtra, decoded=true, readFailure=false, rejected=false,
+  operation='fields', readReject}) {
   const root = await mkdtemp(join(tmpdir(), 'sf-tae-field-readback-'));
   const file = join(root, 'c0000.anibnd.dcx');
   await writeFile(file, 'owned fixture');
-  fixture = {before:[field(type, 0, beforeExtra)], after:[field(type, observed, afterExtra)], decoded, readFailure, commits:[]};
+  fixture = {before:[field(type, 0, beforeExtra)], after:[field(type, observed, afterExtra)], decoded, readFailure, readReject, commits:[]};
   const edit = {session:{layers:{overlayRoot:root}, meta:{workspaceId:'owned'}, resolveWritablePath:absolutePath=>({ok:true, absolutePath, diagnostics:[]})},
     allowedRoots:()=>[root], indexFile:async()=>({sha256:'owned-hash', sourceUri:pathToFileURL(file).href}), stagingRoot:join(root,'stage'),
     commitPort:{}};
   try {
-    const result = await setTaeEventFields({edit, file, edits:[{address:'c0000#A0010.e0', fieldName:'OwnedField', value:requested}]});
+    const invoke = () => operation === 'times'
+      ? setTaeEventTimes({edit, file, edits:[{address:'c0000#A0010.e0', startFrame:30, endFrame:60}]})
+      : operation === 'insert'
+        ? insertTaeEvents({edit, file, events:[{address:'c0000#A0010', eventTypeId:100, startFrame:30, endFrame:60, template:{address:'c0000#A0010.e0'}}]})
+        : setTaeEventFields({edit, file, edits:[{address:'c0000#A0010.e0', fieldName:'OwnedField', value:requested}]});
+    if (readReject === 'before') {
+      await assert.rejects(invoke, {code:'BRIDGE_REQUEST_TIMEOUT'});
+      assert.equal(fixture.commits.length, 0, 'pre-write read rejection must not imply a commit');
+      return;
+    }
+    const result = await invoke();
     if (rejected) {
       assert.equal(result.ok, false, JSON.stringify(result));
       assert.equal(result.error.code, 'TAE_SCHEMA_COVERAGE_GAP');
@@ -61,8 +74,9 @@ async function verify({type='s32', requested, observed, expected, beforeExtra, a
       return result;
     }
     assert.equal(result.ok, true, JSON.stringify(result));
-    assert.equal(result.nativeVerified, expected, `${type}: requested ${String(requested)}, observed ${String(observed)}`);
+    assert.equal(result.nativeVerified, expected, JSON.stringify({type, requested, observed}));
     assert.equal(result.opId, 'owned-op'); assert.equal(result.backupRoot, 'owned-backup');
+    if (operation === 'insert') assert.deepEqual(result.rollback, {tool:'rollback_operation', args:{opId:'owned-op'}});
     assert.equal(fixture.commits.length, 1, 'failed verification must not replay the commit');
     assert.equal(await readFile(file, 'utf8'), 'owned fixture', 'fixture must never write native bytes');
     return result;
@@ -117,4 +131,20 @@ test('TAE readback failure preserves a committed receipt without claiming native
   const result = await verify({requested:80, observed:80, expected:false, readFailure:true});
   assert.deepEqual(result.after, []);
   assert.ok(result.diagnostics.some(item=>item.code==='OWNED_READBACK_FAILURE'));
+});
+for (const operation of ['fields', 'times', 'insert']) {
+  test(`TAE ${operation} post-commit Promise rejection preserves the receipt without replay`, async () => {
+    const result = await verify({operation, requested:80, observed:80, expected:false, readReject:'after'});
+    assert.deepEqual(result.after, []);
+    assert.ok(result.diagnostics.some(item=>item.code==='TAE_POST_COMMIT_READBACK_FAILED'));
+    assert.doesNotMatch(JSON.stringify(result.diagnostics), /owned-credential-placeholder|private|native artifact read rejection/);
+  });
+}
+test('TAE pre-write Promise rejection does not manufacture a committed receipt', async () => {
+  for (const operation of ['fields', 'times', 'insert']) await verify({operation, requested:80, readReject:'before'});
+});
+test('TAE post-commit projection exception preserves the receipt as unverified', async () => {
+  const result = await verify({requested:80, observed:{toString:'invalid', valueOf:'invalid'}, expected:false});
+  assert.deepEqual(result.after, []);
+  assert.ok(result.diagnostics.some(item=>item.code==='TAE_POST_COMMIT_READBACK_FAILED'));
 });

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readFile, symlink } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runSuite } from './run-suite.mjs';
@@ -44,7 +44,9 @@ async function manifestFixture() {
     const path = join(root, `${label}.config.json`); await writeFile(path, bytes);
     configs[label] = { path, sha256: createHash('sha256').update(bytes).digest('hex') };
   }
-  const receipt = Buffer.from(JSON.stringify({ schemaVersion: 1, builderVersion: '26.16.1', sourceHead: 'a'.repeat(40), identity: manifest.identity, a: manifest.a, b: manifest.b, configs }));
+  const receipt = Buffer.from(JSON.stringify({ schemaVersion: 1, builderVersion: '26.16.1', sourceHead: 'a'.repeat(40),
+    trackedDiffSha256: 'b'.repeat(64), productionSourceHash: 'c'.repeat(64), productionOutputHash: 'd'.repeat(64),
+    identity: manifest.identity, a: manifest.a, b: manifest.b, configs }));
   manifest.buildReceiptPath = join(root, 'build-receipt.json'); manifest.buildReceiptSha256 = createHash('sha256').update(receipt).digest('hex');
   await writeFile(manifest.buildReceiptPath, receipt);
   return { root, manifest };
@@ -85,6 +87,18 @@ test('approved artifact manifest must bind an actual builder receipt and matchin
     await assert.rejects(() => validateInstalledManifest({ ...manifest, buildReceiptPath: undefined }), /BUILD_RECEIPT/);
     await writeFile(join(root, 'a.config.json'), '{}');
     await assert.rejects(() => validateInstalledManifest(manifest), /BUILD_RECEIPT/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('installer acceptance refuses a receipt without actual source and production-output fingerprints', async () => {
+  const { root, manifest } = await manifestFixture();
+  try {
+    const baseline = JSON.parse(await readFile(manifest.buildReceiptPath, 'utf8'));
+    for (const name of ['trackedDiffSha256', 'productionSourceHash', 'productionOutputHash']) {
+      const receipt = { ...baseline }; delete receipt[name];
+      const bytes = Buffer.from(JSON.stringify(receipt)); await writeFile(manifest.buildReceiptPath, bytes);
+      await assert.rejects(() => validateInstalledManifest({ ...manifest, buildReceiptSha256: createHash('sha256').update(bytes).digest('hex') }), /BUILD_RECEIPT/);
+    }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

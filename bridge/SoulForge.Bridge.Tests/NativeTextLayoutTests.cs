@@ -123,4 +123,45 @@ public sealed class NativeTextLayoutTests
         Assert.Equal(bytes, doc.Repack(doc.ToRepackEntries()));
         Assert.NotNull(doc.ToEnvelope());
     }
+
+    [Theory]
+    [InlineData("variable", 0x6c)]
+    [InlineData("fixed-rebuild", 0x6c)]
+    [InlineData("fixed-replace", 0x6c)]
+    [InlineData("fixed-rebuild", 0x04)]
+    public void PayloadAliasingHeaderCannotMutateContainerFields(string writer, int payloadOffset)
+    {
+        var bytes = Binder();
+        // 0x6c is entry 1's stored-size field. Growing entry 1 would silently
+        // change untouched entry 0; replacing entry 0 would corrupt that field.
+        I32(bytes, 0x40 + 24, payloadOffset);
+        var original = bytes.ToArray();
+        var error = Assert.Throws<InvalidDataException>(() =>
+        {
+            var doc = Bnd4NativeDocument.Read(bytes);
+            var entries = doc.ToRepackEntries().ToArray();
+            if (writer == "variable")
+            {
+                entries[1] = entries[1] with { StoredBytes = new byte[40], UncompressedSize = 40 };
+                doc.Repack(entries);
+            }
+            else if (writer == "fixed-rebuild")
+            {
+                entries[0] = entries[0] with { StoredBytes = new byte[8] };
+                doc.RebuildPreservingLayout(entries);
+            }
+            else doc.ReplaceEntrySameSize(0, new byte[8], doc.Entries[0].ContentHash);
+        });
+        Assert.Contains("BND4_PAYLOAD_OVERLAPS_HEADER", error.Message);
+        Assert.Equal(original, bytes);
+    }
+
+    [Fact]
+    public void EmptyPayloadDoesNotOverlapAnUnusedHeaderAddress()
+    {
+        var bytes = Binder();
+        I64(bytes, 0x40 + 8, 0); I64(bytes, 0x40 + 16, 0); I32(bytes, 0x40 + 24, 0x6c);
+        var doc = Bnd4NativeDocument.Read(bytes);
+        Assert.Equal(bytes, doc.Repack(doc.ToRepackEntries()));
+    }
 }

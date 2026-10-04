@@ -71,6 +71,9 @@ export async function validateInstalledManifest(manifest) {
     const receipt = await readBoundJson(manifest.buildReceiptPath, manifest.buildReceiptSha256);
     assert.equal(receipt.schemaVersion, 1); assert.ok(semver.valid(receipt.builderVersion));
     assert.match(receipt.sourceHead, /^[a-f0-9]{40}$/i); assert.deepEqual(receipt.identity, identity);
+    for (const name of ['trackedDiffSha256', 'productionSourceHash', 'productionOutputHash']) {
+      assert.match(receipt[name] ?? '', /^[a-f0-9]{64}$/, `actual ${name} is required`);
+    }
     for (const label of ['a', 'b']) {
       assert.deepEqual(receipt[label], manifest[label], 'receipt must bind the exact approved installer/version/hash');
       const config = await readBoundJson(receipt.configs?.[label]?.path, receipt.configs?.[label]?.sha256);

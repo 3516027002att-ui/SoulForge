@@ -405,6 +405,24 @@ function normalizeTaePageSize(value: number | undefined): number {
   return value;
 }
 
+/** Only call after the Patch Engine has confirmed the commit. Read/transport
+ * and projection failures cannot erase that transaction or trigger a replay. */
+async function readCommittedTaeEvents(edit: NativeEditSession, filePath: string, addresses: string[]): Promise<{
+  ok: boolean; events: TaeEventSnapshot[]; diagnostics: Diagnostic[];
+}> {
+  try {
+    const reread = await readTaeEnvelope(edit, filePath, addresses);
+    return reread.ok
+      ? { ok: true, events: projectEvents(reread.chrId, reread.animations), diagnostics: reread.diagnostics }
+      : { ok: false, events: [], diagnostics: reread.result.diagnostics };
+  } catch {
+    // Native exceptions may contain filesystem paths or transport credentials.
+    // Keep a stable diagnostic here, not the exception message/stack/details.
+    return { ok: false, events: [], diagnostics: [{ severity: 'error', code: 'TAE_POST_COMMIT_READBACK_FAILED',
+      message: '写入已提交，但原生回读出现异常，尚未验证；请按 opId 查询或回滚，禁止自动重放。' }] };
+  }
+}
+
 export async function setTaeEventTimes(input: {
   edit: NativeEditSession;
   file: string;
@@ -526,8 +544,8 @@ export async function setTaeEventTimes(input: {
     };
   }
 
-  const reread = await readTaeEnvelope(input.edit, resolved.path, before.map(event => event.address));
-  const after = reread.ok ? projectEvents(reread.chrId, reread.animations) : [];
+  const reread = await readCommittedTaeEvents(input.edit, resolved.path, before.map(event => event.address));
+  const after = reread.events;
   const nativeVerified = reread.ok && pending.every(({ event, edit }) => {
     const observed = after.find(item => item.address === event.address);
     return observed !== undefined
@@ -542,7 +560,7 @@ export async function setTaeEventTimes(input: {
     mutations: mutations.length,
     ...(outcome.result.opId ? { opId: outcome.result.opId } : {}),
     ...(outcome.result.backupRoot ? { backupRoot: outcome.result.backupRoot } : {}), nativeVerified,
-    diagnostics: [...envelope.diagnostics, ...outcome.result.diagnostics, ...(reread.ok ? [] : reread.result.diagnostics)]
+    diagnostics: [...envelope.diagnostics, ...outcome.result.diagnostics, ...(reread.ok ? [] : reread.diagnostics)]
   };
 }
 
@@ -714,8 +732,8 @@ export async function setTaeEventFields(input: {
     };
   }
 
-  const reread = await readTaeEnvelope(input.edit, resolved.path, before.map(event => event.address));
-  const after = reread.ok ? projectEvents(reread.chrId, reread.animations) : [];
+  const reread = await readCommittedTaeEvents(input.edit, resolved.path, before.map(event => event.address));
+  const after = reread.events;
   const nativeVerified = reread.ok && input.edits.every((edit, index) => {
     const previous = before[index]!;
     const observed = after.find(event => event.address === previous.address);
@@ -734,7 +752,7 @@ export async function setTaeEventFields(input: {
     mutations: mutations.length,
     ...(outcome.result.opId ? { opId: outcome.result.opId } : {}),
     ...(outcome.result.backupRoot ? { backupRoot: outcome.result.backupRoot } : {}), nativeVerified,
-    diagnostics: [...envelope.diagnostics, ...outcome.result.diagnostics, ...(reread.ok ? [] : reread.result.diagnostics)]
+    diagnostics: [...envelope.diagnostics, ...outcome.result.diagnostics, ...(reread.ok ? [] : reread.diagnostics)]
   };
 }
 
@@ -845,13 +863,13 @@ export async function insertTaeEvents(input: { edit: NativeEditSession; file: st
     const diagnostic = diagnostics.find(item => item.severity === 'error');
     return failure(diagnostic?.code ?? 'TAE_WRITE_FAILED', diagnostic?.message ?? 'TAE 新增失败。', diagnostics);
   }
-  const reread = await readTaeEnvelope(input.edit, resolved.path, input.events.map(e => e.address));
-  const after = reread.ok ? projectEvents(reread.chrId, reread.animations).filter(e => added.some(a => a.animId === e.animId && a.entryIndex === e.taeEntryIndex && a.eventIndex === e.eventIndex)) : [];
+  const reread = await readCommittedTaeEvents(input.edit, resolved.path, input.events.map(e => e.address));
+  const after = reread.events.filter(e => added.some(a => a.animId === e.animId && a.entryIndex === e.taeEntryIndex && a.eventIndex === e.eventIndex));
   return { ok: true as const, filePath: resolved.path, before: current.filter(e => added.some(a => a.animId === e.animId && a.entryIndex === e.taeEntryIndex)),
     after, mutations: mutations.length, nativeVerified: reread.ok && after.length === mutations.length,
     opId: outcome.result.opId, backupRoot: outcome.result.backupRoot,
     rollback: { tool: 'rollback_operation', args: { opId: outcome.result.opId } },
-    diagnostics: [...envelope.diagnostics, ...outcome.result.diagnostics, ...(reread.ok ? reread.diagnostics : reread.result.diagnostics)] };
+    diagnostics: [...envelope.diagnostics, ...outcome.result.diagnostics, ...reread.diagnostics] };
 }
 
 function matchesAddress(address: ActionAddress, event: Pick<TaeEventSnapshot, 'chrId' | 'animId' | 'eventIndex' | 'taeEntryIndex' | 'taeEntryId' | 'taeEntryName' | 'taeGroup'>): boolean {

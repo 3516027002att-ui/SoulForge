@@ -5,8 +5,16 @@ import {createRequire} from 'node:module';
 import {resolve,join,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {runProcess,processSucceeded} from '../subprocess-control.mjs';
+import {assertAgentProductionBuildFresh} from '../agent-production-build-lib.mjs';
 
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
+export function productionBuildIdentity(manifest) {
+  const productionSourceHash=manifest?.source?.sha256,productionOutputHash=manifest?.output?.sha256;
+  if(manifest?.schemaVersion!==1||![productionSourceHash,productionOutputHash].every(value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value))) {
+    throw new Error('Actual production source/output fingerprints are required');
+  }
+  return {productionSourceHash,productionOutputHash};
+}
 export function ownedInstallerIdentity(id=randomUUID().replaceAll('-','')) {
   if(!/^[a-f0-9]{32}$/.test(id))throw new Error('A fresh owned validation identity is required');
   const short=id.slice(0,12),productName=`SoulForge Validation ${short}`;
@@ -30,7 +38,7 @@ export async function prepareOwnedInstallers({repositoryRoot,allowOwnedInstallat
   const builderVersion=JSON.parse(await readFile(require.resolve('electron-builder/package.json'),'utf8')).version;
   if(builderVersion!=='26.16.1')throw new Error('Install the pinned electron-builder 26.16.1 in .local-validation/update-tools');
   const base=JSON.parse(await readFile(join(root,'apps/desktop/electron-builder.json'),'utf8'));
-  const productionManifest=JSON.parse(await readFile(join(root,'apps/desktop/out/agent-production-build.json'),'utf8'));
+  const production=productionBuildIdentity((await assertAgentProductionBuildFresh(root)).manifest);
   const parent=join(root,'.local-validation','owned-update-installers');await mkdir(parent,{recursive:true});
   const output=await mkdtemp(join(parent,'run-')),identity=ownedInstallerIdentity(),configs={},artifacts={};
   for(const [leg,version] of [['a','0.9.2-validation.1'],['b','0.9.2-validation.2']]){
@@ -49,8 +57,10 @@ export async function prepareOwnedInstallers({repositoryRoot,allowOwnedInstallat
   const head=await runProcess({command:'git',args:['rev-parse','HEAD'],cwd:root,timeoutMs:15_000});
   const diff=await runProcess({command:'git',args:['diff','HEAD','--binary'],cwd:root,timeoutMs:15_000,outputLimitBytes:16*1024*1024});
   if(!processSucceeded(head)||!processSucceeded(diff)||diff.stdoutTruncated||!/^[a-f0-9]{40}$/.test(head.stdout.trim()))throw new Error('Source identity unavailable');
+  const after=productionBuildIdentity((await assertAgentProductionBuildFresh(root)).manifest);
+  if(after.productionSourceHash!==production.productionSourceHash||after.productionOutputHash!==production.productionOutputHash)throw new Error('Production inputs changed during A/B packaging');
   const receipt={schemaVersion:1,builderVersion,sourceHead:head.stdout.trim(),trackedDiffSha256:hash(diff.stdout),
-    productionSourceHash:productionManifest.sourceHash,productionOutputHash:productionManifest.outputHash,identity,...artifacts,configs};
+    ...production,identity,...artifacts,configs};
   const receiptPath=join(output,'build-receipt.json'),receiptBytes=Buffer.from(JSON.stringify(receipt,null,2));await writeFile(receiptPath,receiptBytes);
   const manifest={schemaVersion:1,execute:true,identity,...artifacts,scope:'unsigned-owned-identity-manual-nsis-a-to-b-same-source',
     asarModulePath,asarModuleSha256:hash(await readFile(asarModulePath)),buildReceiptPath:receiptPath,buildReceiptSha256:hash(receiptBytes)};
