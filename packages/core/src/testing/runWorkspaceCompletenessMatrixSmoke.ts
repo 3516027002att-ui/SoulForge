@@ -203,13 +203,68 @@ async function main(): Promise<void> {
 
   const scan = await scanWorkspace({ workspaceRoot, game: 'sekiro' });
   const files = scan.files.filter((file) => !skipIndexedPath(file.relativePath));
+  const scanDiagnostics = scan.diagnostics ?? [];
+  // Failed enumeration/stat means the scanner may have omitted files. Hash
+  // enrichment warnings retain their IndexedFile row, while informational
+  // missing-resource-directory diagnostics do not apply to this whole-tree scan.
+  const incompleteScanCodes = new Set([
+    'WORKSPACE_ROOT_NOT_DIRECTORY',
+    'DIRECTORY_READ_FAILED',
+    'FILE_STAT_FAILED'
+  ]);
+  const incompleteScanDiagnostics = scanDiagnostics.filter((diagnostic) =>
+    diagnostic.severity === 'error' || incompleteScanCodes.has(diagnostic.code));
+  // A later reader open is not hash-bound to the indexed source version.
+  const sourceHashUnverifiedDiagnostics = scanDiagnostics.filter((diagnostic) => diagnostic.code === 'FILE_HASH_FAILED');
+  const sourceHashUnverifiedAbsolutePaths = new Set(sourceHashUnverifiedDiagnostics.flatMap((diagnostic) => {
+    const details = diagnostic.details;
+    const absolutePath = details !== null && typeof details === 'object'
+      ? (details as Record<string, unknown>).absolutePath
+      : undefined;
+    return typeof absolutePath === 'string' ? [absolutePath] : [];
+  }));
+  const sourceHashUnverifiedRelativePaths = new Set(files
+    .filter((file) => sourceHashUnverifiedAbsolutePaths.has(file.absolutePath))
+    .map((file) => file.relativePath));
+  const scanComplete = incompleteScanDiagnostics.length === 0;
+  const withScanCoverage = (
+    fileCoverage: ReturnType<typeof verifyFileCoverage>,
+    scanHashesComplete = true
+  ) => ({
+    ...fileCoverage,
+    inputOutputOk: fileCoverage.ok,
+    scanComplete,
+    scanHashesComplete,
+    ok: fileCoverage.ok && scanComplete && scanHashesComplete,
+    scope: 'All indexed files are classified; history/binary rows are excluded, and FILE_HASH_FAILED cannot prove the same source version.'
+  });
   if (files.length === 0) {
-    console.log(JSON.stringify({
-      ...summarizeNativeReads([{ family: 'native corpus', status: 'not_run' }]),
+    const fileCoverage = verifyFileCoverage([], []);
+    const summary = {
+      ...summarizeNativeReads(scanComplete
+        ? [{ family: 'native corpus', status: 'not_run' }]
+        : [{ family: 'workspace scan', status: 'failed' }]),
       smoke: 'workspace-completeness',
-      reason: 'NATIVE_CORPUS_EMPTY',
-      workspaceRoot
-    }, null, 2));
+      reason: scanComplete ? 'NATIVE_CORPUS_EMPTY' : 'WORKSPACE_SCAN_INCOMPLETE',
+      workspaceRoot,
+      scanned: 0,
+      coverage: withScanCoverage(fileCoverage),
+      scanDiagnostics,
+      incompleteScanDiagnostics,
+      sourceHashUnverifiedDiagnostics,
+      acceptanceUnavailable: [],
+      acceptanceScope: {
+        fourStateInputCount: 0,
+        excluded: {
+          history: { count: 0, reason: 'History entries are catalogued but excluded from the native-read acceptance gate.' },
+          binary: { count: 0, reason: 'Opaque binary entries are catalogued but excluded from the native-read acceptance gate.' }
+        }
+      }
+    };
+    console.log(JSON.stringify(summary, null, 2));
+    if (!scanComplete) {
+      throw new Error(`工作区完成度矩阵：扫描阶段有 ${incompleteScanDiagnostics.length} 项诊断影响文件枚举完整性。`);
+    }
     return;
   }
 
@@ -246,22 +301,49 @@ async function main(): Promise<void> {
     byFamily.set(item.familyId, current);
   }
 
-  const coverage = verifyFileCoverage(files.map((file) => file.relativePath), results.map((item) => item.relativePath));
-  const acceptanceRows: Array<{ relativePath: string; status: NativeReadStatus }> = results
-    .filter((item) => item.status !== 'history' && item.status !== 'binary')
+  const nativeAcceptanceResults = results
+    .filter((item) => item.status !== 'history' && item.status !== 'binary');
+  const sourceHashUnverifiedResults = nativeAcceptanceResults
+    .filter((item) => sourceHashUnverifiedRelativePaths.has(item.relativePath));
+  const scanHashesComplete = sourceHashUnverifiedResults.length === 0;
+  const acceptanceUnavailable = sourceHashUnverifiedResults
+    .filter((item) => item.status !== 'failed' && item.status !== 'timed-out')
+    .map((item) => ({
+      relativePath: item.relativePath,
+      diagnosticCode: 'FILE_HASH_FAILED',
+      reason: 'A successful open without a verified scanner hash cannot prove it read the same source version.'
+    }));
+  const acceptanceRows: Array<{ relativePath: string; status: NativeReadStatus }> = nativeAcceptanceResults
     .map((item) => ({ relativePath: item.relativePath,
-      status: item.status === 'opened' || item.status === 'opened-list-only' ? 'passed'
-        : item.status === 'failed' || item.status === 'timed-out' ? 'failed' : 'unavailable' }));
+      status: item.status === 'failed' || item.status === 'timed-out' ? 'failed'
+        : sourceHashUnverifiedRelativePaths.has(item.relativePath) ? 'unavailable'
+          : item.status === 'opened' || item.status === 'opened-list-only' ? 'passed' : 'unavailable' }));
+  const fileCoverage = verifyFileCoverage(files.map((file) => file.relativePath), results.map((item) => item.relativePath));
+  const coverage = withScanCoverage(fileCoverage, scanHashesComplete);
   const acceptance = summarizeNativeReads([
     ...acceptanceRows,
-    ...(!coverage.ok ? [{ relativePath: 'input-output coverage', status: 'failed' as const }] : [])
+    ...(!fileCoverage.ok ? [{ relativePath: 'input-output coverage', status: 'failed' as const }] : []),
+    ...(!scanComplete ? [{ relativePath: 'workspace scan', status: 'failed' as const }] : [])
   ]);
+  const historyCount = results.filter((item) => item.status === 'history').length;
+  const binaryCount = results.filter((item) => item.status === 'binary').length;
   const summary = {
     ...acceptance,
     smoke: 'workspace-completeness',
     workspaceRoot,
     scanned: results.length,
     coverage,
+    scanDiagnostics,
+    incompleteScanDiagnostics,
+    sourceHashUnverifiedDiagnostics,
+    acceptanceUnavailable,
+    acceptanceScope: {
+      fourStateInputCount: acceptanceRows.length,
+      excluded: {
+        history: { count: historyCount, reason: 'History entries are catalogued but excluded from the native-read acceptance gate.' },
+        binary: { count: binaryCount, reason: 'Opaque binary entries are catalogued but excluded from the native-read acceptance gate.' }
+      }
+    },
     opened: results.filter((item) => item.status === 'opened' || item.status === 'opened-list-only').length,
     failed,
     semanticFailed,
@@ -274,7 +356,7 @@ async function main(): Promise<void> {
   };
   console.log(JSON.stringify(summary, null, 2));
   if (acceptance.status === 'failed') {
-    throw new Error(`工作区完成度矩阵：${failed.length} 个文件打开失败；输入输出覆盖 ${coverage.ok ? '一致' : '不一致'}。`);
+    throw new Error(`工作区完成度矩阵：${failed.length} 个文件打开失败；输入输出覆盖 ${fileCoverage.ok ? '一致' : '不一致'}；扫描完整性 ${scanComplete ? '完整' : `失败（${incompleteScanDiagnostics.length} 项诊断）`}；扫描哈希完整性 ${scanHashesComplete ? '完整' : '不完整'}。`);
   }
 }
 
