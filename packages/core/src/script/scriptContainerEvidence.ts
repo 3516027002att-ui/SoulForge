@@ -2,7 +2,7 @@
  * Production script container evidence projection (W-BEHAVIOR-MAP-01).
  *
  * Provides a readonly, structured container-level magic/reference inventory
- * for script containers (luabnd, talkesdbnd, action/*.hks) backing the
+ * for script containers (luabnd, talkesdbnd) backing the
  * script editor:
  *   - entry enumeration (BND4 reference table: name / index / size / id);
  *   - extension distribution across the whole container;
@@ -27,8 +27,8 @@
  * evidence entry names are therefore sanitized to their basename so no
  * absolute path ever reaches the editor/renderer.
  *
- * SoulForge does NOT decompile, recompile, or execute scripts. Disassembly is
- * never presented as editable source.
+ * This inventory projection does not decompile, recompile, or execute scripts.
+ * Standalone source reading is a separate path, not a synthetic container.
  *
  * Authority cap: `candidate`. This projection proves container-level
  * enumeration, bytecode format identification and bounded header evidence
@@ -38,7 +38,7 @@
  * main-process `containerPath`.
  */
 
-import { runBridge } from '../bridge/runBridge.js';
+import { runBridge, type BridgeRunner } from '../bridge/runBridge.js';
 import type { StructuredDiagnostic } from '@soulforge/shared';
 import { createDiagnostic } from '@soulforge/shared';
 
@@ -100,6 +100,38 @@ export interface ScriptContainerEvidence {
   /** Authority marker: container-level inventory only (cap=candidate). */
   authority: 'candidate';
   diagnostics: StructuredDiagnostic[];
+}
+
+/**
+ * Container evidence must not turn a standalone script into a pretend BND4
+ * child. Keep the container-only API explicit and leave source opening to the
+ * production `readScriptSource` path.
+ */
+export function buildRequiresContainerEvidence(
+  containerPath: string,
+  containerFormat: string,
+  extensionDistribution: Record<string, number> = {}
+): ScriptContainerEvidence {
+  return {
+    ok: false,
+    containerPath,
+    containerFormat,
+    entryCount: 0,
+    entries: [],
+    truncated: false,
+    classificationSummary: emptyClassificationSummary(),
+    extensionDistribution,
+    magicVerifiedCount: 0,
+    scriptEntryCount: 0,
+    magicSampleCount: 0,
+    authority: 'candidate',
+    diagnostics: [createDiagnostic({
+      severity: 'error',
+      code: 'SCRIPT_EVIDENCE_REQUIRES_CONTAINER',
+      message: '该接口只提供 BND4 容器条目证据；独立脚本请走 readScriptSource，不构造虚假的 BND4 条目索引。',
+      targetUri: `file:///${containerPath.replace(/\\/g, '/')}`
+    })]
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -298,14 +330,15 @@ function normalizeExtensionKey(key: string): string {
  * script entry) and no absolute paths beyond the documented `containerPath`.
  */
 export async function buildScriptContainerEvidence(
-  options: ScriptEvidenceOptions
+  options: ScriptEvidenceOptions,
+  bridgeRunner: BridgeRunner = runBridge
 ): Promise<ScriptContainerEvidence> {
   const diagnostics: StructuredDiagnostic[] = [];
   const sourceUri = `file:///${options.containerPath.replace(/\\/g, '/')}`;
 
   // Step 1: Container anchor via Bridge inventory (format / entryCount /
   // extension distribution / bounded samples). Sanitized, container-level.
-  const inventory = await runBridge<Bnd4InventoryData>({
+  const inventory = await bridgeRunner<Bnd4InventoryData>({
     command: 'inventory-asset-resources',
     filePath: options.containerPath,
     resourceUri: sourceUri,
@@ -344,13 +377,24 @@ export async function buildScriptContainerEvidence(
     extensionDistribution[normalizeExtensionKey(key)] = count;
   }
 
+  // Non-container resources are not BND4s with a missing table. Reject them
+  // before list-bnd4-entries so a standalone `.hks`/`.lua` can never acquire a
+  // synthetic slot from the inventory sample.
+  if (data.containerType === 'none') {
+    return buildRequiresContainerEvidence(
+      options.containerPath,
+      data.format ?? 'raw',
+      extensionDistribution
+    );
+  }
+
   // Step 2: Full BND4 reference table (index / size / id per entry) via the
   // listing command (no mutation self-test). A missing reference table leaves
   // only name/id inventory, which must not be presented as a successful read.
   let rawEntries: Bnd4InventoryEntry[] = data.sampleEntries ?? data.entries ?? [];
   let containerFormat = data.format ?? 'BND4';
   let enumerationSource: 'list-bnd4-entries' | 'inventory-sample' = 'inventory-sample';
-  const dcx = await runBridge<Bnd4ListEnvelope>({
+  const dcx = await bridgeRunner<Bnd4ListEnvelope>({
     command: 'list-bnd4-entries',
     filePath: options.containerPath,
     resourceUri: sourceUri,
@@ -401,7 +445,7 @@ export async function buildScriptContainerEvidence(
   let magicVerifiedCount = 0;
   for (const entryIndex of luaBytecodeIndices.slice(0, MAGIC_SAMPLE_LIMIT)) {
     const entry = entries[entryIndex]!;
-    const snapshot = await runBridge<Bnd4ChildSnapshotEnvelope>({
+    const snapshot = await bridgeRunner<Bnd4ChildSnapshotEnvelope>({
       command: 'snapshot-bnd4-child',
       filePath: options.containerPath,
       resourceUri: sourceUri,

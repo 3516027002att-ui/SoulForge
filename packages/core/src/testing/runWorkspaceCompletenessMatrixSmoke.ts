@@ -7,12 +7,13 @@
  * 大文件（≥32MB）只跑容器目录 / DCX 文档头，不解整包载荷。
  */
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { readFile, stat } from 'node:fs/promises';
+import { basename, dirname, join, resolve } from 'node:path';
 import { disposeBridgeDaemonPool, runBridge, type BridgeCommand } from '../bridge/runBridge.js';
 import { readFmgDocumentViaBridge } from '../editing/fmgBridgeCommit.js';
 import { readMsbDocumentViaBridge } from '../editing/msbBridgeRead.js';
 import { buildScriptContainerEvidence } from '../script/scriptContainerEvidence.js';
+import { classifyPlaintextBytes, decodePlaintext } from '../script/plaintextScriptEntry.js';
 import { scanWorkspace } from '../workspace/scanWorkspace.js';
 import { classifyNativeRead, summarizeNativeReads, verifyFileCoverage, type NativeReadStatus } from '../../../../scripts/native-read-acceptance.mjs';
 import {
@@ -31,6 +32,118 @@ interface FileResult {
   size: number;
   status: 'opened' | 'opened-list-only' | 'history' | 'blocked-no-parser' | 'blocked-scope' | 'binary' | 'unavailable' | 'failed' | 'timed-out';
   detail?: string;
+}
+
+interface HksReadData {
+  sourceText?: string;
+  sourceHash?: string;
+  format?: string;
+  dialect?: string;
+}
+
+interface HksReadReceipt {
+  parseStatus: string;
+  data?: HksReadData | null;
+  diagnostics?: Array<{ code?: string; message?: string; severity?: string }>;
+}
+
+interface StandaloneScriptReadOptions {
+  absolutePath: string;
+  allowedRoots: string[];
+  oodleRuntimeRoot?: string;
+}
+
+interface StandaloneScriptProbeDependencies {
+  getFileSize?: (path: string) => Promise<number>;
+  readBytes?: (path: string) => Promise<Uint8Array>;
+  runHksSource?: (options: {
+    command: 'read-hks-source';
+    filePath: string;
+    allowedRoots: string[];
+    oodleRuntimeRoot?: string;
+    commandOptions: Record<string, never>;
+    timeoutMs: number;
+    maxFrameBytes: number;
+  }) => Promise<HksReadReceipt>;
+}
+
+/**
+ * Mirror the standalone branch of `readScriptSource`: classify real bytes,
+ * decode confirmed plaintext through the existing helper, and send bytecode
+ * to the first-party native HKS reader. This is a reader-path probe, not a
+ * second parser or a BND4 child projection.
+ */
+export async function probeStandaloneScriptFile(
+  options: StandaloneScriptReadOptions,
+  dependencies: StandaloneScriptProbeDependencies = {}
+): Promise<{ status: 'opened' | 'failed' | 'unavailable'; detail: string }> {
+  const getFileSize = dependencies.getFileSize ?? (async (path: string) => (await stat(path)).size);
+  const readBytes = dependencies.readBytes ?? (async (path: string) => await readFile(path));
+  const runHksSource = dependencies.runHksSource ?? ((input) => runBridge<HksReadData>(input));
+  const maxScriptBytes = 64 * 1024 * 1024;
+  const sourceSize = await getFileSize(options.absolutePath);
+  if (sourceSize > maxScriptBytes) {
+    return { status: 'failed', detail: 'SCRIPT_SOURCE_TOO_LARGE: 脚本文件超过 64 MiB 有界读取上限，未打开。' };
+  }
+
+  const bytes = await readBytes(options.absolutePath);
+  if (bytes.length > maxScriptBytes) {
+    return { status: 'failed', detail: 'SCRIPT_SOURCE_TOO_LARGE: 脚本文件超过 64 MiB 有界读取上限，未打开。' };
+  }
+  const verdict = classifyPlaintextBytes(bytes);
+  if (verdict.isPlaintext) {
+    const contentEnd = bytes.length - verdict.trailingPaddingBytes;
+    decodePlaintext(bytes.subarray(0, contentEnd), verdict.detectedEncoding);
+    return {
+      status: 'opened',
+      detail: `PLAINTEXT_CONFIRMED: ${verdict.detectedEncoding}; ${bytes.length} bytes`
+    };
+  }
+  if (!verdict.luaBytecodeMagic) {
+    const diagnostic = verdict.diagnostics[0];
+    return {
+      status: 'failed',
+      detail: `SCRIPT_SOURCE_BYTECODE_UNSUPPORTED: ${diagnostic?.message ?? verdict.code}`
+    };
+  }
+
+  const native = await runHksSource({
+    command: 'read-hks-source',
+    filePath: options.absolutePath,
+    allowedRoots: options.allowedRoots,
+    ...(options.oodleRuntimeRoot ? { oodleRuntimeRoot: options.oodleRuntimeRoot } : {}),
+    // Match rawResourceService.readScriptSource: standalone bytes are opened
+    // from filePath by Bridge, unlike BND4 child reads that carry contentBase64.
+    commandOptions: {},
+    timeoutMs: FILE_TIMEOUT_MS,
+    maxFrameBytes: 32 * 1024 * 1024
+  });
+  const errorDiagnostic = native.diagnostics?.find((item) => item.severity === 'error');
+  if (native.parseStatus === 'failed' || errorDiagnostic) {
+    const diagnostic = errorDiagnostic ?? native.diagnostics?.[0];
+    return {
+      status: 'failed',
+      detail: `${diagnostic?.code ?? 'SCRIPT_HKS_READ_FAILED'}: ${diagnostic?.message ?? '原生 HKS reader 未返回完整源码与 sourceHash。'}`
+    };
+  }
+  if (native.parseStatus === 'unsupported' || native.parseStatus === 'unparsed') {
+    const diagnostic = native.diagnostics?.[0];
+    return {
+      status: 'unavailable',
+      detail: `${diagnostic?.code ?? 'HKS_DIALECT_NOT_SUPPORTED'}: ${diagnostic?.message ?? '当前 HKS dialect 不在支持范围内。'}`
+    };
+  }
+  if (native.parseStatus !== 'ok' || !native.data?.sourceText || !native.data.sourceHash) {
+    const diagnostic = native.diagnostics?.find((item) => item.severity === 'error') ?? native.diagnostics?.[0];
+    return {
+      status: 'failed',
+      detail: `${diagnostic?.code ?? 'SCRIPT_HKS_READ_FAILED'}: ${diagnostic?.message ?? '原生 HKS reader 未返回完整源码与 sourceHash。'}`
+    };
+  }
+  return {
+    status: 'opened',
+    detail: `HKS_NATIVE_READ_VERIFIED: ${native.data.dialect ?? native.data.format ?? 'first-party'}; ${native.data.sourceHash}`
+  };
 }
 
 function resolveWorkspaceRoot(): string | null {
@@ -145,6 +258,14 @@ async function probeFile(
     }
 
     if (family.openKind === 'script') {
+      if (family.familyId === '.hks' || family.familyId === '.lua') {
+        const result = await withTimeout(probeStandaloneScriptFile({
+          absolutePath,
+          allowedRoots,
+          ...(oodleRuntimeRoot ? { oodleRuntimeRoot } : {})
+        }), relativePath);
+        return { ...base, status: result.status, detail: result.detail };
+      }
       const result = await withTimeout(buildScriptContainerEvidence({
         containerPath: absolutePath,
         allowedRoots,
@@ -360,7 +481,12 @@ async function main(): Promise<void> {
   }
 }
 
-main().finally(() => disposeBridgeDaemonPool()).catch((error) => {
-  console.error(error instanceof Error ? error.stack ?? error.message : String(error));
-  process.exitCode = 1;
-});
+// Keep the CLI behavior for the direct smoke invocation while allowing its
+// pure standalone-read contract to be exercised without scanning a workspace.
+if (new Set(['runWorkspaceCompletenessMatrixSmoke.js', 'runWorkspaceCompletenessMatrixSmoke.ts'])
+  .has(basename(process.argv[1] ?? ''))) {
+  main().finally(() => disposeBridgeDaemonPool()).catch((error) => {
+    console.error(error instanceof Error ? error.stack ?? error.message : String(error));
+    process.exitCode = 1;
+  });
+}
