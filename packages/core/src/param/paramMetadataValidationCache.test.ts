@@ -118,7 +118,6 @@ describe('PARAM metadata validation output cache', () => {
     if (!first.ok) throw new Error(`fixture must validate: ${JSON.stringify(first.diagnostics)}`);
 
     const accepted = matchParamMetadataPackage(first.package, fixture.key, fixture.policy);
-    assert.equal(accepted.ok, true);
     if (!accepted.ok) throw new Error(`valid fixture match failed: ${JSON.stringify(accepted.diagnostics)}`);
     assert.equal(accepted.authority, 'fixture-confirmed');
     assert.equal(accepted.nativeFormatAuthority, false);
