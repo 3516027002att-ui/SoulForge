@@ -64,7 +64,7 @@ async function manifestFixture() {
     agentSourceSha256: 'c'.repeat(64), agentOutputSha256: 'd'.repeat(64), agentManifestSha256: '1'.repeat(64),
     bridgeSourceSha256: '2'.repeat(64), bridgeExecutableSha256: '3'.repeat(64), bridgeNativeLibrarySha256: '4'.repeat(64),
     bridgeHelperSha256: '5'.repeat(64), bridgeReceiptSha256: '6'.repeat(64), packagingConfigSha256: '7'.repeat(64),
-    buildResourcesSha256: '8'.repeat(64), extraResourcesSha256: '9'.repeat(64), desktopPackageSha256: 'a'.repeat(64),
+    buildResourcesSha256: '8'.repeat(64), desktopFilesSha256: 'e'.repeat(64), extraResourcesSha256: '9'.repeat(64), desktopPackageSha256: 'a'.repeat(64),
     lockfileSha256: 'b'.repeat(64), prepareEntrypointSha256: 'c'.repeat(64), bindingHelperSha256: 'd'.repeat(64),
     builderCliSha256: tools.builderCliSha256, builderPackageSha256: tools.builderPackageSha256,
     builderFileMatcherSha256: tools.builderFileMatcherSha256, builderFilterSha256: tools.builderFilterSha256,
@@ -127,6 +127,18 @@ test('legacy valid-looking installer receipt without build-input and tool bindin
     await writeFile(manifest.buildReceiptPath, bytes);
     manifest.buildReceiptSha256 = hash(bytes);
     await assert.rejects(() => validateInstalledManifest(manifest), /BUILD_RECEIPT.*(?:buildInputs|tools)/i);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('build receipt requires the selected desktop output fingerprint', async () => {
+  const { root, manifest } = await manifestFixture();
+  try {
+    const receipt = JSON.parse(await readFile(manifest.buildReceiptPath, 'utf8'));
+    delete receipt.buildInputs.desktopFilesSha256;
+    const bytes = Buffer.from(JSON.stringify(receipt));
+    await writeFile(manifest.buildReceiptPath, bytes);
+    manifest.buildReceiptSha256 = hash(bytes);
+    await assert.rejects(() => validateInstalledManifest(manifest), /BUILD_RECEIPT.*desktopFilesSha256/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

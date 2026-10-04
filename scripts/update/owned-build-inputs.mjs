@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { lstat, readdir, readFile, realpath } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, posix, relative, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertAgentProductionBuildFresh } from '../agent-production-build-lib.mjs';
 import { assertBridgeProductionBuildFresh } from '../bridge-production-build.mjs';
@@ -14,7 +14,7 @@ const fail = (code, message) => Object.assign(new Error(`${code}: ${message}`), 
 export const OWNED_BUILD_INPUT_HASH_FIELDS = Object.freeze([
   'trackedDiffSha256', 'agentSourceSha256', 'agentOutputSha256', 'agentManifestSha256',
   'bridgeSourceSha256', 'bridgeExecutableSha256', 'bridgeNativeLibrarySha256', 'bridgeHelperSha256', 'bridgeReceiptSha256',
-  'packagingConfigSha256', 'buildResourcesSha256', 'extraResourcesSha256', 'desktopPackageSha256', 'lockfileSha256',
+  'packagingConfigSha256', 'buildResourcesSha256', 'desktopFilesSha256', 'extraResourcesSha256', 'desktopPackageSha256', 'lockfileSha256',
   'prepareEntrypointSha256', 'bindingHelperSha256', 'builderCliSha256', 'builderPackageSha256',
   'builderFileMatcherSha256', 'builderFilterSha256', 'asarModuleSha256', 'nodeExecutableSha256'
 ]);
@@ -35,6 +35,34 @@ const hashFile = async path => hash(await regularOwnedFile(path));
 function inside(root, path) {
   const value = relative(root, path);
   return value !== '' && value !== '..' && !value.startsWith('..\\') && !value.startsWith('../') && !isAbsolute(value);
+}
+
+function assertOwnedResourceDestination(destination) {
+  if (destination === undefined) return;
+  if (typeof destination !== 'string' || /[\0-\x1f<>:"|?*]/.test(destination)) {
+    throw fail('UPDATE_PREPARE_INPUT_UNSAFE', 'extraResources.to must be a safe relative Windows destination.');
+  }
+  const windowsDestination = destination.replaceAll('/', '\\');
+  for (const component of windowsDestination.split('\\')) {
+    if (component !== '' && component !== '.' && component !== '..' && /[. ]$/.test(component)) {
+      throw fail('UPDATE_PREPARE_INPUT_UNSAFE', `extraResources.to has a Win32-trimmed path component: ${destination}`);
+    }
+    const deviceName = component.split('.')[0].replace(/[ .]+$/g, '').toUpperCase();
+    if (/^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])$/.test(deviceName)) {
+      throw fail('UPDATE_PREPARE_INPUT_UNSAFE', `extraResources.to uses a reserved Win32 device name: ${destination}`);
+    }
+  }
+  if (win32.isAbsolute(windowsDestination) || win32.parse(windowsDestination).root) {
+    throw fail('UPDATE_PREPARE_INPUT_UNSAFE', `extraResources.to cannot be absolute, drive-relative, or UNC: ${destination}`);
+  }
+  // electron-builder resolves pattern.to with path.resolve(defaultDestination, to).
+  // Use a fixed Windows anchor so the same escape check applies in Linux fixtures.
+  const resourcesRoot = win32.resolve('C:\\__soulforge_owned_resources__');
+  const target = win32.resolve(resourcesRoot, windowsDestination);
+  const relativeTarget = win32.relative(resourcesRoot, target);
+  if (relativeTarget === '..' || relativeTarget.startsWith('..\\') || win32.isAbsolute(relativeTarget)) {
+    throw fail('UPDATE_PREPARE_INPUT_UNSAFE', `extraResources.to escapes the owned resources root: ${destination}`);
+  }
 }
 
 async function assertUnlinkedPath(path, repositoryRoot) {
@@ -124,6 +152,9 @@ export async function captureOwnedBuildInputs(repositoryRoot, tools, ports = {})
   const project = join(root, 'apps/desktop');
   const configPath = join(project, 'electron-builder.json'), configBytes = await regularOwnedFile(configPath);
   const config = JSON.parse(configBytes.toString('utf8'));
+  if (config.extraFiles !== undefined || config.win?.extraFiles !== undefined) {
+    throw fail('UPDATE_PREPARE_INPUT_UNSAFE', 'electron-builder extraFiles/win.extraFiles are outside the modeled owned resources binding.');
+  }
   const buildResourcesRoot = resolve(project, config.directories?.buildResources ?? 'build');
   await assertUnlinkedPath(buildResourcesRoot, root);
   const buildResources = await captureOwnedFiles(buildResourcesRoot, root);
@@ -135,6 +166,45 @@ export async function captureOwnedBuildInputs(repositoryRoot, tools, ports = {})
     if (typeof pattern !== 'string' || pattern.includes('${')) throw fail('UPDATE_PREPARE_INPUT_UNSAFE', 'Unbound electron-builder resource macros are not supported.');
     return pattern;
   };
+  const filePatterns = typeof config.files === 'string' ? [config.files] : config.files;
+  if (!Array.isArray(filePatterns) || !filePatterns.every(pattern => typeof pattern === 'string')) {
+    throw fail('UPDATE_PREPARE_INPUT_UNSAFE', 'desktop files must be an explicit array of pinned FileMatcher string patterns.');
+  }
+  for (const pattern of filePatterns) expand(pattern);
+  if (config.win?.files !== undefined) {
+    throw fail('UPDATE_PREPARE_INPUT_UNSAFE', 'Platform-specific win.files is outside the owned desktop output binding.');
+  }
+  const includes = filePatterns.filter(pattern => !pattern.startsWith('!'));
+  if (includes.length === 0) throw fail('UPDATE_PREPARE_INPUT_UNSAFE', 'desktop files must contain at least one explicit positive include.');
+  let includesOut = false;
+  for (const pattern of includes) {
+    const normalized = posix.normalize(pattern.replaceAll('\\', '/'));
+    const rawSegments = pattern.replaceAll('\\', '/').split('/');
+    if (normalized === 'package.json') continue;
+    if ((normalized === 'out' || normalized.startsWith('out/')) && !rawSegments.includes('..')) {
+      includesOut = true;
+      continue;
+    }
+    throw fail('UPDATE_PREPARE_INPUT_UNSAFE', `desktop files positive pattern is outside the supported package.json/out scope: ${pattern}`);
+  }
+  if (!includesOut) throw fail('UPDATE_PREPARE_INPUT_UNSAFE', 'desktop files must positively include an out path.');
+  const outputRoot = join(project, 'out');
+  await assertUnlinkedPath(outputRoot, root);
+  const outputMatcher = new FileMatcher(project, project, expand, filePatterns);
+  const outputFilter = outputMatcher.createFilter();
+  if (typeof outputFilter !== 'function') throw fail('UPDATE_PREPARE_BUILDER_INVALID', 'Pinned FileMatcher did not create a desktop files filter.');
+  const desktopFiles = await captureOwnedFiles(outputRoot, root, outputFilter);
+  if (!Array.isArray(agent.current?.output?.entries)) {
+    throw fail('UPDATE_PREPARE_AGENT_OUTPUT_UNBOUND', 'Current Agent output file entries are unavailable for selected desktop package files.');
+  }
+  const agentOutputEntries = new Map(agent.current.output.entries.map(entry => [entry.path, entry]));
+  for (const file of desktopFiles) {
+    const path = `apps/desktop/out/${file.path}`;
+    const expected = agentOutputEntries.get(path);
+    if (!expected || expected.sha256 !== file.sha256 || expected.bytes !== file.bytes) {
+      throw fail('UPDATE_PREPARE_AGENT_OUTPUT_UNBOUND', `Selected electron-builder output is not covered by the current Agent output fingerprint: ${path}`);
+    }
+  }
   if (config.extraResources !== undefined && !Array.isArray(config.extraResources)) {
     throw fail('UPDATE_PREPARE_INPUT_UNSAFE', 'extraResources must be an explicit array.');
   }
@@ -146,7 +216,8 @@ export async function captureOwnedBuildInputs(repositoryRoot, tools, ports = {})
     if (!resource || typeof resource.from !== 'string' || (resource.to !== undefined && typeof resource.to !== 'string')) {
       throw fail('UPDATE_PREPARE_INPUT_UNSAFE', 'extraResources must declare explicit string from/to paths.');
     }
-    expand(resource.from); if (resource.to) expand(resource.to);
+    expand(resource.from);
+    if (resource.to !== undefined) { expand(resource.to); assertOwnedResourceDestination(resource.to); }
     if (resource.filter !== undefined && (!Array.isArray(resource.filter) || !resource.filter.every(value => typeof value === 'string'))) {
       throw fail('UPDATE_PREPARE_INPUT_UNSAFE', 'extraResources filters must be arrays of explicit string patterns.');
     }
@@ -173,6 +244,7 @@ export async function captureOwnedBuildInputs(repositoryRoot, tools, ports = {})
     bridgeExecutableSha256: bridge.current.executable.sha256, bridgeNativeLibrarySha256: bridge.current.nativeLibrary.sha256,
     bridgeHelperSha256: bridge.current.helper.sha256, bridgeReceiptSha256: await hashFile(bridge.manifestPath),
     packagingConfigSha256: hash(configBytes), buildResourcesSha256: hash(JSON.stringify(buildResources)),
+    desktopFilesSha256: hash(JSON.stringify(desktopFiles)),
     extraResourcesSha256: hash(JSON.stringify(resources)), desktopPackageSha256: await hashFile(join(project, 'package.json')),
     lockfileSha256: await hashFile(join(root, 'package-lock.json')),
     prepareEntrypointSha256: await hashFile(fileURLToPath(new URL('./prepare-owned-installers.mjs', import.meta.url))),

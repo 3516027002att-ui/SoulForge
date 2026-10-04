@@ -39,13 +39,15 @@ const sourceFiles = [
 
 function fakeFileMatcherSource() {
   return `const path=require('node:path');
-function matches(pattern,name,stat){
+function matches(pattern,name,stat,allowDirectoryPrefix){
   const value=pattern.replaceAll('\\\\','/');
   if(value==='**/*'||value==='**')return true;
+  if(value==='**/*.log')return name.endsWith('.log');
+  if(value==='out/**/*')return name==='out'||name.startsWith('out/');
   if(value.endsWith('/**/*')){const base=value.slice(0,-5);return name===base||name.startsWith(base+'/');}
   if(value.endsWith('/**')){const base=value.slice(0,-3);return name===base||name.startsWith(base+'/');}
   if(value===name)return true;
-  return stat.isDirectory()&&value.startsWith(name+'/');
+  return allowDirectoryPrefix&&stat.isDirectory()&&value.startsWith(name+'/');
 }
 exports.FileMatcher=class {
   constructor(from,to,expand,patterns){this.from=from;this.patterns=patterns||[];}
@@ -56,7 +58,7 @@ exports.FileMatcher=class {
     if(file===this.from)return true;
     const name=path.relative(this.from,file).split(path.sep).join('/');let included=false;
     for(const pattern of this.patterns){const ignore=pattern.startsWith('!'),body=ignore?pattern.slice(1):pattern;
-      if(matches(body,name,stat))included=!ignore;}
+      if(matches(body,name,stat,!ignore))included=!ignore;}
     return included;
   };}
 };`;
@@ -86,7 +88,8 @@ async function createFixture() {
   await seed('apps/desktop/package.json', JSON.stringify({ name: '@soulforge/desktop', version: '0.9.2' }));
   const baseConfig = {
     appId: 'com.soulforge.app', productName: 'SoulForge', npmRebuild: false,
-    directories: { output: 'release', buildResources: 'build' }, files: ['out/**/*'],
+    directories: { output: 'release', buildResources: 'build' },
+    files: ['out/**/*', '!out/release-compliance.json', '!out/agent-production-build.json', 'package.json', '!**/*.log'],
     extraResources: [
       { from: '.native', to: 'native', filter: ['better_sqlite3.node', 'better_sqlite3.json'] },
       { from: '../../prompt', to: 'prompt', filter: ['system.md'] }
@@ -102,6 +105,8 @@ async function createFixture() {
   };
   await seed('apps/desktop/electron-builder.json', JSON.stringify(baseConfig));
   await seed('apps/desktop/build/icon.ico', 'fixture installer icon');
+  await seed('apps/desktop/out/release-compliance.json', 'excluded top-level manifest');
+  await seed('apps/desktop/out/desktop-debug.log', 'excluded top-level log');
   await seed('prompt/owned-fixture-note.txt', 'filtered out by builder FileMatcher');
 
   const toolsRoot = join(repo, '.local-validation/update-tools');
@@ -163,6 +168,10 @@ test('owned installer capture binds HEAD, fresh Agent/Bridge outputs, filtered r
     assert.equal(before.repositoryRoot, fixture.repo);
     assert.equal(before.agentSourceSha256.length, 64); assert.equal(before.agentOutputSha256.length, 64);
     assert.equal(before.bridgeSourceSha256.length, 64); assert.equal(before.bridgeExecutableSha256.length, 64);
+    assert.equal(before.desktopFilesSha256.length, 64, 'the filtered desktop output set has its own receipt binding');
+    await fixture.seed('apps/desktop/out/desktop-debug.log', 'changed excluded top-level log');
+    assert.equal((await captureOwnedBuildInputs(fixture.repo, fixture.tools)).desktopFilesSha256, before.desktopFilesSha256,
+      'top-level package-excluded logs and manifests do not become selected output inputs');
     await fixture.seed('apps/desktop/.native/electron-rebuild/cache/header.h', 'excluded compiler cache bytes');
     assert.deepEqual(await captureOwnedBuildInputs(fixture.repo, fixture.tools), before, 'FileMatcher-excluded cache content is not an input');
     const target = join(fixture.scratch, 'outside-target'); await mkdir(target); await writeFile(join(target, 'keep.txt'), 'untouched');
@@ -186,6 +195,93 @@ test('owned installer capture binds HEAD, fresh Agent/Bridge outputs, filtered r
     await symlink(target, join(fixture.repo, 'apps/desktop/.native/selected-link'), process.platform === 'win32' ? 'junction' : 'dir');
     await assert.rejects(() => captureOwnedBuildInputs(fixture.repo, fixture.tools), /UPDATE_PREPARE_INPUT_UNSAFE.*selected-link/);
     assert.equal(await readFile(join(target, 'keep.txt'), 'utf8'), 'untouched');
+  } finally { await fixture.dispose(); }
+});
+
+test('extraResources destinations use Windows builder semantics and stay under owned resources before either build leg', async () => {
+  const fixture = await createFixture();
+  try {
+    const configPath = join(fixture.repo, 'apps/desktop/electron-builder.json');
+    const config = JSON.parse(await readFile(configPath, 'utf8'));
+    for (const destination of ['.', 'nested/.']) {
+      config.extraResources[0].to = destination;
+      await fixture.seed('apps/desktop/electron-builder.json', JSON.stringify(config));
+      assert.equal((await captureOwnedBuildInputs(fixture.repo, fixture.tools)).extraResourcesSha256.length, 64,
+        `safe destination ${destination} remains supported`);
+    }
+    for (const destination of ['../escape', '..\\escape', 'C:\\absolute', 'C:drive-relative', '\\\\server\\share\\unc', '/rooted',
+      'nested/file:stream', 'nested/trailing.', 'nested/trailing ', 'nul\0path', 'nested/bad<name', 'nested/bad>name',
+      'nested/bad"name', 'nested/bad|name', 'nested/bad?name', 'nested/bad*name', 'nested/control\u0001name',
+      'nested/NUL.txt', 'nested/CON', 'nested/COM1.log', 'nested/LPT³.bin', 'nested/NUL .txt']) {
+      config.extraResources[0].to = destination;
+      await fixture.seed('apps/desktop/electron-builder.json', JSON.stringify(config));
+      await assert.rejects(() => captureOwnedBuildInputs(fixture.repo, fixture.tools), /UPDATE_PREPARE_INPUT_UNSAFE.*extraResources\.to/);
+    }
+    config.extraResources[0].to = '../escape';
+    await fixture.seed('apps/desktop/electron-builder.json', JSON.stringify(config));
+    await assert.rejects(() => withoutGithubEnv(() => prepareOwnedInstallers(fixture.options, fixture.ports)), /UPDATE_PREPARE_INPUT_UNSAFE.*extraResources\.to/);
+    assert.equal(fixture.calls.length, 0, 'destination escape must be rejected before invoking electron-builder');
+    const parent = join(fixture.repo, '.local-validation/owned-update-installers');
+    await assert.rejects(() => readdir(parent), { code: 'ENOENT' }, 'no owned run directory is published for an unsafe destination');
+  } finally { await fixture.dispose(); }
+});
+
+test('desktop output capture rejects unsupported electron-builder file scopes before either build leg', async () => {
+  const fixture = await createFixture();
+  try {
+    const configPath = join(fixture.repo, 'apps/desktop/electron-builder.json');
+    const baseline = JSON.parse(await readFile(configPath, 'utf8'));
+    const unsupported = [
+      config => { config.win.files = ['out/**/*']; },
+      config => { config.files = []; },
+      config => { config.files = ['!**/*.log']; },
+      config => { config.files = ['package.json']; },
+      config => { config.files.push('outside/extra.js'); }
+    ];
+    for (const update of unsupported) {
+      const config = JSON.parse(JSON.stringify(baseline));
+      update(config);
+      await fixture.seed('apps/desktop/electron-builder.json', JSON.stringify(config));
+      await assert.rejects(() => captureOwnedBuildInputs(fixture.repo, fixture.tools), /UPDATE_PREPARE_INPUT_UNSAFE/);
+    }
+    const config = JSON.parse(JSON.stringify(baseline)); config.win.files = ['out/**/*'];
+    await fixture.seed('apps/desktop/electron-builder.json', JSON.stringify(config));
+    await assert.rejects(() => withoutGithubEnv(() => prepareOwnedInstallers(fixture.options, fixture.ports)), /UPDATE_PREPARE_INPUT_UNSAFE.*win\.files/);
+    assert.equal(fixture.calls.length, 0, 'unsupported platform-specific files must fail before electron-builder invocation');
+    await assert.rejects(() => readdir(join(fixture.repo, '.local-validation/owned-update-installers')), { code: 'ENOENT' });
+  } finally { await fixture.dispose(); }
+});
+
+test('global and Windows extraFiles are refused before an owned installer run', async () => {
+  const fixture = await createFixture();
+  try {
+    const configPath = join(fixture.repo, 'apps/desktop/electron-builder.json');
+    const baseline = JSON.parse(await readFile(configPath, 'utf8'));
+    const variants = [
+      config => { config.extraFiles = [{ from: '../../mutter.md', to: 'mutter.md' }]; },
+      config => { config.win.extraFiles = [{ from: '../../mutter.md', to: 'mutter.md' }]; }
+    ];
+    for (const update of variants) {
+      const config = JSON.parse(JSON.stringify(baseline)); update(config);
+      await fixture.seed('apps/desktop/electron-builder.json', JSON.stringify(config));
+      await assert.rejects(() => captureOwnedBuildInputs(fixture.repo, fixture.tools), /UPDATE_PREPARE_INPUT_UNSAFE.*extraFiles/);
+      await assert.rejects(() => withoutGithubEnv(() => prepareOwnedInstallers(fixture.options, fixture.ports)), /UPDATE_PREPARE_INPUT_UNSAFE.*extraFiles/);
+      assert.equal(fixture.calls.length, 0, 'unmodeled extraFiles must fail before the builder port');
+      await assert.rejects(() => readdir(join(fixture.repo, '.local-validation/owned-update-installers')), { code: 'ENOENT' },
+        'unmodeled extraFiles must not create an owned run directory');
+    }
+  } finally { await fixture.dispose(); }
+});
+
+test('selected desktop output outside the Agent production fingerprint is rejected before builder invocation', async () => {
+  const fixture = await createFixture();
+  try {
+    await fixture.seed('apps/desktop/out/extra.js', 'not present in the Agent output entries');
+    await assert.rejects(() => captureOwnedBuildInputs(fixture.repo, fixture.tools), /UPDATE_PREPARE_AGENT_OUTPUT_UNBOUND.*out\/extra\.js/);
+    await assert.rejects(() => withoutGithubEnv(() => prepareOwnedInstallers(fixture.options, fixture.ports)), /UPDATE_PREPARE_AGENT_OUTPUT_UNBOUND.*out\/extra\.js/);
+    assert.equal(fixture.calls.length, 0, 'unbound selected output must fail before either installer leg');
+    const parent = join(fixture.repo, '.local-validation/owned-update-installers');
+    await assert.rejects(() => readdir(parent), { code: 'ENOENT' }, 'unbound output must not publish an owned run');
   } finally { await fixture.dispose(); }
 });
 
