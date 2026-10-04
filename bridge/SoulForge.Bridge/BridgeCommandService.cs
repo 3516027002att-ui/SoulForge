@@ -444,15 +444,31 @@ internal sealed class BridgeCommandService
             try
             {
                 var includeContentHashes = OptionBool("includeContentHashes", false);
-                var (dcx, binder) = Bnd4NativeWriter.GetCachedBinder(file, oodleRuntimeRoot);
+                DcxNativeDocument? dcx = null;
+                Bnd4NativeDocument binder;
+                if (IsDcxFile(file))
+                {
+                    (dcx, binder) = Bnd4NativeWriter.GetCachedBinder(file, oodleRuntimeRoot);
+                }
+                else
+                {
+                    // List-only authority; keep the DCX writer/snapshot cache unchanged.
+                    await using var stream = new FileStream(file, FileMode.Open, FileAccess.Read,
+                        FileShare.Read, 4096, FileOptions.Asynchronous);
+                    if (stream.Length <= 0 || stream.Length > DcxNativeDocument.MaxSourceBytes)
+                        throw new InvalidDataException("Loose BND4 exceeds the bounded native read limit.");
+                    var bytes = new byte[checked((int)stream.Length)];
+                    await stream.ReadExactlyAsync(bytes, cancellationToken);
+                    binder = Bnd4NativeDocument.Read(bytes);
+                }
                 var diagnostics = new List<Diagnostic>
                 {
                     new Diagnostic(
                         "info",
                         "BND4_ENTRIES_LISTED",
-                        $"BND4 条目已列出：{binder.Entries.Count} 项（{dcx.CompressionFormat}）。",
+                        $"BND4 entries listed: {binder.Entries.Count} ({dcx?.CompressionFormat ?? "unwrapped"}).",
                         BridgeResult<object>.MakeSourceUri(file),
-                        new { entryCount = binder.Entries.Count, compressionFormat = dcx.CompressionFormat })
+                        new { entryCount = binder.Entries.Count, compressionFormat = dcx?.CompressionFormat })
                 };
                 var entries = binder.Entries.Select(entry => new
                 {
@@ -471,12 +487,12 @@ internal sealed class BridgeCommandService
                 }).ToArray();
                 var payload = new
                 {
-                    format = "DCX",
-                    compressionFormat = dcx.CompressionFormat,
-                    variant = dcx.Variant,
-                    sourceSize = dcx.SourceBytes.Length,
-                    sourceHash = dcx.SourceHash,
-                    payloadHash = dcx.PayloadHash,
+                    format = dcx is null ? "BND4" : "DCX",
+                    compressionFormat = dcx?.CompressionFormat,
+                    variant = dcx?.Variant,
+                    sourceSize = dcx?.SourceBytes.Length ?? binder.SourceBytes.Length,
+                    sourceHash = dcx?.SourceHash ?? binder.SourceHash,
+                    payloadHash = dcx?.PayloadHash ?? binder.SourceHash,
                     entryCount = binder.Entries.Count,
                     entries,
                     telemetry = BridgeTelemetry.Snapshot(),

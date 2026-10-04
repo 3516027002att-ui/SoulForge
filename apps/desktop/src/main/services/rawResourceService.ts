@@ -1,4 +1,4 @@
-import { readFile, stat } from 'node:fs/promises';
+import { open, readFile, stat } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import {
   analyzePlaintextLineEndings,
@@ -38,7 +38,7 @@ import {
   type PrepareBridgeRootsResult
 } from '../bridgeRoots.js';
 import { sanitizeDiagnostics, sanitizeRendererValue } from '../rendererDto.js';
-import type { NativeDcxEnvelopeLike } from '../ipc/bridgeEnvelopes.js';
+import type { NativeBnd4DocumentLike, NativeDcxEnvelopeLike } from '../ipc/bridgeEnvelopes.js';
 import { WorkspaceReadLifetime } from '../ipc/workspaceReadLifetime.js';
 
 type CachedContainerChildren = Awaited<
@@ -94,146 +94,123 @@ function summarizeScriptClassifications(
   return summary;
 }
 
-/**
- * True when the file is a real (non-SFBN) BND3/BND4 binder or a DCX wrapper
- * (whose payload may be BND4). The TS container tree cannot enumerate these;
- * the native Bridge read-dcx-document command is the full-enumeration fallback.
- */
-async function isRealNativeBndContainer(absolutePath: string): Promise<boolean> {
+type NativeContainerKind = 'bnd3' | 'bnd4' | 'dcx';
+
+/** Classify routing from eight bytes; native format parsing remains in C#. */
+async function probeNativeContainerKind(absolutePath: string): Promise<NativeContainerKind | null> {
+  const handle = await open(absolutePath, 'r');
   try {
-    const header = await readFile(absolutePath);
-    const magic = header.subarray(0, 4).toString('ascii');
-    if (magic.startsWith('BND3') || magic.startsWith('BND4')) {
-      // Synthetic SFBN binders are enumerated by the TS reader; real BND has no
-      // SFBN marker.
-      return !header.subarray(4, 8).equals(Buffer.from('SFBN', 'ascii'));
+    const header = Buffer.alloc(8);
+    let length = 0;
+    while (length < header.length) {
+      const { bytesRead } = await handle.read(header, length, header.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
     }
-    return magic.startsWith('DCX');
-  } catch {
-    return false;
+    const magic = header.subarray(0, Math.min(length, 4)).toString('ascii');
+    if (magic === 'BND3' || magic === 'BND4') {
+      if (length >= 8 && header.subarray(4, 8).equals(Buffer.from('SFBN', 'ascii'))) return null;
+      return magic === 'BND3' ? 'bnd3' : 'bnd4';
+    }
+    return magic === 'DCX\0' ? 'dcx' : null;
+  } finally {
+    await handle.close();
   }
 }
 
-/**
- * Load the complete container-child table for a paginated channel. Uses the TS
- * container tree (works for synthetic SFBN binders); when it returns zero
- * children for a real (non-SFBN) BND/DCX container, falls back to the native
- * Bridge full BND4 entry-table enumeration so real containers get complete
- * bounded access instead of an empty table (hard constraint 17).
- */
+/** Probe first so real archives avoid the TS fixture reader's full-file scan. */
 async function loadContainerChildrenTable(
   deps: RawResourceServiceDeps,
   file: IndexedFile,
   sourceUri: string,
   recursive: boolean
 ): Promise<{ ok: boolean; children: CachedContainerChildren; diagnostics: StructuredDiagnostic[] }> {
-  const result = await listNativeContainerChildren(file.absolutePath, {
-    relativePath: file.relativePath,
-    recursive
-  });
-  if (!result.ok) return { ok: false, children: [], diagnostics: result.diagnostics };
-  let children = result.children;
-  if (children.length === 0 && await isRealNativeBndContainer(file.absolutePath)) {
-    // The read/replace chain for real BND children remains TS-synthetic-only and
-    // fails closed with structured diagnostics; enumeration is still honest.
-    // ROOT-07：只读枚举只传已存在并 verified 的 roots，不附加 staging。
-    let allowedRoots: string[] | null = null;
-    if (deps.activeSession) {
-      const roots = await prepareBridgeRoots(
-        deps.bridgeRootSession(deps.activeSession, deps.durableStoragePaths(deps.activeSession.meta.workspaceId)),
-        'read'
-      );
-      if (!roots.ok) {
-        return { ok: false, children: [], diagnostics: [deps.bridgeRootsDiagnostic('BRIDGE_ROOT_MISSING', roots)] };
-      }
-      allowedRoots = [...roots.allowedRoots];
-    }
-    const native = await enumerateNativeContainerEntries(
-      file.absolutePath,
-      sourceUri,
-      allowedRoots ?? [dirname(file.absolutePath)]
-    );
-    if (!native.ok) return { ok: false, children: [], diagnostics: native.diagnostics };
-    children = native.children;
+  let kind: NativeContainerKind | null;
+  try {
+    kind = await probeNativeContainerKind(file.absolutePath);
+  } catch {
+    return { ok: false, children: [], diagnostics: [{
+      severity: 'error', code: 'CONTAINER_HEADER_READ_FAILED',
+      message: 'Could not read the container header.', sourceUri
+    }] };
   }
-  return { ok: true, children, diagnostics: [] };
+  if (kind === 'bnd3') {
+    return { ok: false, children: [], diagnostics: [{
+      severity: 'error', code: 'BND3_NATIVE_ENUMERATION_UNSUPPORTED',
+      message: 'Native BND3 enumeration is not supported by the Bridge.', sourceUri
+    }] };
+  }
+  if (kind === null) {
+    const result = await listNativeContainerChildren(file.absolutePath, {
+      relativePath: file.relativePath, recursive
+    });
+    return { ok: result.ok, children: result.ok ? result.children : [], diagnostics: result.diagnostics };
+  }
+  let allowedRoots: string[] | null = null;
+  if (deps.activeSession) {
+    const roots = await prepareBridgeRoots(
+      deps.bridgeRootSession(deps.activeSession, deps.durableStoragePaths(deps.activeSession.meta.workspaceId)),
+      'read'
+    );
+    if (!roots.ok) {
+      return { ok: false, children: [], diagnostics: [deps.bridgeRootsDiagnostic('BRIDGE_ROOT_MISSING', roots)] };
+    }
+    allowedRoots = [...roots.allowedRoots];
+  }
+  return enumerateNativeContainerEntries(file.absolutePath, sourceUri,
+    allowedRoots ?? [dirname(file.absolutePath)], kind);
 }
 
-/**
- * Enumerate the complete inner BND4 entry table of a real (non-synthetic)
- * container via the Bridge `read-dcx-document` command — the same
- * full-enumeration source as `listScriptContainerEntriesPage`. Entries are
- * projected to the renderer-safe container-child DTO; inner names are sanitized
- * to their basename (Sekiro BND4 names are absolute build-machine paths).
- * `canReplace=false` keeps the real-BND replace chain fail-closed (it is
- * TS-synthetic-only today); `rawBytesAvailable=true` because
- * snapshot-bnd4-child can read real child bytes.
- */
+/** Complete native entry table, projected to logical names and read-only capabilities. */
 async function enumerateNativeContainerEntries(
   absolutePath: string,
   sourceUri: string,
-  allowedRoots: string[]
+  allowedRoots: string[],
+  kind: 'bnd4' | 'dcx'
 ): Promise<{
   ok: boolean;
   children: CachedContainerChildren;
   diagnostics: StructuredDiagnostic[];
 }> {
-  const result = await runBridge<NativeDcxEnvelopeLike>({
-    command: 'read-dcx-document',
+  const result = await runBridge<NativeDcxEnvelopeLike & NativeBnd4DocumentLike>({
+    command: kind === 'bnd4' ? 'list-bnd4-entries' : 'read-dcx-document',
     filePath: absolutePath,
-    resourceUri: `file:///${absolutePath.replace(/\\/g, '/')}`,
+    resourceUri: 'file:///' + absolutePath.replace(/\\/g, '/'),
     allowedRoots,
+    ...(kind === 'bnd4' ? { commandOptions: { includeContentHashes: true } } : {}),
     timeoutMs: 60_000
   });
   if (result.parseStatus === 'failed') {
     return { ok: false, children: [], diagnostics: result.diagnostics };
   }
-  const nested = result.data?.nested;
-  const entries = nested?.entries ?? [];
+  const entries = (kind === 'bnd4' ? result.data?.entries : result.data?.nested?.entries) ?? [];
   if (entries.length === 0) {
-    return {
-      ok: true,
-      children: [],
-      diagnostics: [{
-        severity: 'info',
-        code: 'BND_NATIVE_ENUMERATION_EMPTY',
-        message: 'Bridge 未返回原生 BND4 条目表（payload 可能不是 BND4）。',
-        sourceUri
-      }]
-    };
+    return { ok: true, children: [], diagnostics: [{
+      severity: 'info', code: 'BND_NATIVE_ENUMERATION_EMPTY',
+      message: 'Bridge returned no native BND4 entries; the payload may not be BND4.', sourceUri
+    }] };
   }
   const seen = new Set<string>();
   const children = entries.map((entry) => {
-    const rawName = entry.name ?? `entry_${entry.index ?? 0}`;
+    const rawName = entry.name ?? 'entry_' + (entry.index ?? 0);
     const name = sanitizeEntryName(rawName, entry.index ?? 0, seen);
     const extension = name.split('.').pop()?.toLowerCase() ?? 'unknown';
     return {
-      childId: String(entry.index ?? 0),
-      name,
-      offset: entry.dataOffset ?? 0,
-      size: entry.uncompressedSize ?? 0,
+      childId: String(entry.index ?? 0), name,
+      offset: entry.dataOffset ?? 0, size: entry.uncompressedSize ?? 0,
       ...(entry.compressedSize !== undefined && entry.compressedSize !== entry.uncompressedSize
-        ? { compressedSize: entry.compressedSize }
-        : {}),
-      hash: entry.contentHash ?? '',
-      formatKind: extension,
+        ? { compressedSize: entry.compressedSize } : {}),
+      hash: entry.contentHash ?? '', formatKind: extension,
       sourceContainerUri: sourceUri,
-      childUri: `${sourceUri}#bnd/child/${encodeURIComponent(name)}`,
-      rawBytesAvailable: true,
-      canReplace: false,
-      diagnostics: []
+      childUri: sourceUri + '#bnd/child/' + encodeURIComponent(name),
+      // Loose binders are list-only; the child snapshot path still requires DCX.
+      rawBytesAvailable: kind === 'dcx', canReplace: false, diagnostics: []
     } satisfies CachedContainerChildren[number];
   });
-  return {
-    ok: true,
-    children,
-    diagnostics: [{
-      severity: 'info',
-      code: 'BND_NATIVE_ENUMERATION_COMPLETE',
-      message: `原生 BND4 完整条目表已枚举：${entries.length} 项（${result.data?.compressionFormat ?? ''} 解包）。`,
-      sourceUri
-    }]
-  };
+  return { ok: true, children, diagnostics: [{
+    severity: 'info', code: 'BND_NATIVE_ENUMERATION_COMPLETE',
+    message: 'Complete native BND4 entry table: ' + entries.length + ' entries.', sourceUri
+  }] };
 }
 
 /** Inner BND4 entry row from the Bridge `read-dcx-document` command. */
@@ -491,10 +468,7 @@ export function createRawResourceService(deps: RawResourceServiceDeps) {
           }]
         };
       }
-      return listNativeContainerChildren(file.absolutePath, {
-        relativePath: file.relativePath,
-        recursive: recursive === true
-      });
+      return loadContainerChildrenTable(deps, file, sourceUri, recursive === true);
     };
 
   /**
