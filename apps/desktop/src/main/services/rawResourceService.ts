@@ -1,4 +1,4 @@
-import { readFile, stat } from 'node:fs/promises';
+import { open, readFile, stat } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import {
   analyzePlaintextLineEndings,
@@ -38,7 +38,7 @@ import {
   type PrepareBridgeRootsResult
 } from '../bridgeRoots.js';
 import { sanitizeDiagnostics, sanitizeRendererValue } from '../rendererDto.js';
-import type { NativeDcxEnvelopeLike } from '../ipc/bridgeEnvelopes.js';
+import type { NativeBnd4DocumentLike, NativeDcxEnvelopeLike } from '../ipc/bridgeEnvelopes.js';
 import { WorkspaceReadLifetime } from '../ipc/workspaceReadLifetime.js';
 
 type CachedContainerChildren = Awaited<
@@ -94,32 +94,35 @@ function summarizeScriptClassifications(
   return summary;
 }
 
-/**
- * True when the file is a real (non-SFBN) BND3/BND4 binder or a DCX wrapper
- * (whose payload may be BND4). The TS container tree cannot enumerate these;
- * the native Bridge read-dcx-document command is the full-enumeration fallback.
- */
-async function isRealNativeBndContainer(absolutePath: string): Promise<boolean> {
+type NativeContainerKind = 'bnd3' | 'bnd4' | 'dcx';
+
+/** Classify routing with at most eight bytes; native parsing stays in Bridge. */
+async function probeNativeContainerKind(absolutePath: string): Promise<NativeContainerKind | null> {
+  const handle = await open(absolutePath, 'r');
   try {
-    const header = await readFile(absolutePath);
-    const magic = header.subarray(0, 4).toString('ascii');
-    if (magic.startsWith('BND3') || magic.startsWith('BND4')) {
-      // Synthetic SFBN binders are enumerated by the TS reader; real BND has no
-      // SFBN marker.
-      return !header.subarray(4, 8).equals(Buffer.from('SFBN', 'ascii'));
+    const header = Buffer.alloc(8);
+    let length = 0;
+    while (length < header.length) {
+      const { bytesRead } = await handle.read(header, length, header.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
     }
-    return magic.startsWith('DCX');
-  } catch {
-    return false;
+    const magic = header.subarray(0, Math.min(length, 4)).toString('ascii');
+    if (magic === 'BND3' || magic === 'BND4') {
+      // Synthetic SFBN binders are handled by the existing fixture reader.
+      if (length >= 8 && header.subarray(4, 8).equals(Buffer.from('SFBN', 'ascii'))) return null;
+      return magic === 'BND3' ? 'bnd3' : 'bnd4';
+    }
+    return magic === 'DCX\0' ? 'dcx' : null;
+  } finally {
+    await handle.close();
   }
 }
 
 /**
- * Load the complete container-child table for a paginated channel. Uses the TS
- * container tree (works for synthetic SFBN binders); when it returns zero
- * children for a real (non-SFBN) BND/DCX container, falls back to the native
- * Bridge full BND4 entry-table enumeration so real containers get complete
- * bounded access instead of an empty table (hard constraint 17).
+ * Load a bounded container-child table. Real BND4/DCX goes through the native
+ * Bridge parser directly; only unknown/SFBN inputs use the existing TS fixture
+ * reader, which requires an explicit SFBN marker to expose synthetic rows.
  */
 async function loadContainerChildrenTable(
   deps: RawResourceServiceDeps,
@@ -127,74 +130,136 @@ async function loadContainerChildrenTable(
   sourceUri: string,
   recursive: boolean
 ): Promise<{ ok: boolean; children: CachedContainerChildren; diagnostics: StructuredDiagnostic[] }> {
-  const result = await listNativeContainerChildren(file.absolutePath, {
-    relativePath: file.relativePath,
-    recursive
-  });
-  if (!result.ok) return { ok: false, children: [], diagnostics: result.diagnostics };
-  let children = result.children;
-  if (children.length === 0 && await isRealNativeBndContainer(file.absolutePath)) {
-    // The read/replace chain for real BND children remains TS-synthetic-only and
-    // fails closed with structured diagnostics; enumeration is still honest.
-    // ROOT-07：只读枚举只传已存在并 verified 的 roots，不附加 staging。
-    let allowedRoots: string[] | null = null;
-    if (deps.activeSession) {
-      const roots = await prepareBridgeRoots(
-        deps.bridgeRootSession(deps.activeSession, deps.durableStoragePaths(deps.activeSession.meta.workspaceId)),
-        'read'
-      );
-      if (!roots.ok) {
-        return { ok: false, children: [], diagnostics: [deps.bridgeRootsDiagnostic('BRIDGE_ROOT_MISSING', roots)] };
-      }
-      allowedRoots = [...roots.allowedRoots];
-    }
-    const native = await enumerateNativeContainerEntries(
-      file.absolutePath,
-      sourceUri,
-      allowedRoots ?? [dirname(file.absolutePath)]
-    );
-    if (!native.ok) return { ok: false, children: [], diagnostics: native.diagnostics };
-    children = native.children;
+  let kind: NativeContainerKind | null;
+  try {
+    kind = await probeNativeContainerKind(file.absolutePath);
+  } catch {
+    return { ok: false, children: [], diagnostics: [{
+      severity: 'error', code: 'CONTAINER_HEADER_READ_FAILED',
+      message: '无法读取容器文件头。', sourceUri
+    }] };
   }
-  return { ok: true, children, diagnostics: [] };
+  if (kind === 'bnd3') {
+    return { ok: false, children: [], diagnostics: [{
+      severity: 'error', code: 'BND3_NATIVE_ENUMERATION_UNSUPPORTED',
+      message: 'Bridge 尚不支持原生 BND3 条目枚举。', sourceUri
+    }] };
+  }
+  if (kind === null) {
+    const fixture = await listNativeContainerChildren(file.absolutePath, {
+      relativePath: file.relativePath, recursive
+    });
+    return {
+      ok: fixture.ok,
+      children: fixture.ok ? fixture.children : [],
+      diagnostics: fixture.diagnostics
+    };
+  }
+
+  // ROOT-07：只读枚举只传已存在并 verified 的 roots，不附加 staging。
+  let allowedRoots: string[] | null = null;
+  if (deps.activeSession) {
+    const roots = await prepareBridgeRoots(
+      deps.bridgeRootSession(deps.activeSession, deps.durableStoragePaths(deps.activeSession.meta.workspaceId)),
+      'read'
+    );
+    if (!roots.ok) {
+      return { ok: false, children: [], diagnostics: [deps.bridgeRootsDiagnostic('BRIDGE_ROOT_MISSING', roots)] };
+    }
+    allowedRoots = [...roots.allowedRoots];
+  }
+  const native = await enumerateNativeContainerEntries(
+    file.absolutePath,
+    sourceUri,
+    allowedRoots ?? [dirname(file.absolutePath)],
+    kind
+  );
+  const nativeErrorDiagnostics = native.diagnostics.filter(diagnostic => diagnostic.severity === 'error');
+  const hasUnrelatedNativeError = nativeErrorDiagnostics.some(
+    diagnostic => diagnostic.code !== 'DCX_DOCUMENT_READ_FAILED'
+  );
+  const strictDcxReadFailure = !native.ok
+    && nativeErrorDiagnostics.length > 0
+    && nativeErrorDiagnostics.every(diagnostic => diagnostic.code === 'DCX_DOCUMENT_READ_FAILED');
+  if (kind === 'dcx' && native.fixturePayload === true && hasUnrelatedNativeError) {
+    return { ok: false, children: [], diagnostics: native.diagnostics };
+  }
+  if (kind === 'dcx' && (native.fixturePayload === true || strictDcxReadFailure)) {
+    // Native parsing deliberately does not own SFBN. A native read failure is
+    // not proof of a fixture: only the existing SFBN reader may confirm rows.
+    // Mixed root/permission/Oodle refusals are never eligible for fallback.
+    const fixture = await listNativeContainerChildren(file.absolutePath, {
+      relativePath: file.relativePath, recursive
+    });
+    if (fixture.ok && fixture.children.length > 0) {
+      return { ok: true, children: fixture.children, diagnostics: fixture.diagnostics };
+    }
+    if (native.fixturePayload === true) {
+      const diagnostics = [...native.diagnostics, ...fixture.diagnostics];
+      if (!fixture.diagnostics.some(diagnostic => diagnostic.severity === 'error')) {
+        diagnostics.push({
+          severity: 'error',
+          code: 'SFBN_FIXTURE_UNCONFIRMED',
+          message: 'Bridge 已确认 DCX payload 带有 SFBN 标记，但现有 fixture reader 未能确认非空条目表。',
+          sourceUri
+        });
+      }
+      return { ok: false, children: [], diagnostics };
+    }
+  }
+  return { ok: native.ok, children: native.children, diagnostics: native.diagnostics };
 }
 
 /**
- * Enumerate the complete inner BND4 entry table of a real (non-synthetic)
- * container via the Bridge `read-dcx-document` command — the same
- * full-enumeration source as `listScriptContainerEntriesPage`. Entries are
- * projected to the renderer-safe container-child DTO; inner names are sanitized
- * to their basename (Sekiro BND4 names are absolute build-machine paths).
- * `canReplace=false` keeps the real-BND replace chain fail-closed (it is
- * TS-synthetic-only today); `rawBytesAvailable=true` because
- * snapshot-bnd4-child can read real child bytes.
+ * Enumerate native BND4 entries through the Bridge's existing list command;
+ * DCX keeps its existing full-document path. Rows are projected to logical IDs
+ * and names, with capabilities reflecting available downstream read routes.
  */
 async function enumerateNativeContainerEntries(
   absolutePath: string,
   sourceUri: string,
-  allowedRoots: string[]
+  allowedRoots: string[],
+  kind: 'bnd4' | 'dcx'
 ): Promise<{
   ok: boolean;
   children: CachedContainerChildren;
   diagnostics: StructuredDiagnostic[];
+  fixturePayload?: boolean;
 }> {
-  const result = await runBridge<NativeDcxEnvelopeLike>({
-    command: 'read-dcx-document',
+  const result = await runBridge<NativeDcxEnvelopeLike & NativeBnd4DocumentLike & { payloadPrefixHex?: string }>({
+    command: kind === 'bnd4' ? 'list-bnd4-entries' : 'read-dcx-document',
     filePath: absolutePath,
     resourceUri: `file:///${absolutePath.replace(/\\/g, '/')}`,
     allowedRoots,
+    ...(kind === 'bnd4' ? { commandOptions: { includeContentHashes: true } } : {}),
     timeoutMs: 60_000
   });
   if (result.parseStatus === 'failed') {
     return { ok: false, children: [], diagnostics: result.diagnostics };
   }
-  const nested = result.data?.nested;
-  const entries = nested?.entries ?? [];
+  if (result.parseStatus === 'unsupported' || result.parseStatus === 'unparsed') {
+    return {
+      ok: false,
+      children: [],
+      diagnostics: result.diagnostics.length > 0 ? result.diagnostics : [{
+        severity: 'error',
+        code: 'BND_NATIVE_ENUMERATION_UNAVAILABLE',
+        message: 'Bridge 未能提供容器条目表。',
+        sourceUri
+      }]
+    };
+  }
+  if (result.diagnostics.some(diagnostic => diagnostic.severity === 'error')) {
+    return { ok: false, children: [], diagnostics: result.diagnostics };
+  }
+  const entries = (kind === 'bnd4' ? result.data?.entries : result.data?.nested?.entries) ?? [];
   if (entries.length === 0) {
     return {
       ok: true,
       children: [],
-      diagnostics: [{
+      fixturePayload: kind === 'dcx'
+        && /^424e443[34]5346424e(?:[0-9a-f]{2})*$/i.test(result.data?.payloadPrefixHex ?? ''),
+      diagnostics: [...result.diagnostics, {
         severity: 'info',
         code: 'BND_NATIVE_ENUMERATION_EMPTY',
         message: 'Bridge 未返回原生 BND4 条目表（payload 可能不是 BND4）。',
@@ -219,7 +284,7 @@ async function enumerateNativeContainerEntries(
       formatKind: extension,
       sourceContainerUri: sourceUri,
       childUri: `${sourceUri}#bnd/child/${encodeURIComponent(name)}`,
-      rawBytesAvailable: true,
+      rawBytesAvailable: kind === 'dcx',
       canReplace: false,
       diagnostics: []
     } satisfies CachedContainerChildren[number];
@@ -227,10 +292,12 @@ async function enumerateNativeContainerEntries(
   return {
     ok: true,
     children,
-    diagnostics: [{
+    diagnostics: [...result.diagnostics, {
       severity: 'info',
       code: 'BND_NATIVE_ENUMERATION_COMPLETE',
-      message: `原生 BND4 完整条目表已枚举：${entries.length} 项（${result.data?.compressionFormat ?? ''} 解包）。`,
+      message: kind === 'bnd4'
+        ? `原生 BND4 完整条目表已枚举：${entries.length} 项。`
+        : `原生 DCX/BND4 完整条目表已枚举：${entries.length} 项（${result.data?.compressionFormat ?? ''} 解包）。`,
       sourceUri
     }]
   };
@@ -478,24 +545,21 @@ export function createRawResourceService(deps: RawResourceServiceDeps) {
   };
 
   const listContainerChildren = async (sourceUri: string, recursive?: boolean) => {
-      const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
-      if (!file) {
-        return {
-          ok: false,
-          children: [],
-          diagnostics: [{
-            severity: 'error' as const,
-            code: 'RESOURCE_NOT_INDEXED',
+    const file = deps.indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) {
+      return {
+        ok: false,
+        children: [],
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'RESOURCE_NOT_INDEXED',
           message: '请先索引资源，再列出容器条目。',
-            sourceUri
-          }]
-        };
-      }
-      return listNativeContainerChildren(file.absolutePath, {
-        relativePath: file.relativePath,
-        recursive: recursive === true
-      });
-    };
+          sourceUri
+        }]
+      };
+    }
+    return loadContainerChildrenTable(deps, file, sourceUri, recursive === true);
+  };
 
   /**
    * Paginated container-child entry access (hard constraint 17). BND4/script

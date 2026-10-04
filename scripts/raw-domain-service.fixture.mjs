@@ -19,13 +19,14 @@ const plain=value=>JSON.parse(JSON.stringify(value));
 function deferred(){let resolve;const promise=new Promise(done=>{resolve=done;});return {promise,resolve};}
 function harness(options={}){
  const calls=[],handlers=new Map(),modules=new Map();let files=options.files??[file],activeSession=options.session===undefined?session:options.session;
+ const diskBytes=()=>options.header??(options.nativeFallback?Buffer.from('DCX\0owned'):options.bytes??text);
  const children=Array.from({length:205},(_,index)=>({childId:String(index),name:`child${index}`,offset:index,size:1,hash:childHash,formatKind:'lua',sourceContainerUri:uri,childUri:`${uri}#${index}`,rawBytesAvailable:true,canReplace:false,absolutePath:'PRIVATE'}));
  const core={
-  runBridge:async input=>{calls.push(['bridge',plain(input)]);if(options.bridge)return options.bridge(input);if(input.command==='snapshot-bnd4-child')return {parseStatus:'confirmed',diagnostics:[],data:{contentBase64:(options.bytes??text).toString('base64')}};if(input.command==='read-hks-source')return {parseStatus:'confirmed',diagnostics:[],data:{sourceText:'return 2',dialect:'sekiro-hks-1.6.x',sourceHash:childHash,compiler:{package:'owned',revision:'owned'},decompiler:{package:'owned',revision:'owned'}}};return {parseStatus:'confirmed',diagnostics:[],data:{format:'DCX',nested:{format:'BND4',entryCount:3,entries:nativeEntries}}};},
+  runBridge:async input=>{calls.push(['bridge',plain(input)]);if(options.bridge)return options.bridge(input);if(input.command==='list-bnd4-entries')return {parseStatus:'partial',diagnostics:[],data:{format:'BND4',entryCount:3,entries:nativeEntries}};if(input.command==='snapshot-bnd4-child')return {parseStatus:'confirmed',diagnostics:[],data:{contentBase64:(options.bytes??text).toString('base64')}};if(input.command==='read-hks-source')return {parseStatus:'confirmed',diagnostics:[],data:{sourceText:'return 2',dialect:'sekiro-hks-1.6.x',sourceHash:childHash,compiler:{package:'owned',revision:'owned'},decompiler:{package:'owned',revision:'owned'}}};return {parseStatus:'confirmed',diagnostics:[],data:{format:'DCX',nested:{format:'BND4',entryCount:3,entries:nativeEntries}}};},
   readRawResourceRange:async(readFile,offset,length)=>{calls.push(['rawRange',readFile,offset,length]);if(options.range)return options.range();return {ok:true,sourceUri:readFile.sourceUri,offset,length,fileSize:42};},
   readRawResourceMetadata:async()=>{calls.push(['metadata']);return {sourceUri:uri,absolutePath:'/owned/private',fileSize:42};},
   inspectContainerTree:async()=>{calls.push(['inspect']);return {ok:true,tree:{rootHash:hash}};},
-  listContainerChildren:async()=>{calls.push(['list']);return {ok:true,children:options.nativeFallback?[]:children,diagnostics:[]};},
+  listContainerChildren:async()=>{calls.push(['list']);const fixtureChildren=options.fixtureFallback?calls.some(([name])=>name==='bridge'):!options.nativeFallback;return {ok:true,children:fixtureChildren?children:[],diagnostics:[]};},
   readContainerChild:async()=>{calls.push(['readChild']);return {ok:true,bytes:options.bytes??text,diagnostics:[]};},
   roundTripContainer:async()=>{calls.push(['roundTrip']);return {ok:true,byteIdentical:true,payloadEquivalent:true};},
   validateContainer:async()=>{calls.push(['validate']);return {ok:true,format:'BND4',diagnostics:[]};},
@@ -35,7 +36,7 @@ function harness(options={}){
  };
  const shared={createDiagnostic:input=>input};
  const roots={prepareBridgeRoots:async()=>({ok:true,allowedRoots:['/owned/mod'],writableRoots:[]})};
- function load(filename){if(modules.has(filename))return modules.get(filename);const built=ts.transpileModule(fs.readFileSync(filename,'utf8'),{fileName:filename,reportDiagnostics:true,compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}});assert.deepEqual((built.diagnostics??[]).filter(d=>d.category===ts.DiagnosticCategory.Error),[]);const exports={};modules.set(filename,exports);vm.runInNewContext(built.outputText,{exports,module:{exports},Error,Buffer,Uint8Array,ArrayBuffer,TextDecoder,TextEncoder,console,require(name){if(name==='node:fs/promises')return {stat:async()=>({size:options.size??text.length}),readFile:async()=>{calls.push(['readFile']);return options.readFile?options.readFile():options.nativeFallback?Buffer.from('DCX\0owned'):options.bytes??text;}};if(name.startsWith('node:'))return require(name);if(name==='electron')throw new Error('No Electron runtime in RAW services');if(name==='@soulforge/core')return core;if(name==='@soulforge/shared')return shared;if(name.endsWith('/bridgeRoots.js'))return roots;if(name.endsWith('/bridge/runBridge.js'))return {runBridge:core.runBridge};if(name.startsWith('.'))return load(path.resolve(path.dirname(filename),name.replace(/\.js$/,'.ts')));throw new Error(`Unexpected RAW import ${name}`);}},{filename});return exports;}
+ function load(filename){if(modules.has(filename))return modules.get(filename);const built=ts.transpileModule(fs.readFileSync(filename,'utf8'),{fileName:filename,reportDiagnostics:true,compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}});assert.deepEqual((built.diagnostics??[]).filter(d=>d.category===ts.DiagnosticCategory.Error),[]);const exports={};modules.set(filename,exports);const fsPromises={stat:async()=>({size:options.size??text.length}),readFile:async()=>{calls.push(['readFile']);return options.readFile?options.readFile():diskBytes();},open:async(pathname,flags)=>{calls.push(['open',pathname,flags]);if(options.openError)throw options.openError;return {read:async(buffer,offset,length,position)=>{const bytes=diskBytes(),bytesRead=Math.max(0,Math.min(length,options.shortRead??length,bytes.length-position));bytes.copy(buffer,offset,position,position+bytesRead);calls.push(['headerRead',length,position,bytesRead]);return {bytesRead,buffer};},close:async()=>{calls.push(['close']);if(options.closeError)throw options.closeError;}};}};vm.runInNewContext(built.outputText,{exports,module:{exports},Error,Buffer,Uint8Array,ArrayBuffer,TextDecoder,TextEncoder,console,require(name){if(name==='node:fs/promises')return fsPromises;if(name.startsWith('node:'))return require(name);if(name==='electron')throw new Error('No Electron runtime in RAW services');if(name==='@soulforge/core')return core;if(name==='@soulforge/shared')return shared;if(name.endsWith('/bridgeRoots.js'))return roots;if(name.endsWith('/bridge/runBridge.js'))return {runBridge:core.runBridge};if(name.startsWith('.'))return load(path.resolve(path.dirname(filename),name.replace(/\.js$/,'.ts')));throw new Error(`Unexpected RAW import ${name}`);}},{filename});return exports;}
  Object.assign(shared,load(path.join(root,'packages/shared/src/path-sanitizer.ts')),load(path.join(root,'packages/shared/src/editor-pagination.ts')));
  Object.assign(core,load(path.join(root,'packages/core/src/script/plaintextScriptEntry.ts')),load(path.join(root,'packages/core/src/script/scriptContainerEvidence.ts')));
  core.buildScriptContainerEvidence=async input=>{calls.push(['evidence',plain(input)]);return {ok:true,entryCount:3};};
@@ -62,6 +63,105 @@ test('metadata and capabilities strip private physical fields',async()=>{const h
 test('inspect/child/roundtrip/validation retain native results',async()=>{const h=harness();assert.equal((await h.invoke('inspectContainerTree',uri)).tree.rootHash,hash);assert.equal((await h.invoke('readContainerChild',`${uri}#owned`)).ok,true);assert.equal((await h.invoke('roundTripContainer',uri)).payloadEquivalent,true);assert.equal((await h.invoke('validateContainer',uri)).format,'BND4');});
 test('container pages cache the full table and project a bounded safe subset',async()=>{const h=harness(),first=await h.invoke('listContainerChildrenPage',uri,0,100),last=await h.invoke('listContainerChildrenPage',uri,2,100);assert.equal(first.children.length,100);assert.equal(last.children.length,5);assert.equal(first.totalCount,205);assert.equal('absolutePath' in first.children[0],false);assert.equal(h.calls.filter(([n])=>n==='list').length,1);});
 test('real container enumeration falls back to complete native entry table',async()=>{const h=harness({nativeFallback:true}),out=await h.invoke('listContainerChildrenPage',uri,0,100);assert.equal(out.totalCount,3);assert.equal(out.children[0].name,'goal.lua');assert.equal(out.children[1].name,'goal.lua#1');assert.equal(out.children[0].canReplace,false);assert.equal(JSON.stringify(out).includes('PRIVATE'),false);assert.equal(h.calls.find(([n])=>n==='bridge')[1].command,'read-dcx-document');});
+test('loose native BND4 enumeration uses one eight-byte probe and the existing read-only Bridge list command',async()=>{
+ const h=harness({nativeFallback:true,header:Buffer.from('BND4\0\0\0\0')});
+ const out=await h.invoke('listContainerChildrenPage',uri,0,100);
+ assert.equal(out.ok,true);assert.equal(out.totalCount,3);assert.equal(out.children[0].name,'goal.lua');
+ assert.equal(out.children[0].rawBytesAvailable,false);assert.equal(out.children[0].canReplace,false);
+ assert.equal(JSON.stringify(out).includes('PRIVATE'),false);
+ assert.deepEqual(h.calls.filter(([n])=>n==='bridge').map(([,input])=>input.command),['list-bnd4-entries']);
+ assert.equal(h.calls.filter(([n])=>n==='readFile'||n==='list').length,0);
+ assert.equal(h.calls.filter(([n])=>n==='headerRead').reduce((sum,call)=>sum+call[3],0),8);
+ assert.equal(h.calls.filter(([n])=>n==='close').length,1);
+});
+test('non-paginated container listing shares the native loose BND4 route',async()=>{
+ const h=harness({nativeFallback:true,header:Buffer.from('BND4\0\0\0\0')});
+ const out=await h.invoke('listContainerChildren',uri);
+ assert.equal(out.ok,true);assert.equal(out.children.length,3);
+ assert.deepEqual(h.calls.filter(([n])=>n==='bridge').map(([,input])=>input.command),['list-bnd4-entries']);
+ assert.equal(h.calls.filter(([n])=>n==='readFile'||n==='list').length,0);
+});
+test('loose native BND4 header probe assembles short reads and closes the source handle',async()=>{
+ const h=harness({nativeFallback:true,header:Buffer.from('BND4\0\0\0\0'),shortRead:2});
+ const out=await h.invoke('listContainerChildrenPage',uri,0,100);
+ assert.equal(out.ok,true);assert.equal(out.totalCount,3);
+ const reads=h.calls.filter(([n])=>n==='headerRead');
+ assert.deepEqual(reads.map(call=>call[2]),[0,2,4,6]);
+ assert.equal(reads.reduce((sum,call)=>sum+call[3],0),8);
+ assert.equal(h.calls.filter(([n])=>n==='close').length,1);
+});
+test('loose BND4 probe close failure is a structured refusal before native or fixture fallback',async()=>{
+ const h=harness({nativeFallback:true,header:Buffer.from('BND4\0\0\0\0'),closeError:new Error('owned close failure')});
+ const out=await h.invoke('listContainerChildrenPage',uri,0,100);
+ assert.equal(out.ok,false);assert.equal(out.diagnostics[0].code,'CONTAINER_HEADER_READ_FAILED');
+ assert.equal(h.calls.some(([n])=>n==='bridge'||n==='list'||n==='readFile'),false);
+ assert.equal(h.calls.filter(([n])=>n==='close').length,1);
+});
+test('loose BND4 native listing refusal never falls back to fixture parsing',async()=>{
+ const h=harness({nativeFallback:true,header:Buffer.from('BND4\0\0\0\0'),bridge:()=>({parseStatus:'failed',diagnostics:[{severity:'error',code:'BND4_LIST_FAILED',message:'owned native refusal'}]})});
+ const out=await h.invoke('listContainerChildrenPage',uri,0,100);
+ assert.equal(out.ok,false);assert.equal(out.diagnostics[0].code,'BND4_LIST_FAILED');
+ assert.deepEqual(h.calls.filter(([n])=>n==='bridge').map(([,input])=>input.command),['list-bnd4-entries']);
+ assert.equal(h.calls.some(([n])=>n==='list'||n==='readFile'),false);
+});
+test('unsupported native listing with a warning is unavailable rather than a valid empty table',async()=>{
+ const h=harness({nativeFallback:true,header:Buffer.from('BND4\0\0\0\0'),bridge:()=>({parseStatus:'unsupported',diagnostics:[{severity:'warning',code:'LARGE_RESOURCE_UNPACKER_MISSING',message:'owned unavailable'}]})});
+ const out=await h.invoke('listContainerChildrenPage',uri,0,100);
+ assert.equal(out.ok,false);assert.equal(out.totalCount,0);
+ assert.equal(out.diagnostics[0].code,'LARGE_RESOURCE_UNPACKER_MISSING');
+ assert.equal(h.calls.some(([n])=>n==='list'),false);
+});
+test('raw SFBN BND4 still uses the existing synthetic reader without native Bridge parsing',async()=>{
+ const h=harness({header:Buffer.from('BND4SFBN')});
+ const out=await h.invoke('listContainerChildrenPage',uri,0,100);
+ assert.equal(out.ok,true);assert.equal(out.totalCount,205);
+ assert.equal(h.calls.some(([n])=>n==='bridge'),false);assert.equal(h.calls.filter(([n])=>n==='list').length,1);
+});
+test('DCX native root refusal cannot be hidden by the SFBN fixture reader',async()=>{
+ const h=harness({nativeFallback:true,bridge:()=>({parseStatus:'failed',diagnostics:[{severity:'error',code:'BRIDGE_PATH_OUTSIDE_ROOTS',message:'owned refusal'}]})});
+ const out=await h.invoke('listContainerChildrenPage',uri,0,100);
+ assert.equal(out.ok,false);assert.equal(out.diagnostics[0].code,'BRIDGE_PATH_OUTSIDE_ROOTS');
+ assert.equal(h.calls.some(([n])=>n==='list'),false);
+});
+test('non-marker DCX payload and unrelated native refusal do not enter the SFBN fixture route',async()=>{
+ const wrongMarker=harness({nativeFallback:true,header:Buffer.from('DCX\0owned'),bridge:()=>({parseStatus:'partial',diagnostics:[],data:{format:'DCX',payloadPrefixHex:'424e44345346424f01000000'}})});
+ const wrong=await wrongMarker.invoke('listContainerChildrenPage',uri,0,100);
+ assert.equal(wrong.ok,true);assert.equal(wrong.totalCount,0);assert.equal(wrongMarker.calls.some(([n])=>n==='list'),false);
+ const unrelated=harness({nativeFallback:true,header:Buffer.from('DCX\0owned'),bridge:()=>({parseStatus:'failed',diagnostics:[{severity:'error',code:'DCX_DOCUMENT_KRAK_OODLE_UNAVAILABLE',message:'owned refusal'}]})});
+ const refused=await unrelated.invoke('listContainerChildrenPage',uri,0,100);
+ assert.equal(refused.ok,false);assert.equal(refused.diagnostics[0].code,'DCX_DOCUMENT_KRAK_OODLE_UNAVAILABLE');
+ assert.equal(unrelated.calls.some(([n])=>n==='list'),false);
+});
+test('mixed native DCX read and root errors cannot be masked by SFBN fallback',async()=>{
+ const h=harness({nativeFallback:true,fixtureFallback:true,header:Buffer.from('DCX\0owned'),bridge:()=>({parseStatus:'failed',diagnostics:[
+  {severity:'error',code:'DCX_DOCUMENT_READ_FAILED',message:'owned parser refusal'},
+  {severity:'error',code:'BRIDGE_PATH_OUTSIDE_ROOTS',message:'owned root refusal'}
+ ]})});
+ const out=await h.invoke('listContainerChildrenPage',uri,0,100);
+ assert.equal(out.ok,false);assert.deepEqual(out.diagnostics.map(d=>d.code),['DCX_DOCUMENT_READ_FAILED','BRIDGE_PATH_OUTSIDE_ROOTS']);
+ assert.equal(h.calls.some(([n])=>n==='list'),false);
+});
+test('partial native SFBN marker with an error diagnostic is preserved and cannot fall back',async()=>{
+ const h=harness({nativeFallback:true,fixtureFallback:true,header:Buffer.from('DCX\0owned'),bridge:()=>({parseStatus:'partial',diagnostics:[
+  {severity:'error',code:'BRIDGE_PERMISSION_DENIED',message:'owned permission refusal'}
+ ],data:{format:'DCX',payloadPrefixHex:'424e44345346424e01000000'}})});
+ const out=await h.invoke('listContainerChildrenPage',uri,0,100);
+ assert.equal(out.ok,false);assert.equal(out.diagnostics.some(d=>d.code==='BRIDGE_PERMISSION_DENIED'),true);
+ assert.equal(h.calls.some(([n])=>n==='list'),false);
+});
+test('explicit native SFBN payload marker with an empty fixture table is not complete enumeration',async()=>{
+ const h=harness({nativeFallback:true,header:Buffer.from('DCX\0owned'),bridge:()=>({parseStatus:'partial',diagnostics:[],data:{format:'DCX',payloadPrefixHex:'424e44345346424e01000000'}})});
+ const out=await h.invoke('listContainerChildrenPage',uri,0,100);
+ assert.equal(out.ok,false);assert.equal(out.children.length,0);
+ assert.equal(out.diagnostics.find(d=>d.severity==='error')?.code,'SFBN_FIXTURE_UNCONFIRMED');
+ assert.equal(h.calls.filter(([n])=>n==='list').length,1);
+});
+test('DCX-wrapped SFBN fallback requires the exact native payload marker and a nonempty fixture result',async()=>{
+ const h=harness({nativeFallback:true,fixtureFallback:true,header:Buffer.from('DCX\0owned'),bridge:()=>({parseStatus:'partial',diagnostics:[],data:{format:'DCX',payloadPrefixHex:'424e44345346424e01000000'}})});
+ const out=await h.invoke('listContainerChildrenPage',uri,0,100);
+ assert.equal(out.ok,true);assert.equal(out.totalCount,205);
+ assert.equal(h.calls.filter(([n])=>n==='bridge').length,1);assert.equal(h.calls.filter(([n])=>n==='list').length,1);
+});
 test('script evidence verifies staging before the evidence port',async()=>{const h=harness();assert.equal((await h.invoke('scriptContainerEvidence',uri)).ok,true);assert.deepEqual(h.calls.map(([n])=>n),['stageRoots','evidence']);assert.deepEqual(h.calls[1][1].allowedRoots,['/owned/mod']);});
 test('script evidence staging refusal does not call native evidence',async()=>{const h=harness({stageDiagnostics:[{severity:'error',code:'OWNED_STAGE_REFUSED',message:'owned'}]});assert.equal((await h.invoke('scriptContainerEvidence',uri)).ok,false);assert.equal(h.calls.filter(([n])=>n==='evidence').length,0);});
 test('complete script inventory retains count/classification/index and logical names',async()=>{const h=harness(),out=await h.invoke('listScriptContainerEntriesPage',uri,0,100);assert.equal(out.entriesComplete,true);assert.equal(out.entryCount,3);assert.equal(out.entries[0].index,0);assert.equal(out.entries[1].name,'goal.lua#1');assert.equal(out.classificationSummary['hkx-bytecode'],1);assert.equal(JSON.stringify(out).includes('PRIVATE'),false);await h.invoke('listScriptContainerEntriesPage',uri,0,100);assert.equal(h.calls.filter(([n])=>n==='bridge').length,1);});
