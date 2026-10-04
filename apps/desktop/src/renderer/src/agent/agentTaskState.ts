@@ -301,6 +301,8 @@ function pickString(value: unknown): string | undefined {
 }
 
 export interface AgentTaskState {
+  /** Effective host/kernel policy, never inferred from the draft controls. */
+  budget?: Extract<AgentEvent, {type:'run-budget'}>['budget'];
   sessionId: string | null;
   phase: AgentTaskPhase;
   /** 主进程受理时回报的实际权限模式；renderer 不据此放宽任何按钮。 */
@@ -489,6 +491,8 @@ export function reduceAgentTaskEvent(
   if (state.sessionId === null || envelope.sessionId !== state.sessionId) return state;
   const event = envelope.event;
   switch (event.type) {
+    case 'run-budget':
+      return {...state, budget:event.budget};
     case 'session-accepted':
       return { ...state, phase: 'accepted', mode: event.mode };
     case 'turn-started':

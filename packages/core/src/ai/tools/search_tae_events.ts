@@ -1,6 +1,6 @@
 import type { RegisteredTool } from '../toolRegistry.js';
 import { asRecord } from '.././toolRegistrySupport.js';
-import { contentSearchPage } from '.././contentSearchPage.js';
+import { boundedContentSearchPage } from '../boundedContentSearchPage.js';
 import { fail } from '.././toolRegistrySupport.js';
 import { ok } from '.././toolRegistrySupport.js';
 import { ragSearchFallback } from '.././toolRegistrySupport.js';
@@ -19,17 +19,16 @@ export function createSearchTaeEventsTool():RegisteredTool {
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
       try {
-        const page = contentSearchPage({ tool: 'search_tae_events', workspaceId: ws.workspaceId, input: value,
-          search: (query) => ws.searchTaeActionGroups(query, Number.MAX_SAFE_INTEGER),
-          fingerprint: (match) => [match.item.sourceUri, match.item.address, match.item.sourceHash, match.item.sourceRevision, match.item.events] });
         const pageSize = typeof value.pageSize === 'number' && Number.isSafeInteger(value.pageSize) && value.pageSize > 0
           ? Math.min(128, value.pageSize) : 16;
+        const page = boundedContentSearchPage({tool:'search_tae_events',workspaceId:ws.workspaceId,input:value,
+          provider:'indexed-tae-actions-score-native-v1',
+          readPage:(query,window)=>ws.searchTaeActionGroupsPage(query,{...window,eventLimit:pageSize})});
         if (page.total > 0 || value.cursor !== undefined) return ok({ ...page,
           matches: page.matches.map((match) => {
             const item = match.item;
-            const maximumBytes = Math.max(1, ...item.events.map((event) => Buffer.byteLength(JSON.stringify(event), 'utf8')));
-            const size = Math.max(1, Math.min(pageSize, Math.floor(20000 / maximumBytes)));
-            const events = item.events.slice(0, size);
+            const size = item.eventPageSize;
+            const events = item.events;
             const totalCount = item.eventCount ?? null;
             const complete = item.eventsComplete === true;
             const hasMore = !complete || events.length < (totalCount ?? item.events.length);

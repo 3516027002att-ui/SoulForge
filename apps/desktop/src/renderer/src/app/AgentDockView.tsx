@@ -16,6 +16,7 @@ const AI_PERMISSION_LOCK_REASON = '权限由应用安全设置控制。';
 export interface AgentDockViewProps {
   readonly agent: Readonly<Pick<AgentUiController,
     | 'agentOpen' | 'setAgentOpen' | 'agentWidth' | 'setAgentWidth'
+    | 'agentBudget' | 'setAgentBudget'
     | 'agentExpanded' | 'setAgentExpanded' | 'agentInteractionMode' | 'changeAgentInteractionMode'
     | 'setAgentResources' | 'handleAgentAttachmentsChange' | 'citeSelecting' | 'setCiteSelecting'
     | 'pendingCiteHits' | 'setPendingCiteHits' | 'aiProvider' | 'setAiProvider' | 'aiThinking' | 'setAiThinking'
@@ -58,6 +59,8 @@ export function AgentDockView({ agent, activeDomain, selectedFile, hasBridge, fa
           setAgentExpanded(false);
         }}
         busy={aiBusy}
+        budget={agent.agentBudget}
+        onBudgetChange={agent.setAgentBudget}
         provider={aiProvider}
         thinking={aiThinking}
         protocol={activeAgentProtocol}

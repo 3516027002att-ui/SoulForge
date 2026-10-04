@@ -995,6 +995,7 @@ async function readMsgExports(
       });
       const exported: MsgExport = {
         category,
+        ...(typeof data.readerSchemaRevision === 'number' ? {readerSchemaRevision: data.readerSchemaRevision} : {}),
         ...(stringValue(data.sourceHash) ? { sourceHash: stringValue(data.sourceHash) } : {}),
         outerFileHash: expectedOuterFileHash,
         ...(file.mtimeMs !== undefined ? { sourceRevision: file.mtimeMs } : {}),

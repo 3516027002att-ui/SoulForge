@@ -68,6 +68,22 @@ test('DFLT ANIBND multi-child time and field commits use the captured physical v
   assert.deepEqual(fields.after.map(event => ({ child: event.taeEntryIndex, value: event.fields.find(field => field.name === 'FFXID').value })), [{ child: 0, value: 81 }, { child: 1, value: 82 }]);
 }));
 
+test('failed post-commit native reread keeps the operation receipt without fabricating after values', async () => {
+  let reads = 0;
+  await withContainer(async ({ source, edit, setTaeEventTimes }) => {
+    const result = await setTaeEventTimes({ edit, file: source, edits: [{ address: 'action://c0000/tae/0/A400000/e0', startFrame: 90, endFrame: 120 }] });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.ok(result.opId); assert.ok(result.backupRoot);
+    assert.equal(result.nativeVerified, false); assert.deepEqual(result.after, []);
+    assert.ok(result.diagnostics.some(item => item.code === 'READBACK_INJECTED_FAILURE'));
+  }, async (input, result) => {
+    if (input.command === 'read-tae-document' && ++reads === 2) {
+      return { parseStatus: 'failed', diagnostics: [{ severity: 'error', code: 'READBACK_INJECTED_FAILURE', message: 'post-commit readback injection' }] };
+    }
+    return result;
+  });
+});
+
 test('an outer-only source replacement after native read cannot bless stale ordinals with a freshly sampled disk hash', async () => {
   let replacement;
   await withContainer(async ({ source, edit, calls, setTaeEventTimes }) => {
@@ -93,7 +109,10 @@ test('public DFLT read-search continuation retains the native physical hash and 
   const search = await registry.run('search_tae_events', { query: '400000', pageSize: 7 }, context); assert.equal(search.ok, true, JSON.stringify(search));
   const next = search.data.matches[0].item.pagination.nextRead; assert.ok(next); assert.equal(next.args.expectedSourceHash, hash(physical));
   const continued = await registry.run(next.tool, next.args, context); assert.equal(continued.ok, true, JSON.stringify(continued));
-  assert.equal(continued.data.events[0].eventIndex, 7); assert.equal(continued.data.pagination.totalCount, 240);
+  const delivered = search.data.matches[0].item.events;
+  assert.ok(delivered.length > 0 && delivered.length <= 7);
+  assert.deepEqual(delivered.map(event => event.index), Array.from({ length: delivered.length }, (_, index) => index));
+  assert.equal(continued.data.events[0].eventIndex, delivered.length); assert.equal(continued.data.pagination.totalCount, 240);
 }, undefined, true));
 
 test('a public bounded read merges into an unchanged native snapshot without conflicting hash domains or dropping siblings', async () => withContainer(async ({ source, physical, edit, root }) => {

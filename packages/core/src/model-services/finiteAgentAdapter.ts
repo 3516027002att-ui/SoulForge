@@ -63,7 +63,6 @@ export async function runFiniteAgentAdapter(
     permissionMode: request.permissionMode, messages: request.messages, tools: request.tools,
     ...(request.signal ? { signal: request.signal } : {}),
     limits: { ...options.limits, ...(request.maxSteps != null ? { maxSteps: request.maxSteps } : {}),
-      ...(request.timeoutMs != null ? { timeoutMs: request.timeoutMs } : {}),
       ...(request.maxTotalOutputTokens != null ? { maxOutputTokens: request.maxTotalOutputTokens } : {}) },
     ...(options.pricing ? { pricing: options.pricing } : {}),
     // Preserve the Anthropic transport default and the existing shared budget
@@ -157,6 +156,7 @@ export async function runFiniteAgentAdapter(
       if(request.contextBroker && message.role==='tool' && upsertContextEvidenceSources(evidenceQueue,[makeToolEvidenceSource(message.name ?? 'tool',message.content,undefined,Boolean(request.contextBrokerOptions?.currentVersionByResource ?? request.contextBrokerOptions?.currentRevisionByResource))],request.contextBrokerOptions))evidenceVersion+=1;
     },
     onEvent: envelope => {
+      if(envelope.event.type==='run-started') request.onEvent?.({type:'run-budget',budget:envelope.event.budget as import('../../../agent/src/index.mjs').EffectiveAgentBudget});
       options.onProtocolEvent?.(degradedRefresh!==undefined && envelope.event.type==='turn-complete'
         ? {...envelope,event:{...envelope.event,resourceOutcome:{status:'degraded',knowledgeRefresh:degradedRefresh}}} : envelope);
       if(envelope.event.type==='retry-scheduled'){

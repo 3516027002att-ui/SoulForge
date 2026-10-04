@@ -129,7 +129,7 @@ export type TaeReadResult =
   | { ok: false; error: TaeEditFailure; diagnostics: Diagnostic[] };
 
 export type TaeSetResult =
-  | { ok: true; filePath: string; before: TaeEventSnapshot[]; after: TaeEventSnapshot[]; mutations: number; diagnostics: Diagnostic[] }
+  | { ok: true; filePath: string; before: TaeEventSnapshot[]; after: TaeEventSnapshot[]; mutations: number; diagnostics: Diagnostic[]; opId?: string; backupRoot?: string; nativeVerified: boolean }
   | { ok: false; error: TaeEditFailure; diagnostics: Diagnostic[]; before?: TaeEventSnapshot[] };
 
 interface EnvelopeTemplateField {
@@ -458,27 +458,29 @@ export async function setTaeEventTimes(input: {
         : [{ severity: 'error' as const, code: 'TAE_WRITE_CANCELLED', message: '写入被取消。', sourceUri: file.sourceUri }];
     return {
       ok: false,
-      error: { code: diagnostics[0]?.code ?? 'TAE_WRITE_FAILED', message: diagnostics[0]?.message ?? 'TAE 写入失败。' },
+      error: { code: diagnostics.find(item => item.severity === 'error')?.code ?? 'TAE_WRITE_FAILED', message: diagnostics.find(item => item.severity === 'error')?.message ?? 'TAE 写入失败。' },
       diagnostics,
       before
     };
   }
 
   const reread = await readTaeEnvelope(input.edit, resolved.path, before.map(event => event.address));
-  const after = reread.ok
-    ? projectEvents(reread.chrId, reread.animations)
-    : pending.map((item) => ({
-      ...item.event,
-      startFrame: item.edit.startFrame ?? item.event.startFrame,
-      endFrame: item.edit.endFrame ?? item.event.endFrame
-    }));
+  const after = reread.ok ? projectEvents(reread.chrId, reread.animations) : [];
+  const nativeVerified = reread.ok && pending.every(({ event, edit }) => {
+    const observed = after.find(item => item.address === event.address);
+    return observed !== undefined
+      && (edit.startFrame === undefined || Math.abs(observed.startTime - secondsFromFrame(edit.startFrame)) <= 0.00001)
+      && (edit.endFrame === undefined || Math.abs(observed.endTime - secondsFromFrame(edit.endFrame)) <= 0.00001);
+  });
   return {
     ok: true,
     filePath: resolved.path,
     before,
     after,
     mutations: mutations.length,
-    diagnostics: [...envelope.diagnostics, ...outcome.result.diagnostics]
+    ...(outcome.result.opId ? { opId: outcome.result.opId } : {}),
+    ...(outcome.result.backupRoot ? { backupRoot: outcome.result.backupRoot } : {}), nativeVerified,
+    diagnostics: [...envelope.diagnostics, ...outcome.result.diagnostics, ...(reread.ok ? [] : reread.result.diagnostics)]
   };
 }
 
@@ -644,20 +646,31 @@ export async function setTaeEventFields(input: {
         : [{ severity: 'error' as const, code: 'TAE_WRITE_CANCELLED', message: '写入被取消。', sourceUri: file.sourceUri }];
     return {
       ok: false,
-      error: { code: diagnostics[0]?.code ?? 'TAE_WRITE_FAILED', message: diagnostics[0]?.message ?? 'TAE 字段写入失败。' },
+      error: { code: diagnostics.find(item => item.severity === 'error')?.code ?? 'TAE_WRITE_FAILED', message: diagnostics.find(item => item.severity === 'error')?.message ?? 'TAE 字段写入失败。' },
       diagnostics,
       before
     };
   }
 
   const reread = await readTaeEnvelope(input.edit, resolved.path, before.map(event => event.address));
+  const after = reread.ok ? projectEvents(reread.chrId, reread.animations) : [];
+  const nativeVerified = reread.ok && input.edits.every((edit, index) => {
+    const observed = after.find(event => event.address === before[index]!.address);
+    const field = observed?.fields?.find(value => (edit.fieldIndex === undefined || value.index === edit.fieldIndex)
+      && (edit.fieldName === undefined || value.name === edit.fieldName));
+    return field !== undefined && (Object.is(field.value, edit.value)
+      || (typeof field.value === 'number' && typeof edit.value === 'number'
+        && Math.abs(field.value - edit.value) <= Math.max(0.000001, Math.abs(edit.value) * 0.000001)));
+  });
   return {
     ok: true,
     filePath: resolved.path,
     before,
-    after: reread.ok ? projectEvents(reread.chrId, reread.animations) : before,
+    after,
     mutations: mutations.length,
-    diagnostics: [...envelope.diagnostics, ...outcome.result.diagnostics]
+    ...(outcome.result.opId ? { opId: outcome.result.opId } : {}),
+    ...(outcome.result.backupRoot ? { backupRoot: outcome.result.backupRoot } : {}), nativeVerified,
+    diagnostics: [...envelope.diagnostics, ...outcome.result.diagnostics, ...(reread.ok ? [] : reread.result.diagnostics)]
   };
 }
 
@@ -765,7 +778,8 @@ export async function insertTaeEvents(input: { edit: NativeEditSession; file: st
   if (outcome.status !== 'committed' || !outcome.result.ok) {
     const diagnostics: Diagnostic[] = outcome.status === 'failed' ? outcome.diagnostics
       : outcome.status === 'committed' ? outcome.result.diagnostics : [{ severity: 'error', code: 'TAE_WRITE_CANCELLED', message: '写入被取消。' }];
-    return failure(diagnostics[0]?.code ?? 'TAE_WRITE_FAILED', diagnostics[0]?.message ?? 'TAE 新增失败。', diagnostics);
+    const diagnostic = diagnostics.find(item => item.severity === 'error');
+    return failure(diagnostic?.code ?? 'TAE_WRITE_FAILED', diagnostic?.message ?? 'TAE 新增失败。', diagnostics);
   }
   const reread = await readTaeEnvelope(input.edit, resolved.path, input.events.map(e => e.address));
   const after = reread.ok ? projectEvents(reread.chrId, reread.animations).filter(e => added.some(a => a.animId === e.animId && a.entryIndex === e.taeEntryIndex && a.eventIndex === e.eventIndex)) : [];

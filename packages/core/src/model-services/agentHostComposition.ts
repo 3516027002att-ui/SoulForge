@@ -10,6 +10,10 @@ import {createContextBroker} from './contextBroker.js';
 export interface AgentRunControls {
   streaming?: boolean;
   timeoutMs?: number;
+  /** Whole-run deadline, distinct from the per-provider-call timeout. */
+  totalTimeoutMs?: number;
+  maxCost?: number;
+  pricing?: {inputPerMillion: number; outputPerMillion: number};
   maxSteps?: number;
   maxTotalOutputTokens?: number;
   autoCompactTokenLimit?: number;
@@ -22,6 +26,7 @@ export interface AgentRunControls {
 export interface AgentHostComposition {
   controls?: AgentRunControls;
   defaultTimeoutMs?: number;
+  defaultTotalTimeoutMs?: number;
   maxStepsCeiling?: number;
   autoCompaction?: boolean;
   contextWindowTokens?: number;
@@ -41,6 +46,25 @@ export function composeAgentSessionOptions(params:RunParams,host:AgentHostCompos
   const steps=positiveInteger(params.maxSteps??controls.maxSteps),ceiling=positiveInteger(host.maxStepsCeiling);
   if(steps!==undefined)result.maxSteps=ceiling===undefined?steps:Math.min(ceiling,steps);
   else delete result.maxSteps;
+  const total = controls.totalTimeoutMs;
+  const cost = controls.maxCost;
+  const invalidBudget = (message:string):never => { throw Object.assign(new Error(message), {code:'AGENT_BUDGET_INVALID'}); };
+  if(total!==undefined && (!Number.isSafeInteger(total) || total<1 || total>2_147_483_647)) invalidBudget('整次运行时限必须为 1 至 2147483647 毫秒的整数。');
+  if(total!==undefined || host.defaultTotalTimeoutMs!==undefined){
+    const existing = positiveInteger(params.kernelLimits?.timeoutMs);
+    const requested = total ?? positiveInteger(host.defaultTotalTimeoutMs)!;
+    result.kernelLimits = {...params.kernelLimits, timeoutMs: existing === undefined ? requested : Math.min(existing, requested)};
+    const stepLimit = positiveInteger(params.kernelLimits?.maxSteps);
+    result.maxSteps = Math.min(result.maxSteps ?? ceiling ?? stepLimit ?? 200, stepLimit ?? Infinity);
+  }
+  if(cost!==undefined){
+    const pricing = params.pricing ?? controls.pricing;
+    if(!Number.isFinite(cost) || cost<0 || !pricing
+      || !Number.isFinite(pricing.inputPerMillion) || pricing.inputPerMillion<0
+      || !Number.isFinite(pricing.outputPerMillion) || pricing.outputPerMillion<0) invalidBudget('金额模式需要非负有限额度和每百万 token 的输入、输出价格。');
+    result.kernelLimits = {...result.kernelLimits, maxCost: Math.min(cost, params.kernelLimits?.maxCost ?? Infinity)};
+    result.pricing = pricing!;
+  }
   const output=positiveInteger(params.maxTotalOutputTokens??controls.maxTotalOutputTokens);
   if(output!==undefined)result.maxTotalOutputTokens=output;
   else delete result.maxTotalOutputTokens;

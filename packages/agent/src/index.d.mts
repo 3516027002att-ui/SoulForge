@@ -29,5 +29,6 @@ export interface FiniteAgentOptions {
  emitCompletedMessage?:boolean;
  pricing?:{inputPerMillion:number;outputPerMillion:number};strategy?:'automatic'|'on-demand';
 }
-export interface FiniteAgentResult { state:KernelState;reason:string;finishReason:string;steps:number;messages:KernelMessage[];diagnostics:KernelDiagnostic[];toolCalls:{name:string;ok:boolean;code?:string}[];transactions:KernelTransaction[];approvals:KernelApprovalAudit[];unresolvedCalls:{callId:string;toolName:string;state:'unknown';retryable:false}[];outputTokens:number;cost:number;evaluation:'unverified';pendingApproval?:{call:KernelCall;proposalHash:string;step:number} }
+export interface EffectiveAgentBudget {mode:'steps-time'|'steps-time-cost';maxSteps:number;totalTimeoutMs:number;maxOutputTokens:number;maxCost?:number}
+export interface FiniteAgentResult { state:KernelState;reason:string;finishReason:string;steps:number;messages:KernelMessage[];diagnostics:KernelDiagnostic[];toolCalls:{name:string;ok:boolean;code?:string}[];transactions:KernelTransaction[];approvals:KernelApprovalAudit[];unresolvedCalls:{callId:string;toolName:string;state:'unknown';retryable:false}[];outputTokens:number;cost:number|null;costAccounting:'unpriced'|'estimated'|'reported';costEstimate?:number;budget:EffectiveAgentBudget;evaluation:'unverified';pendingApproval?:{call:KernelCall;proposalHash:string;step:number} }
 export function runFiniteAgent(options:FiniteAgentOptions):Promise<FiniteAgentResult>;

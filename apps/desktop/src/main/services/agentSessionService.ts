@@ -606,6 +606,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
           composition: {
             controls: request,
             defaultTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+            defaultTotalTimeoutMs: 1_800_000,
             maxStepsCeiling: 200,
             autoCompaction: true,
             ...(contextWindowTokens !== undefined ? { contextWindowTokens } : {}),

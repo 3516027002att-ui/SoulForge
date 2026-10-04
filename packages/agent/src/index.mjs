@@ -19,6 +19,9 @@ function boundedAwait(promise, signal) {
 }
 export async function runFiniteAgent(options) {
     const limits = Object.fromEntries(Object.entries(budgetDefaults).map(([key, value]) => [key, positive(options.limits?.[key], value)]));
+    const budget = {mode: options.limits?.maxCost === undefined ? 'steps-time' : 'steps-time-cost', maxSteps:limits.maxSteps,
+        totalTimeoutMs:limits.timeoutMs, maxOutputTokens:limits.maxOutputTokens,
+        ...(options.limits?.maxCost === undefined ? {} : {maxCost:options.limits.maxCost})};
     const controller = new AbortController();
     const onAbort = () => controller.abort();
     options.signal?.addEventListener('abort', onAbort, { once: true });
@@ -34,6 +37,7 @@ export async function runFiniteAgent(options) {
     const approvalLevels = new Set(options.approvalRequiredLevels ?? DEFAULT_APPROVAL_REQUIRED_LEVELS);
     const approvalMemory = new Map();
     let eventSeq = 0, steps = 0, outputTokens = 0, cost = 0, state = 'running', reason = '';
+    let unreportedUsage = false;
     let pendingApproval;
     let modelAttempt = 0;
     const emit = event => options.onEvent?.({ protocolVersion: AGENT_PROTOCOL_VERSION, sessionId: options.sessionId, runId: options.runId, requestId: options.requestId, eventSeq: ++eventSeq, event: JSON.parse(JSON.stringify(event, (_key, value) => typeof value === 'string' ? redact(value) : value)) });
@@ -54,7 +58,7 @@ export async function runFiniteAgent(options) {
         emit({ type: 'tool-call-end', step: steps, callId: call.id, name: call.name, ok: result.ok, ...(result.code ? { code: result.code } : {}) });
     };
     try {
-        emit({ type: 'run-started', kernel: 'finite', evaluation: 'unverified', strategy: options.strategy ?? 'on-demand' });
+        emit({ type: 'run-started', kernel: 'finite', evaluation: 'unverified', strategy: options.strategy ?? 'on-demand', budget });
         if (options.limits?.maxCost !== undefined && (!(options.limits.maxCost >= 0) || !Number.isFinite(options.limits.maxCost) || !options.pricing || !Number.isFinite(options.pricing.inputPerMillion) || !Number.isFinite(options.pricing.outputPerMillion) || options.pricing.inputPerMillion < 0 || options.pricing.outputPerMillion < 0))
             finish('partial', 'cost_configuration_required');
         while (state === 'running' && steps < limits.maxSteps) {
@@ -91,6 +95,8 @@ export async function runFiniteAgent(options) {
             }
             diagnostics.push(...(completion.diagnostics ?? []).map(d => ({ ...d, message: redact(d.message) })));
             const used = Number.isFinite(completion.usage?.outputTokens) && completion.usage.outputTokens >= 0 ? completion.usage.outputTokens : Math.ceil(bytes(completion.message) / 4);
+            if(!Number.isFinite(completion.usage?.outputTokens) || completion.usage.outputTokens<0
+                || !Number.isFinite(completion.usage?.inputTokens) || completion.usage.inputTokens<0) unreportedUsage=true;
             outputTokens += used;
             if (options.pricing) {
                 cost += ((completion.usage?.inputTokens ?? Math.ceil(bytes(messages) / 4)) * options.pricing.inputPerMillion + used * options.pricing.outputPerMillion) / 1e6;
@@ -268,5 +274,8 @@ export async function runFiniteAgent(options) {
     }
     const finishReason = state === 'completed' ? 'stop' : state === 'waiting' ? 'waiting' : state;
     emit({ type: 'turn-complete', finishReason, steps });
-    return { state, reason, finishReason, steps, messages, diagnostics, toolCalls, transactions, unresolvedCalls, approvals, outputTokens, cost, evaluation: 'unverified', ...(pendingApproval ? { pendingApproval } : {}) };
+    return { state, reason, finishReason, steps, messages, diagnostics, toolCalls, transactions, unresolvedCalls, approvals, outputTokens,
+        cost:options.pricing && !unreportedUsage ? cost : null,
+        costAccounting:options.pricing ? (unreportedUsage ? 'estimated' : 'reported') : 'unpriced',
+        ...(options.pricing && unreportedUsage ? {costEstimate:cost} : {}), budget, evaluation: 'unverified', ...(pendingApproval ? { pendingApproval } : {}) };
 }

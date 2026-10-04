@@ -14,6 +14,14 @@ test('terminal model output has independent unverified evaluation and monotonic 
  assert.deepEqual(events.map(e=>e.eventSeq),events.map((_,i)=>i+1));
  assert.ok(events.every(e=>e.protocolVersion===1 && e.runId==='run' && e.requestId==='request'));
 });
+
+test('unknown usage and unconfigured prices never claim zero actual cost', async()=>{
+ const unpriced=await run();assert.equal(unpriced.cost,null);assert.equal(unpriced.costAccounting,'unpriced');
+ const unreported=await run({pricing:{inputPerMillion:1,outputPerMillion:2},model:async()=>response('done',[],{})});
+ assert.equal(unreported.cost,null);assert.equal(unreported.costAccounting,'estimated');assert.ok(unreported.costEstimate>0);
+ const reported=await run({pricing:{inputPerMillion:1,outputPerMillion:2},model:async()=>response('done',[],{inputTokens:10,outputTokens:5})});
+ assert.equal(reported.cost,0.00002);assert.equal(reported.costAccounting,'reported');
+});
 test('noninteractive approvals park a concrete proposal without executing or requesting another model turn', async()=>{
  let models=0, writes=0;const result=await run({tools:[{name:'rename',permissionLevel:'commit'}],model:async()=>{models++;return response('',[call('write','rename')]);},executeTool:async()=>{writes++;return {ok:true,content:'{}'};}});
  assert.equal(result.state,'waiting'); assert.equal(writes,0);assert.equal(models,1);

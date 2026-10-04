@@ -89,6 +89,11 @@ export interface AiAgentRunRequest {
    * left the session running until the user cancelled it by hand.
    */
   timeoutMs?: number;
+  /** Whole-run deadline; defaults to 30 minutes, independent of timeoutMs. */
+  totalTimeoutMs?: number;
+  /** Optional money ceiling. Prices must use the same currency as this ceiling. */
+  maxCost?: number;
+  pricing?: { inputPerMillion: number; outputPerMillion: number };
   /** Total output token budget across all steps; the loop stops when exceeded. */
   maxTotalOutputTokens?: number;
   /**

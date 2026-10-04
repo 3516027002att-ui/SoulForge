@@ -64,12 +64,16 @@ internal sealed class FmgNativeDocument
         var reserved0 = ReadInt32(source, 28);
         var reserved1 = ReadInt32(source, 32);
         var reserved2 = ReadInt32(source, 36);
+        if (unk1 != 1 || unk2 != 0xff)
+            throw new NotSupportedException("FMG v2 仅支持 little-endian Unicode 编码和 0xFF 宽偏移布局。");
+        if (reserved0 != 0)
+            throw new InvalidDataException("FMG 字符串偏移表地址超出安全读取范围。");
         if (groupCount < 0 || groupCount > MaxEntries || stringCount < 0 || stringCount > MaxEntries)
             throw new InvalidDataException($"FMG 组/字符串数量越界：groups={groupCount}, strings={stringCount}。");
         var groupsEnd = checked(HeaderSize + groupCount * GroupSize);
         if (stringOffsetsOffset < groupsEnd || stringOffsetsOffset > source.Length)
             throw new InvalidDataException("FMG stringOffsetsOffset 越界。");
-        if (stringOffsetsOffset + (long)stringCount * 4 > source.Length)
+        if (stringOffsetsOffset + (long)stringCount * 8 > source.Length)
             throw new InvalidDataException("FMG 字符串偏移表越界。");
 
         var groups = new List<FmgGroup>(groupCount);
@@ -89,7 +93,11 @@ internal sealed class FmgNativeDocument
 
         var offsets = new int[stringCount];
         for (var i = 0; i < stringCount; i++)
-            offsets[i] = ReadInt32(source, stringOffsetsOffset + i * 4);
+        {
+            var offset = BinaryPrimitives.ReadInt64LittleEndian(source.AsSpan(stringOffsetsOffset + i * 8, 8));
+            if (offset < 0 || offset > source.Length) throw new InvalidDataException("FMG v2 字符串宽偏移越界。");
+            offsets[i] = checked((int)offset);
+        }
 
         var entries = new List<FmgEntry>(stringCount);
         var covered = new bool[stringCount];
@@ -162,6 +170,42 @@ internal sealed class FmgNativeDocument
         // Preserve caller order (string-slot order). Duplicate IDs are allowed and become separate groups.
         var ordered = nextEntries.ToList();
 
+        // Replacing existing text must not normalize groups, padding or an
+        // opaque string pool. Append changed strings and redirect only their
+        // wide offset slots; every untouched source byte remains at its offset.
+        if (ordered.Count == Entries.Count && ordered.Select((entry, index) =>
+                entry.Id == Entries[index].Id && (entry.SlotIndex < 0 || entry.SlotIndex == Entries[index].StringIndex)).All(value => value))
+        {
+            var replacements = new List<(int Index, byte[]? Bytes)>();
+            var length = SourceBytes.Length;
+            for (var i = 0; i < ordered.Count; i++)
+            {
+                if (ordered[i].Text == Entries[i].Text) continue;
+                var encoded = ordered[i].Text is null ? null : Encoding.Unicode.GetBytes(ordered[i].Text + "\0");
+                if (encoded is not null) length = checked(((length + 1) & ~1) + encoded.Length);
+                if (length > MaxSourceBytes) throw new InvalidDataException("FMG 写入结果超出安全范围。");
+                replacements.Add((Entries[i].StringIndex, encoded));
+            }
+            var output = new byte[length];
+            SourceBytes.CopyTo(output, 0);
+            var table = ReadInt32(SourceBytes, 24);
+            var position = SourceBytes.Length;
+            foreach (var replacement in replacements)
+            {
+                if (replacement.Bytes is null)
+                    BinaryPrimitives.WriteInt64LittleEndian(output.AsSpan(table + replacement.Index * 8, 8), 0);
+                else
+                {
+                    position = (position + 1) & ~1;
+                    BinaryPrimitives.WriteInt64LittleEndian(output.AsSpan(table + replacement.Index * 8, 8), position);
+                    replacement.Bytes.CopyTo(output, position);
+                    position += replacement.Bytes.Length;
+                }
+            }
+            WriteInt32(output, 4, output.Length);
+            return output;
+        }
+
         // Coalesce only strictly ascending consecutive IDs; identical adjacent IDs stay split.
         var groupUnkByFirstId = new Dictionary<int, int>();
         foreach (var group in Groups)
@@ -190,7 +234,7 @@ internal sealed class FmgNativeDocument
         var stringBytes = new List<byte[]>();
         var offsets = new int[ordered.Count];
         // Placeholder; filled after layout known.
-        var headerAndTables = HeaderSize + groups.Count * GroupSize + ordered.Count * 4;
+        var headerAndTables = HeaderSize + groups.Count * GroupSize + ordered.Count * 8;
         // Align string pool start to 2 for UTF-16.
         var stringPoolStart = headerAndTables;
         if ((stringPoolStart & 1) != 0) stringPoolStart++;
@@ -235,7 +279,7 @@ internal sealed class FmgNativeDocument
             WriteInt32(rebuilt, o + 12, group.Unk);
         }
         for (var i = 0; i < ordered.Count; i++)
-            WriteInt32(rebuilt, stringOffsetsOffset + i * 4, offsets[i]);
+            BinaryPrimitives.WriteInt64LittleEndian(rebuilt.AsSpan(stringOffsetsOffset + i * 8, 8), offsets[i]);
         for (var i = 0; i < ordered.Count; i++)
         {
             if (offsets[i] == 0) continue;
@@ -336,6 +380,7 @@ internal sealed class FmgNativeDocument
     public object ToEnvelope(FmgRoundTripReport? report = null) => new
     {
         format = "FMG",
+        readerSchemaRevision = 2,
         versionMarker = VersionMarker,
         version = 2,
         sourceSize = SourceBytes.Length,

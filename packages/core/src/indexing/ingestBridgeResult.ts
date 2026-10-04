@@ -416,6 +416,7 @@ function parseMsgExport(value: unknown, sourceUri: string, fallbackProvenance: S
   const exportProvenance = sourceProvenance(record, fallbackProvenance);
   return {
     value: {
+      ...(typeof record.readerSchemaRevision === 'number' ? {readerSchemaRevision: record.readerSchemaRevision} : {}),
       ...(asString(record.category) ? { category: asString(record.category) } : {}),
       ...exportProvenance,
       entries: Array.isArray(record.entries) ? record.entries.flatMap((item, index) => parseTextEntry(item, sourceUri, index, exportProvenance)) : []

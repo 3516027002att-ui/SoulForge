@@ -65,6 +65,17 @@ test('headless Electron smoke selects a display backend without relaxing sandbox
   ]);
 });
 
+test('PowerShell module analysis cache stays inside the owned smoke runtime', async()=>{
+ await build.withDesktopTestBuild('database',async ({outputRoot,env})=>{
+   assert.equal(env.PSModuleAnalysisCachePath,join(outputRoot,'.runtime','powershell','ModuleAnalysisCache'));
+   assert.ok((await lstat(join(outputRoot,'.runtime','powershell'))).isDirectory());
+   if(process.platform==='win32'){
+     const result=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command','New-Object Text.UTF8Encoding($false) | Out-Null; Write-Output $env:PSModuleAnalysisCachePath'],{env,encoding:'utf8',windowsHide:true});
+     assert.equal(result.status,0,result.stderr);assert.equal(result.stdout.trim(),env.PSModuleAnalysisCachePath);
+   }
+ },{build:false});
+});
+
 test('smoke output allocation is distinct, bounded, and cleaned without touching production', async () => {
   assert.equal(typeof build.withDesktopTestBuild, 'function', 'smoke builds require an isolated output owner');
   const root = await mkdtemp(join(tmpdir(), 'sf-build-test-'));

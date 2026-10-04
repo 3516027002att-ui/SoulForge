@@ -6,6 +6,7 @@ import { fail } from '.././toolRegistrySupport.js';
 import { finalizeCommittedToolResult } from '.././toolRegistrySupport.js';
 import { requireEditSession } from '.././toolRegistrySupport.js';
 import { setTaeEventTimes } from '../../editing/taeEdit.js';
+import {parseActionAddress} from '@soulforge/shared';
 
 /** mutate_tae_event_times: one domain tool declaration, schema and handler. */
 export function createMutateTaeEventTimesTool():RegisteredTool {
@@ -31,7 +32,8 @@ export function createMutateTaeEventTimesTool():RegisteredTool {
             if (!edits.ok)
                 return fail(edits.code, edits.message);
             for (const e of edits.edits) {
-                if (/^m\d\d_/i.test(e.address) || !/^[a-z0-9_]+#A/i.test(e.address)) {
+                const address = parseActionAddress(e.address);
+                if (!address || address.animId === undefined || address.eventIndex === undefined) {
                     return fail('DOMAIN_CROSSOVER_REJECTED', `TAE 写入工具只能接收 TAE 动作事件地址（如 cXXXX#AXXXX.eN），不能接收地图或其它领域地址：${e.address}`);
                 }
                 const record = e as unknown as Record<string, unknown>;
@@ -45,7 +47,9 @@ export function createMutateTaeEventTimesTool():RegisteredTool {
             const result = await setTaeEventTimes({ edit: edit.session, file, edits: edits.edits });
             if (!result.ok)
                 return fail(result.error.code, result.error.message, result.diagnostics);
-            return finalizeCommittedToolResult({ data: result, changedSources: [result.filePath], context });
+            return finalizeCommittedToolResult({ data: result, changedSources: [result.filePath], context,
+                verifyNative: async () => result.nativeVerified ? { ok: true, details: { addresses: result.after.map(event => event.address) } }
+                    : { ok: false, code: 'TAE_TIME_READBACK_FAILED', message: '写入已提交，但原生时间回读未验证；请按 opId 查询或回滚，禁止自动重放。', details: result.diagnostics } });
         }
     };
 }

@@ -5,6 +5,7 @@ import { dirname } from 'node:path';
 import BetterSqlite3 from 'better-sqlite3';
 import type { SqlMigration } from './sqliteSchema.js';
 import { APP_DB_MIGRATIONS, SQLITE_MIGRATIONS } from './sqliteSchema.js';
+import { convertLegacyKnowledge, isLegacyKnowledgeMigration } from './sqliteLegacyKnowledge.js';
 
 export type SqliteDatabase = BetterSqlite3.Database;
 
@@ -108,6 +109,20 @@ VALUES (@id, @name, @checksum, @appliedAt)
         );
       }
       if (applied.name !== migration.name || applied.checksum !== checksum) {
+        if (isLegacyKnowledgeMigration(migration, applied.name, applied.checksum, checksum)) {
+          preserveBeforeMigration(database, migration.id);
+          try {
+            database.transaction(() => {
+              convertLegacyKnowledge(database, migration);
+              database.prepare('UPDATE schema_migrations SET checksum = ? WHERE id = ?').run(checksum, migration.id);
+            }).immediate();
+          } catch (error) {
+            throw new SqliteMigrationError('SQLITE_LEGACY_KNOWLEDGE_MIGRATION_FAILED',
+              'Historical knowledge conversion failed; original schema and journal are preserved.',
+              { cause: error instanceof Error ? error.message : String(error) });
+          }
+          continue;
+        }
         // 一次性重锚:只对显式登记的 (id, name, 旧 checksum, 新 checksum) 四元组
         // 生效。命中时把账本里的 checksum 更新为代码值并继续,不重跑 SQL。
         const reanchor = findChecksumReanchor(migration, applied.name, applied.checksum, checksum);
@@ -238,6 +253,14 @@ export const CHECKSUM_REANCHORS: readonly ChecksumReanchor[] = Object.freeze([
     toChecksum: '95cfb57f0dc5b9ae94511ef4ce4c5056b5724ded369880a1ebe3670c8f6d4d42',
     reason: '该迁移曾在开发中途被整条删除，补回时 SQL 由既有库的真实 DDL 重建，'
       + '故 checksum 与历史值不同。表结构本身未变（已用结构比对确认）。'
+  },
+  {
+    id: 13,
+    name: 'v0_5_rag_outer_file_identity',
+    fromChecksum: '2a0980183e0f68f6e8b3c95ce0f21990a4617466e076245eb79dd43d523bf55a',
+    toChecksum: '4d10b4936808de58df3d2226479029105a85645e7b9b9aedafbee7ad330f7c07',
+    reason: 'e32edad11a4d7cd493312bf49543d0241b667a42 的 sqlAfterColumns 结尾多四个空格；'
+      + '与当前迁移的 SQL、列和索引逐项相同，仅移除尾随空白。只重锚这一对已复算哈希，不重跑 SQL。'
   }
 ]);
 

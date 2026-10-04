@@ -38,6 +38,7 @@ export interface SemanticCacheProvider {
 export function isNativeSemanticBundleCurrent(file: IndexedFile, bundle: SymbolBundle): boolean {
   if (bundle.tae?.some((item) => item.readerSchemaRevision !== TAE_IDENTITY_PROJECTION_VERSION)) return false;
   if (!isNativeSemanticCacheCandidate(file)) return true;
+  if (bundle.msgs?.some(item => item.readerSchemaRevision !== 2)) return false;
   if (!file.sha256) return false;
 
   const proven = [

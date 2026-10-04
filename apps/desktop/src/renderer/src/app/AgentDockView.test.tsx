@@ -19,6 +19,7 @@ function fixture() {
     fallbackTools: [{ name: 'workspace-tool', description: 'Workspace tool', permission: 'read' }],
     agent: {
       agentOpen: true, agentWidth: width, agentExpanded: expanded,
+      agentBudget: {}, setAgentBudget: command('budget'),
       setAgentOpen: command('open'),
       setAgentWidth: value => { width = typeof value === 'function' ? value(width) : value; calls.push(['width', width]); },
       setAgentExpanded: value => { expanded = typeof value === 'function' ? value(expanded) : value; calls.push(['expanded', expanded]); },

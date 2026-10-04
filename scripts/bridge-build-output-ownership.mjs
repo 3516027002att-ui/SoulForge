@@ -4,6 +4,7 @@ import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir,
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as temporary from './owned-temporary-directory.mjs';
+import {renameOwnedFile} from './owned-rename.mjs';
 
 const schema = 'soulforge.bridge-build-output-owner.v1';
 const storeName = '.soulforge-build-output-ownership';
@@ -83,7 +84,7 @@ async function save(c, record) {
   const pending = join(pendingRoot, `.ownership-${record.kind}-${randomUUID()}.json`);
   if (!await plainPath(c.root, c.store, true)) return;
   await writeFile(pending, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
-  await rename(pending, path);
+  await renameOwnedFile(pending, path);
 }
 
 function outputFile(c, record, path, area = 'bin') {
@@ -319,7 +320,7 @@ export async function promoteBridgeBuild({ project, token, runRoot, outputPath, 
     await copyFile(candidate.source, pending, constants.COPYFILE_EXCL);
     const proof = await identity(runRoot, pending);
     if (proof) { record.renaming.push({ ...fileEntry(candidate), ...proof }); await save(c, record); }
-    await rename(pending, candidate.destination);
+    await renameOwnedFile(pending, candidate.destination);
     if (await hashFile(c, candidate.destination, candidate.area) !== candidate.hash) throw new Error('BRIDGE_OUTPUT_PROMOTION_CHANGED');
     record.files.push(fileEntry(candidate));
     record.renaming = record.renaming.filter(value => fileKey(value) !== fileKey(candidate));

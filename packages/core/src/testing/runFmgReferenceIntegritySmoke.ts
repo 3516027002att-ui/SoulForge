@@ -305,7 +305,7 @@ async function runRealCorpus(): Promise<void> {
 function buildNativeFmg(entries: Array<{ id: number; text: string }>): Buffer {
   const n = entries.length;
   const stringOffsetsOffset = 0x28 + n * 0x10;
-  const stringPoolStart = stringOffsetsOffset + n * 4;
+  const stringPoolStart = stringOffsetsOffset + n * 8;
   const encoded = entries.map((e) =>
     e.text.length === 0 ? null : Buffer.from(`${e.text}\0`, 'utf16le'));
   const offsets: number[] = [];
@@ -318,10 +318,10 @@ function buildNativeFmg(entries: Array<{ id: number; text: string }>): Buffer {
   const out = Buffer.alloc(cursor);
   out.writeUInt32LE(0x00020000, 0);
   out.writeUInt32LE(cursor, 4);
-  out.writeUInt32LE(0, 8);
+  out.writeUInt32LE(1, 8);
   out.writeUInt32LE(n, 12);
   out.writeUInt32LE(n, 16);
-  out.writeUInt32LE(0, 20);
+  out.writeUInt32LE(0xff, 20);
   out.writeUInt32LE(stringOffsetsOffset, 24);
   for (let i = 0; i < n; i++) {
     const o = 0x28 + i * 0x10;
@@ -330,7 +330,7 @@ function buildNativeFmg(entries: Array<{ id: number; text: string }>): Buffer {
     out.writeInt32LE(entries[i]!.id, o + 8);
     out.writeInt32LE(0, o + 12);
   }
-  for (let i = 0; i < n; i++) out.writeUInt32LE(offsets[i]!, stringOffsetsOffset + i * 4);
+  for (let i = 0; i < n; i++) out.writeBigInt64LE(BigInt(offsets[i]!), stringOffsetsOffset + i * 8);
   for (let i = 0; i < n; i++) {
     const e = encoded[i];
     if (e) e.copy(out, offsets[i]!);

@@ -362,6 +362,7 @@ export interface ApprovalResponse {
 }
 
 export type AgentEvent =
+  | { type: 'run-budget'; budget: import('../../../agent/src/index.mjs').EffectiveAgentBudget }
   | { type: 'turn-started'; step: number }
   | { type: 'agent-message-delta'; step: number; text: string }
   | { type: 'agent-thinking-delta'; step: number; text: string }

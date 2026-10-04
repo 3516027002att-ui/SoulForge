@@ -224,6 +224,7 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   setAgentTask: 'AI 任务态；跨工作区保留是有意的——清空会让仍在跑的任务失去取消入口（硬约束 16）',
   setAgentServices: '模型服务清单，来自凭据 vault，与工作区无关',
   setAgentServiceId: '选中的模型服务，跨工作区保留是有意的',
+  setAgentBudget: '下一次运行的预算偏好，不携带资源；更换模型服务时清空，避免沿用另一服务的价格',
   setAgentSessions: '会话历史列表，来自 userData/agent，与工作区无关',
   setAgentSessionsPage: '会话列表页码，随刷新自行复位',
   setAgentSessionsError: '会话读取的结构化诊断，随下次读取覆盖',

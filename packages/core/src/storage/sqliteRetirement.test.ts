@@ -8,6 +8,25 @@ import { openAppDatabase, openMigratedDatabase, openWorkspaceDatabase } from './
 import { APP_DB_MIGRATIONS, SQLITE_MIGRATIONS } from './sqliteSchema.js';
 import { SqliteOperationLogStore } from '../patch/sqliteOperationLogStore.js';
 
+test('only the verified historical migration 13 whitespace variant can be reanchored', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sf-migration-13-'));
+  const path = join(root, 'workspace.db');
+  let database: BetterSqlite3.Database | undefined;
+  try {
+    const historical = SQLITE_MIGRATIONS.filter(migration => migration.id <= 13).map(migration => migration.id === 13
+      ? { ...migration, sqlAfterColumns: `${migration.sqlAfterColumns}    ` } : migration);
+    database = openMigratedDatabase(path, historical);
+    assert.equal((database.prepare('SELECT checksum FROM schema_migrations WHERE id=13').get() as {checksum:string}).checksum,
+      '2a0980183e0f68f6e8b3c95ce0f21990a4617466e076245eb79dd43d523bf55a');
+    database.close(); database = openWorkspaceDatabase(path);
+    assert.equal((database.prepare('SELECT checksum FROM schema_migrations WHERE id=13').get() as {checksum:string}).checksum,
+      '4d10b4936808de58df3d2226479029105a85645e7b9b9aedafbee7ad330f7c07');
+    database.prepare('UPDATE schema_migrations SET checksum=? WHERE id=13').run('0'.repeat(64));
+    database.close(); database = undefined;
+    assert.throws(() => openWorkspaceDatabase(path), error => (error as {code?:string}).code === 'SQLITE_MIGRATION_CHECKSUM_MISMATCH');
+  } finally { database?.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 const workspaceTables = ['event_symbols','event_instructions','event_text_fts','map_entities','map_regions','param_rows','param_fields','param_rows_fts','text_entries','text_entries_fts','operation_logs','workspace_layers','agent_runs','resource_nodes','resource_edges','resource_graph_snapshots'];
 const appTables = ['model_services','permission_grants','ai_conversations','ai_messages','adaptation_packages','trusted_signers','app_settings','app_agent_runs','agent_steps','tool_calls','outbound_context_items'];
 

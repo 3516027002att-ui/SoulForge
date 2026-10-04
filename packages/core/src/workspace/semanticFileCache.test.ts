@@ -10,6 +10,12 @@ import {
 import type { EventExport, ParamExport } from '@soulforge/shared';
 
 describe('semanticFileCache', () => {
+  it('rejects pre-fix FMG projections even when their source hash is unchanged', () => {
+    const file = {relativePath:'msg/engus/item.msgbnd.dcx',resourceKind:'msg',sha256:'same',mtimeMs:1};
+    const projection = {outerFileHash:'same',sourceRevision:1,entries:[]};
+    assert.equal(isNativeSemanticBundleCurrent(file as never,{msgs:[projection]}),false);
+    assert.equal(isNativeSemanticBundleCurrent(file as never,{msgs:[{...projection,readerSchemaRevision:2}]}),true);
+  });
   it('invalidates legacy TAE identity while keeping content-identical current projections', () => {
     const file = { relativePath: 'chr/c0000.anibnd.dcx', resourceKind: 'chr', sha256: 'same-content', mtimeMs: 1 };
     const legacy = { tae: [{ chrId: 'c0000', sourceUri: 'file://chr/c0000.anibnd.dcx', outerFileHash: 'same-content', sourceRevision: 1, animations: [] }] };

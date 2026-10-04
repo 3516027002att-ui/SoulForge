@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { test } from 'node:test';
+import { inflateSync } from 'node:zlib';
+import { dfltDcx } from './scene/mapFixtureHelpers.mjs';
 import { distinctTaeFixture, manyEventsFixture, manyAnimationsFixture, taeBinderFixture } from './tae-native-fixture-helpers.mjs';
 
 // The expected IDs, frames, fields and native byte positions are constructed
@@ -271,6 +273,49 @@ test('Agent insertion commits through Patch Engine with audit and restores the e
 }));
 
 
+test('section-qualified Agent mutations accept native addresses without lending proof to another section', async () => withFixture(async ({ root, bytes, expected }) => {
+  const { createDefaultToolRegistry } = await import('../packages/core/dist/ai/toolRegistry.js');
+  const { openWorkspaceSession } = await import('../packages/core/dist/workspace/workspaceSession.js');
+  const { MemoryOperationLogStore } = await import('../packages/core/dist/patch/operationLog.js');
+  const { WorkspaceIndex } = await import('../packages/core/dist/indexing/workspaceIndex.js');
+  const { createAgentToolBridge } = await import('../packages/core/dist/ai/agentToolBridge.js');
+  const { createNativeReadProofStore } = await import('../packages/core/dist/editing/nativeReadProofStore.js');
+  const { createConfirmationReceipt } = await import('../packages/core/dist/patch/writerContract.js');
+  const { disposeBridgeDaemonPool } = await import('../packages/core/dist/bridge/runBridge.js');
+  const source = join(root, 'c0000.anibnd.dcx'), payload = taeBinderFixture([bytes, bytes]), original = dfltDcx(payload);
+  await writeFile(source, original);
+  const session = await openWorkspaceSession({ overlayRoot: root, game: 'sekiro' });
+  await mkdir(join(root, '.storage'), { recursive: true });
+  const context = { workspaceIndex: new WorkspaceIndex(session.meta.workspaceId), mode: 'fullPermission', session,
+    operationLogStore: new MemoryOperationLogStore(), backupBaseDir: join(root, '.storage/backups'), recoveryDir: join(root, '.storage/recovery'), nativeReadProofs: createNativeReadProofStore() };
+  const registry = createDefaultToolRegistry(), bridge = createAgentToolBridge({ registry, context });
+  const address = 'action://c0000/tae/1/A400000/e0';
+  try {
+    for (const [name, changes] of [
+      ['mutate_tae_event_times', [{ address, startFrame: 210, endFrame: 240 }]],
+      ['mutate_tae_event_fields', [{ address, fieldName: 'FFXID', value: 4321 }]]
+    ]) {
+      const read = await bridge.executeTool({ id: `proof-${name}`, name: 'read_tae_events', argumentsJson: JSON.stringify({ file: source, addresses: [address] }) });
+      assert.equal(read.ok, true, read.content);
+      const evidence = JSON.parse(read.content).evidence;
+      assert.equal(evidence.claims[0].identity?.domain ?? evidence.claimDefaults?.identity?.domain, 'tae');
+      const wrong = await registry.run(name, { file: source, edits: changes.map(change => ({ ...change, address: 'action://c0000/tae/0/A400000/e0' })) }, context);
+      assert.equal(wrong.ok, false, 'proof for section 1 cannot authorize section 0');
+      assert.deepEqual(await readFile(source), original);
+      const result = await registry.run(name, { file: source, edits: changes }, context);
+      assert.equal(result.ok, true, JSON.stringify(result));
+      const wanted = Buffer.from(payload), child = wanted.readUInt32LE(0x40 + 0x24 + 24);
+      if (name === 'mutate_tae_event_times') { wanted.writeFloatLE(7, child + expected[0].time); wanted.writeFloatLE(8, child + expected[0].time + 4); }
+      else wanted.writeInt32LE(4321, child + expected[0].field);
+      assert.deepEqual(inflateSync((await readFile(source)).subarray(0x4c)), wanted, 'only the exact section and native field may change');
+      const rollback = await registry.run('rollback_operation', { opId: result.data.opId }, { ...context,
+        confirmation: createConfirmationReceipt({ subjects: [`ROLLBACK_OPERATION:${result.data.opId}`], riskLevel: 'high', note: 'canonical TAE fixture rollback' }) });
+      assert.equal(rollback.ok, true, JSON.stringify(rollback));
+      assert.deepEqual(await readFile(source), original);
+    }
+  } finally { await disposeBridgeDaemonPool(); }
+}));
+
 test('bounded native read of seven out of 240 events never becomes a complete cached action search', async () => withFixture(async ({ source, root, bytes, expected }) => {
   await writeFile(source, manyEventsFixture(bytes, expected));
   const { createDefaultToolRegistry } = await import('../packages/core/dist/ai/toolRegistry.js');
@@ -296,7 +341,7 @@ test('bounded native read of seven out of 240 events never becomes a complete ca
     assert.equal(next.ok, true, JSON.stringify(next)); assert.equal(next.data.events[0].eventIndex, 7);
     let cursor = next.data.pagination.nextCursor;
     while (cursor) { const page = await registry.run('read_tae_events', { file: source, addresses: ['c0000#A400000'], cursor }, context); assert.equal(page.ok, true, JSON.stringify(page)); cursor = page.data.pagination.nextCursor; }
-    const complete = index.searchTaeActionGroups('400000')[0].item;
+    const complete = index.toSymbolBundle().tae[0].animations.find(animation => animation.animId === 400000);
     assert.equal(complete.eventCount, 240); assert.equal(complete.eventsComplete, true);
     assert.deepEqual(complete.events.map(e => e.index), Array.from({ length: 240 }, (_, i) => i));
     const sparseContext = { ...context, workspaceIndex: new WorkspaceIndex(session.meta.workspaceId) };

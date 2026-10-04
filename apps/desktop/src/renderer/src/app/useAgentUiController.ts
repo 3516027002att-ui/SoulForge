@@ -94,9 +94,11 @@ export function useAgentUiController(options: AgentUiOptions) {
      任务状态全部由 agentTaskState 的纯函数折叠，本组件只持有它的当前值——
      折叠规则放在组件里就只能靠真实 Electron 才能测，而那一层抓不到规则本身的错。 */
   const [agentTask, setAgentTask] = useState<AgentTaskState>(INITIAL_AGENT_TASK_STATE);
+  const [agentBudget, setAgentBudget] = useState<Pick<AiAgentRunRequest, 'maxSteps' | 'totalTimeoutMs' | 'maxCost' | 'pricing'>>({});
   const agentCancelRequestedRef = useRef<boolean>(false);
   const [agentServices, setAgentServices] = useState<ModelServiceChoice[]>([]);
   const [agentServiceId, setAgentServiceId] = useState<string | null>(null);
+  useEffect(() => { setAgentBudget({}); }, [agentServiceId]);
   const [agentSessions, setAgentSessions] = useState<AgentSessionRow[]>([]);
   const [agentSessionsError, setAgentSessionsError] = useState<string | null>(null);
   const [agentSessionDetail, setAgentSessionDetail] = useState<AgentSessionDetail | null>(null);
@@ -366,6 +368,7 @@ export function useAgentUiController(options: AgentUiOptions) {
         ...(agentAttachments.length > 0 ? { attachments: agentAttachments } : {}),
         streaming: true,
         timeoutMs: 180_000,
+        ...agentBudget,
         // 工作区 Agent 默认启用一次性 RAG 预检；main 会优先使用内存
         // active corpus，并等待正在进行的那一次语义分析完成，不会按查询重扫。
         useRagSearch: true,
@@ -545,6 +548,7 @@ export function useAgentUiController(options: AgentUiOptions) {
     setAgentIdleNotice(null);
   }, []);
   return {
+    agentBudget, setAgentBudget,
     agentOpen, setAgentOpen, agentWidth, setAgentWidth, agentExpanded, setAgentExpanded,
     agentInteractionMode, changeAgentInteractionMode, setAgentResources, handleAgentAttachmentsChange,
     citeSelecting, setCiteSelecting, pendingCiteHits, setPendingCiteHits, handleCiteSettle,

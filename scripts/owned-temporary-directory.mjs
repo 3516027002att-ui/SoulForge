@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { lstat, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import {renameOwnedFile,renameOwnedFileSync} from './owned-rename.mjs';
 import { hostname, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -129,7 +130,7 @@ export function recordOwnedProcess(ticket, pid, { finished = false } = {}) {
   if (!record.childPids.includes(pid)) record.childPids.push(pid);
   if (finished) record.uncertainTrees = (record.uncertainTrees ?? []).filter(value => value !== pid);
   const pending = `${path}.${randomUUID()}.next`;
-  writeFileSync(pending, JSON.stringify(record), { flag: 'wx', mode: 0o600 }); renameSync(pending, path);
+  writeFileSync(pending, JSON.stringify(record), { flag: 'wx', mode: 0o600 }); renameOwnedFileSync(pending, path);
 }
 
 /** Register the bounded job proof location while its supervisor is still gated. */
@@ -140,7 +141,7 @@ export function prepareOwnedWindowsJob(ticket, pid, id) {
   record.windowsJobs ??= [];
   record.windowsJobs.push({ pid, id });
   const pending = `${path}.${randomUUID()}.next`;
-  writeFileSync(pending, JSON.stringify(record), { flag: 'wx', mode: 0o600 }); renameSync(pending, path);
+  writeFileSync(pending, JSON.stringify(record), { flag: 'wx', mode: 0o600 }); renameOwnedFileSync(pending, path);
 }
 
 async function readOwner(root, owner) {
@@ -235,7 +236,7 @@ function directoryHandle(root, owner, record) {
     update(record);
     const pending = join(root, `${markerName}.${randomUUID()}.next`);
     await writeFile(pending, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
-    await rename(pending, join(root, markerName));
+    await renameOwnedFile(pending, join(root, markerName));
     return { root, token: record.token };
   }
   return {

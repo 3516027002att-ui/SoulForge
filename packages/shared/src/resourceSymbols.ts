@@ -149,6 +149,8 @@ export interface ParamFieldSymbol {
 }
 
 export interface MsgExport {
+  /** Native FMG offset-layout decoder revision, distinct from source bytes. */
+  readerSchemaRevision?: number;
   category?: string;
   sourceHash?: string;
   outerFileHash?: string;

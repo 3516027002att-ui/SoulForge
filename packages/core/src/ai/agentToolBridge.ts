@@ -1355,10 +1355,10 @@ function buildEvidenceClaims(
       ? 'param'
       : /fmg|text/i.test(name)
         ? 'fmg'
-        : /emevd|event/i.test(name)
-          ? 'emevd'
-          : /tae|animation/i.test(name)
-            ? 'tae'
+        : /tae|animation/i.test(name)
+          ? 'tae'
+          : /emevd|event/i.test(name)
+            ? 'emevd'
             : /map|msb/i.test(name)
               ? 'map'
               : /lua|script/i.test(name) ? 'script' : 'evidence',

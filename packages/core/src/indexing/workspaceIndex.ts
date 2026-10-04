@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { createOpaqueCursor, parseOpaqueCursor, formatActionAddress } from '@soulforge/shared';
+import {searchTaeActionPage, type TaeActionSearchWindow} from './taeActionSearch.js';
+import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
 import type {
   EventArg,
   EventExport,
@@ -1317,29 +1318,17 @@ export class WorkspaceIndex {
     return searchSymbols(events, query, limit, taeEventSearchText);
   }
 
-  /** A hit expands to its whole native action; limits count actions. */
+  /** Compatibility projection; the search provider always owns bounded pages. */
   searchTaeActionGroups(query: string, limit = 100) {
-    const hits = this.searchTaeEvents(query, Number.MAX_SAFE_INTEGER);
-    const byUri = new Map(hits.map((hit) => [hit.item, hit]));
-    const groups = this.taeExports.filter((item) => this.isActiveSemanticSourceUri(item.sourceUri))
-      .flatMap((source) => source.animations.flatMap((animation) => {
-        const matches = animation.events.flatMap((event) => byUri.has(event) ? [byUri.get(event)!] : []);
-        if (matches.length === 0) return [];
-        const selector = animation.taeEntryIndex !== undefined ? { taeEntryIndex: animation.taeEntryIndex }
-          : animation.taeEntryId !== undefined ? { taeEntryId: animation.taeEntryId }
-          : animation.taeEntryName !== undefined ? { taeEntryName: animation.taeEntryName }
-          : animation.taeGroup !== undefined ? { taeGroup: animation.taeGroup } : {};
-        return [{ item: { sourceUri: source.sourceUri, chrId: source.chrId,
-          ...animation, eventsComplete: (animation.eventCount !== undefined
-            && animation.events.length === animation.eventCount && [...animation.events].sort((a, b) => a.index - b.index).every((e, i) => e.index === i)),
-          address: formatActionAddress({ chr: source.chrId, animId: animation.animId, ...selector }),
-          sourceHash: source.outerFileHash ?? source.sourceHash, sourceRevision: source.sourceRevision, readerSchemaRevision: source.readerSchemaRevision,
-          events: [...animation.events].sort((a, b) => a.index - b.index) },
-          score: Math.max(...matches.map((hit) => hit.score)), matchedEventIndices: matches.map((hit) => hit.item.index) }];
-      }));
-    return groups.sort((a, b) => b.score - a.score).slice(0, limit);
+    return this.searchTaeActionGroupsPage(query, {limit: Math.min(128, limit), eventLimit:128}).matches;
   }
 
+  searchTaeActionGroupsPage(query:string, window:TaeActionSearchWindow={}) {
+    const profile=buildSearchQueryProfile(query);
+    const self=this;
+    function* sources(){for(const source of self.taeExports)if(self.isActiveSemanticSourceUri(source.sourceUri))yield source;}
+    return searchTaeActionPage(sources,event=>scoreSearchProfile(taeEventSearchText(event),profile),window);
+  }
   lookupTextEntries(textId: number, category?: string): TextEntrySymbol[] {
     const normalizedCategory = category?.toLowerCase();
     const matches: TextEntrySymbol[] = [];

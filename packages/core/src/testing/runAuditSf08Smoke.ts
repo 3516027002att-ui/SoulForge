@@ -104,7 +104,7 @@ function buildFmgV2Buffer(entries: Array<{ id: number; text: string | null }>): 
   const groupSize = 0x10;
   const groupsEnd = headerSize + groups.length * groupSize;
   const stringOffsetsOffset = groupsEnd;
-  const headerAndTables = stringOffsetsOffset + entries.length * 4;
+  const headerAndTables = stringOffsetsOffset + entries.length * 8;
   const stringPoolStart = (headerAndTables & 1) !== 0 ? headerAndTables + 1 : headerAndTables;
 
   const stringBytes: Buffer[] = [];
@@ -128,10 +128,10 @@ function buildFmgV2Buffer(entries: Array<{ id: number; text: string | null }>): 
 
   buf.writeInt32LE(0x00020000, 0); // version marker
   buf.writeInt32LE(fileSize, 4);   // declared size
-  buf.writeInt32LE(0, 8);          // unk1
+  buf.writeInt32LE(1, 8);          // Unicode
   buf.writeInt32LE(groups.length, 12);
   buf.writeInt32LE(entries.length, 16);
-  buf.writeInt32LE(0, 20);         // unk2
+  buf.writeInt32LE(0xff, 20);      // v2 wide-offset marker
   buf.writeInt32LE(stringOffsetsOffset, 24);
   buf.writeInt32LE(0, 28);
   buf.writeInt32LE(0, 32);
@@ -147,7 +147,7 @@ function buildFmgV2Buffer(entries: Array<{ id: number; text: string | null }>): 
   }
 
   for (let i = 0; i < entries.length; i++) {
-    buf.writeInt32LE(offsets[i]!, stringOffsetsOffset + i * 4);
+    buf.writeBigInt64LE(BigInt(offsets[i]!), stringOffsetsOffset + i * 8);
   }
 
   for (let i = 0; i < entries.length; i++) {
@@ -386,7 +386,7 @@ async function runUnitSuite(): Promise<{ name: string; ok: boolean }[]> {
       const outBytes = await readFile(outPath);
       const stringOffsetsOffset = outBytes.readInt32LE(24);
       const offsetSlot0 = outBytes.readInt32LE(stringOffsetsOffset);
-      const offsetSlot1 = outBytes.readInt32LE(stringOffsetsOffset + 4);
+      const offsetSlot1 = Number(outBytes.readBigInt64LE(stringOffsetsOffset + 8));
 
       assert.equal(offsetSlot0, 0, 'Null slot (ID 100) must have offset == 0 in FMG v2.');
       assert(offsetSlot1 > 0, 'Empty string slot (ID 200) must have non-zero offset.');

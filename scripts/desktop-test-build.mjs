@@ -4,6 +4,7 @@ import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createProcessCancellation, processSucceeded, readTimeoutMs, runProcess } from './subprocess-control.mjs';
 import { createOwnedTemporaryDirectory } from './owned-temporary-directory.mjs';
+import {windowsCommandEnvironment} from './windows-command-environment.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const flags = { database: 'SOULFORGE_BUILD_DATABASE_UTILITY_SMOKE', gateway: 'SOULFORGE_BUILD_ME3_GATEWAY_SMOKE', sekiro: 'SOULFORGE_BUILD_ME3_SEKIRO_SESSION_SMOKE' };
@@ -29,11 +30,16 @@ export async function withDesktopTestBuild(kind, execute, options = {}) {
       APPDATA: join(runtimeRoot, 'app-data'), LOCALAPPDATA: join(runtimeRoot, 'local-app-data') } : {})
   };
   Object.assign(env, runtimeDirectories);
+  // Windows PowerShell's special-folder lookup can be empty under an isolated
+  // profile, making its module cache fall back to ./Microsoft at the repo root.
+  const powershellCache=join(runtimeRoot,'powershell');
+  env.PSModuleAnalysisCachePath=join(powershellCache,'ModuleAnalysisCache');
   for (const flag of Object.values(flags)) delete env[flag];
   env[flags[kind]] = '1';
   const cancellation = createProcessCancellation();
   try {
     for (const directory of new Set(Object.values(runtimeDirectories))) await mkdir(directory, { recursive: true, mode: 0o700 });
+    await mkdir(powershellCache,{recursive:true});
     let nativeInput = null;
     if (options.reuseProductionBinding) {
       const source = join(repositoryRoot, 'apps/desktop/.native');
@@ -54,9 +60,10 @@ export async function withDesktopTestBuild(kind, execute, options = {}) {
         electronVersion, betterSqlite3Version: sqliteVersion, platform: process.platform, arch: process.arch };
     }
     if (options.build !== false) {
-      const command = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : 'npm';
-      const args = process.platform === 'win32' ? ['/d', '/s', '/c', 'npm run build -w @soulforge/desktop'] : ['run', 'build', '-w', '@soulforge/desktop'];
-      const result = await runProcess({ command, args, cwd: repositoryRoot, env, owner: workspace,
+      const command = process.execPath;
+      const args = [process.env.npm_execpath || join(dirname(process.execPath),'node_modules/npm/bin/npm-cli.js'),'run','build','-w','@soulforge/desktop'];
+      const buildEnv=process.platform==='win32'?windowsCommandEnvironment(env):env;
+      const result = await runProcess({ command, args, cwd: repositoryRoot, env:buildEnv, owner: workspace,
         timeoutMs: readTimeoutMs('SOULFORGE_BUILD_TIMEOUT_MS', 20 * 60 * 1000), signal: cancellation.signal,
         onStdout: chunk => process.stdout.write(chunk), onStderr: chunk => process.stderr.write(chunk) });
       if (!processSucceeded(result)) throw new Error(`Desktop smoke build failed: ${result.terminationReason ?? result.code}`);

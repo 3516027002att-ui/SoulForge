@@ -21,6 +21,7 @@ import type {
   EditorSelectionContext
 } from '@soulforge/shared';
 import { AgentTaskPanelProps } from './AgentTaskPanel.js';
+import {AgentBudgetControls, type AgentBudgetDraft} from './AgentBudgetControls.js';
 import {
   buildAgentConversationItems,
   describeAgentTaskStatus,
@@ -104,6 +105,8 @@ export interface AgentSidebarProps {
   tools: ToolDescriptor[];
   toolOutput: ToolResult | null;
   task: Omit<AgentTaskPanelProps, 'tools' | 'permissionLockReason'>;
+  budget?: AgentBudgetDraft;
+  onBudgetChange?: (value:AgentBudgetDraft)=>void;
   eventUri: string;
   onEventUriChange: (uri: string) => void;
   onProviderChange: (provider: AiProvider) => void;
@@ -211,6 +214,8 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     tools,
     toolOutput,
     task,
+    budget = {},
+    onBudgetChange,
     eventUri,
     onEventUriChange,
     onProviderChange,
@@ -507,6 +512,7 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
             />
           </div>
 
+          {onBudgetChange && <AgentBudgetControls value={budget} onChange={onBudgetChange} disabled={taskRunning} effective={taskState.budget} />}
           <AgentComposer
             prompt={prompt}
             onPromptChange={onPromptChange}
