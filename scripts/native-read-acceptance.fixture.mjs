@@ -85,6 +85,40 @@ test('ordinary DFLT and KRAK assertions remain strict and independently exercise
   assert.equal(classifyDcxRead(krak, context).status, 'failed');
   const failure = dfltReceipt(); failure.parseStatus = 'failed'; assert.equal(classifyDcxRead(failure, context).status, 'failed');
 });
+for (const value of [false, undefined]) test(`DFLT nested BND4 requires entriesIdentical, got ${value}`, () => {
+  const receipt = dfltReceipt(); receipt.data.nested.roundTrip.entriesIdentical = value;
+  const result = classifyDcxRead(receipt, context);
+  assert.equal(result.status, 'failed'); assert.equal(result.code, 'BND4_CRUD_ROUNDTRIP_FAILED');
+});
+
+test('failed DFLT preserves native sub-check facts without turning unsupported CRUD into success', () => {
+  const receipt = dfltReceipt(); receipt.data.nested.crud = { allPassed: false,
+    note: 'BND4_HASH_INDEX_STRUCTURAL_REPACK_UNSUPPORTED: controlled fixture' };
+  receipt.data.nestedDcxRebuildVerified = null;
+  const result = classifyDcxRead(receipt, context);
+  assert.equal(result.status, 'failed');
+  assert.deepEqual(result.nativeChecks, {
+    parseStatus: 'partial', entriesIdentical: true, crudAllPassed: false,
+    crudNote: receipt.data.nested.crud.note, crudNoteTruncated: false, nestedDcxRebuildVerified: null,
+    headerUnknownBytesPreserved: null, entryHeaderFieldsPreserved: null, storedBytesPreserved: null
+  });
+});
+
+test('failed KRAK facts remain tri-state and bounded, without copying nested payloads', () => {
+  const receipt = krakReceipt(); receipt.data.nested.crud.note = 'x'.repeat(800);
+  receipt.data.nested.fieldPreservation.storedBytesPreserved = false;
+  receipt.data.nested.fieldPreservation.entryHeaderFieldsPreserved = 'true';
+  receipt.data.nested.entries = [{ content: 'not-an-acceptance-fact' }];
+  const result = classifyDcxRead(receipt, context);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.code, 'KRAK_BND4_PRESERVATION_OR_CRUD_FAILED');
+  assert.equal(result.nativeChecks.crudNote.length, 512); assert.equal(result.nativeChecks.crudNoteTruncated, true);
+  assert.equal(result.nativeChecks.storedBytesPreserved, false);
+  assert.equal(result.nativeChecks.headerUnknownBytesPreserved, true);
+  assert.equal(result.nativeChecks.entryHeaderFieldsPreserved, null);
+  assert.equal(result.nativeChecks.entriesIdentical, null);
+  assert.equal(Object.hasOwn(result.nativeChecks, 'entries'), false);
+});
 for (const concurrency of [1, 3]) test(`collector does not lose already settled receipts at concurrency ${concurrency}`, async () => {
   const input = ['a', 'b', 'c'], output = [];
   for await (const result of collectNativeReads(input, concurrency, async file => ({ file, result: {} }))) output.push(result.file);

@@ -64,6 +64,24 @@ function validCacheReceipt(result, { file, sourceHash, sourceSize, sourceUnchang
   });
 }
 
+function bnd4Failure(result, code) {
+  const data = result.data, nested = data.nested;
+  const observedBoolean = value => typeof value === 'boolean' ? value : null;
+  const note = typeof nested.crud?.note === 'string' ? nested.crud.note : null;
+  // Preserve only bounded native facts. A missing check stays unknown, not false
+  // or passed; the note explains unsupported CRUD without relaxing acceptance.
+  return { status: 'failed', code, nativeChecks: {
+    parseStatus: result.parseStatus,
+    entriesIdentical: observedBoolean(nested.roundTrip?.entriesIdentical),
+    crudAllPassed: observedBoolean(nested.crud?.allPassed),
+    crudNote: note?.slice(0, 512) ?? null, crudNoteTruncated: note !== null && note.length > 512,
+    nestedDcxRebuildVerified: observedBoolean(data.nestedDcxRebuildVerified),
+    headerUnknownBytesPreserved: observedBoolean(nested.fieldPreservation?.headerUnknownBytesPreserved),
+    entryHeaderFieldsPreserved: observedBoolean(nested.fieldPreservation?.entryHeaderFieldsPreserved),
+    storedBytesPreserved: observedBoolean(nested.fieldPreservation?.storedBytesPreserved)
+  } };
+}
+
 export function classifyDcxRead(result, context) {
   const read = classifyNativeRead(result);
   if (read.status !== 'passed') return read;
@@ -76,16 +94,19 @@ export function classifyDcxRead(result, context) {
   }
   if (data?.compressionFormat === 'DFLT' && data.roundTrip?.payloadIdentical === true && data.roundTrip?.variantIdentical === true) {
     if (!variants.has(data.variant)) return { status: 'failed', code: 'UNRECOGNIZED_BRIDGE_VARIANT' };
-    if (data.nested?.format === 'BND4' && data.nested?.roundTrip?.entriesIdentical === true
-      && (data.nested?.crud?.allPassed !== true || data.nestedDcxRebuildVerified !== true)) return { status: 'failed', code: 'BND4_CRUD_ROUNDTRIP_FAILED' };
+    if (data.nested?.format === 'BND4' && (data.nested.roundTrip?.entriesIdentical !== true
+      || data.nested.crud?.allPassed !== true || data.nestedDcxRebuildVerified !== true))
+      return bnd4Failure(result, 'BND4_CRUD_ROUNDTRIP_FAILED');
     return { status: 'passed', kind: 'dflt-roundtrip', variant: data.variant };
   }
+  // KRAK acceptance is native read plus BND4 CRUD/preservation, not a claim of
+  // outer compressed-byte roundtrip. Keep that boundary distinct from DFLT.
   if (data?.compressionFormat === 'KRAK' && /^[a-f0-9]{64}$/u.test(data.payloadHash ?? '')) {
     if (!variants.has(data.variant)) return { status: 'failed', code: 'UNRECOGNIZED_BRIDGE_VARIANT' };
     if (data.nested?.format === 'BND4' && (data.nested?.crud?.allPassed !== true
       || data.nested?.fieldPreservation?.headerUnknownBytesPreserved !== true
       || data.nested?.fieldPreservation?.entryHeaderFieldsPreserved !== true
-      || data.nested?.fieldPreservation?.storedBytesPreserved !== true)) return { status: 'failed', code: 'KRAK_BND4_PRESERVATION_OR_CRUD_FAILED' };
+      || data.nested?.fieldPreservation?.storedBytesPreserved !== true)) return bnd4Failure(result, 'KRAK_BND4_PRESERVATION_OR_CRUD_FAILED');
     return { status: 'passed', kind: 'krak-native-read', variant: data.variant };
   }
   return { status: 'failed', code: result?.diagnostics?.[0]?.code ?? 'UNEXPECTED_RESULT' };
