@@ -164,4 +164,99 @@ public sealed class NativeTextLayoutTests
         var doc = Bnd4NativeDocument.Read(bytes);
         Assert.Equal(bytes, doc.Repack(doc.ToRepackEntries()));
     }
+
+    private static byte[] WriteFirstPayloadSameSize(Bnd4NativeDocument doc, byte[] replacement, string writer)
+    {
+        if (writer == "replace") return doc.ReplaceEntrySameSize(0, replacement, doc.Entries[0].ContentHash);
+        var entries = doc.ToRepackEntries().ToArray();
+        entries[0] = entries[0] with { StoredBytes = replacement };
+        return writer == "repack" ? doc.Repack(entries) : doc.RebuildPreservingLayout(entries);
+    }
+
+    [Theory]
+    [InlineData("rebuild", 0x100)]
+    [InlineData("repack", 0x100)]
+    [InlineData("replace", 0x100)]
+    [InlineData("rebuild", 0x104)]
+    [InlineData("replace", 0x104)]
+    public void ConflictingPayloadAliasesCannotSilentlyLoseOrSpreadAWrite(string writer, int secondOffset)
+    {
+        var bytes = Binder(); I32(bytes, 0x64 + 24, secondOffset);
+        var original = bytes.ToArray(); var doc = Bnd4NativeDocument.Read(bytes);
+        var error = Assert.Throws<NotSupportedException>(() =>
+            WriteFirstPayloadSameSize(doc, Enumerable.Repeat((byte)9, 8).ToArray(), writer));
+        Assert.Contains("BND4_OVERLAPPING_PAYLOAD_WRITE_UNSUPPORTED", error.Message);
+        Assert.Equal(original, bytes);
+    }
+
+    [Theory]
+    [InlineData(0x100)]
+    [InlineData(0x104)]
+    public void PayloadAliasesRetainByteIdenticalNoOpAndConsistentWrites(int secondOffset)
+    {
+        var bytes = Binder(); I32(bytes, 0x64 + 24, secondOffset);
+        var doc = Bnd4NativeDocument.Read(bytes); var entries = doc.ToRepackEntries().ToArray();
+        Assert.Equal(bytes, doc.RebuildPreservingLayout(entries));
+        Assert.Equal(bytes, doc.Repack(entries));
+        Assert.Equal(bytes, doc.ReplaceEntrySameSize(0, doc.GetStoredBytes(0), doc.Entries[0].ContentHash));
+        Assert.NotNull(doc.ToEnvelope());
+        var replacement = Enumerable.Repeat((byte)9, 8).ToArray();
+        for (var index = 0; index < entries.Length; index++) entries[index] = entries[index] with { StoredBytes = replacement };
+        var reread = Bnd4NativeDocument.Read(doc.RebuildPreservingLayout(entries));
+        Assert.Equal(replacement, reread.GetStoredBytes(0));
+        Assert.Equal(replacement, reread.GetStoredBytes(1));
+    }
+
+    [Theory]
+    [InlineData("rebuild", true)]
+    [InlineData("repack", true)]
+    [InlineData("replace", true)]
+    [InlineData("rebuild", false)]
+    [InlineData("replace", false)]
+    public void PayloadWritesCannotChangeReaderRecognizedNameBytes(string writer, bool unicode)
+    {
+        var bytes = Binder(); I32(bytes, 0x64 + 32, 0x100);
+        var encoding = unicode ? Encoding.Unicode : Encoding.UTF8;
+        encoding.GetBytes("abc\0").CopyTo(bytes, 0x100);
+        var original = bytes.ToArray(); var doc = Bnd4NativeDocument.Read(bytes);
+        var replacement = doc.GetStoredBytes(0); encoding.GetBytes("xyz\0").CopyTo(replacement, 0);
+        var error = Assert.Throws<NotSupportedException>(() => WriteFirstPayloadSameSize(doc, replacement, writer));
+        Assert.Contains("BND4_NAME_BYTES_WRITE_UNSUPPORTED", error.Message);
+        Assert.Equal(original, bytes);
+    }
+
+    [Fact]
+    public void DecodedNameEqualityCannotHideAChangeToOriginalNameBytes()
+    {
+        var bytes = Binder(); I32(bytes, 0x64 + 32, 0x100);
+        bytes[0x100] = 0x80; bytes[0x101] = (byte)'x'; bytes[0x102] = 0;
+        var doc = Bnd4NativeDocument.Read(bytes); var replacement = doc.GetStoredBytes(0); replacement[0] = 0x81;
+        Assert.Equal(Encoding.UTF8.GetString(new byte[] { 0x80, (byte)'x' }), Encoding.UTF8.GetString(new byte[] { 0x81, (byte)'x' }));
+        var error = Assert.Throws<NotSupportedException>(() => WriteFirstPayloadSameSize(doc, replacement, "replace"));
+        Assert.Contains("BND4_NAME_BYTES_WRITE_UNSUPPORTED", error.Message);
+    }
+
+    [Fact]
+    public void PayloadAppendCannotChangeAHeaderBackedName()
+    {
+        var bytes = Binder(); I32(bytes, 0x64 + 32, 0x40 + 8);
+        var doc = Bnd4NativeDocument.Read(bytes); var entries = doc.ToRepackEntries().ToArray();
+        entries[0] = entries[0] with { StoredBytes = new byte[40], UncompressedSize = 40 };
+        var error = Assert.Throws<NotSupportedException>(() => doc.Repack(entries));
+        Assert.Contains("BND4_NAME_BYTES_WRITE_UNSUPPORTED", error.Message);
+    }
+
+    [Fact]
+    public void SafePayloadAppendPreservesOverlappingNamesAndUntouchedAliases()
+    {
+        var bytes = Binder(); I32(bytes, 0x64 + 24, 0x100); I32(bytes, 0x64 + 32, 0x100);
+        Encoding.Unicode.GetBytes("abc\0").CopyTo(bytes, 0x100);
+        var doc = Bnd4NativeDocument.Read(bytes); var entries = doc.ToRepackEntries().ToArray();
+        var replacement = Enumerable.Repeat((byte)9, 40).ToArray();
+        entries[0] = entries[0] with { StoredBytes = replacement, UncompressedSize = 40 };
+        var reread = Bnd4NativeDocument.Read(doc.Repack(entries));
+        Assert.Equal(replacement, reread.GetStoredBytes(0));
+        Assert.Equal(doc.GetStoredBytes(1), reread.GetStoredBytes(1));
+        Assert.Equal("abc", reread.Entries[1].Name);
+    }
 }
