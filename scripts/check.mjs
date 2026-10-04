@@ -5,6 +5,8 @@ import { loadWorkspaces } from './verify/scriptGraph.mjs';
 import { discoverChecks } from './verify/checkRegistry.mjs';
 import { runPlannedSuite, OUTCOME } from './verify/runner.mjs';
 import { summarizePlan } from './verify/commandPlan.mjs';
+import {validCaseEvidence,missingPrivateCorpus} from './verify/merge-check-reports.mjs';
+import {captureSourceBinding,verifiedSourceBinding} from './verify/source-binding.mjs';
 
 const checkTiers = ['governance','unit','synthetic','native','release','e2e'];
 function parseCheckTiers(value, option) {
@@ -22,6 +24,8 @@ for (let i = 0; i < args.length; i++) {
   if (arg === '--list') options.list = true;
   else if (arg === '--audit') options.audit = true;
   else if (arg === '--require-executed') options.requireExecuted = true;
+  else if (arg === '--case-evidence') options.caseEvidence = true;
+  else if (arg === '--allow-missing-private-corpus') options.allowMissingPrivateCorpus = true;
   else if (arg === '--no-bail') { /* Compatibility: independent checks always continue. */ }
   else if (['--tier','--suite','--exclude','--filter','--require-tier','--require-suite','--timeout-ms','--json-out'].includes(arg)) {
     const value = args[++i];
@@ -38,6 +42,7 @@ for (let i = 0; i < args.length; i++) {
 }
 if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1) throw new Error('Invalid timeout');
 const repoRoot = process.cwd();
+const sourceBefore=captureSourceBinding(repoRoot);
 const workspaces = loadWorkspaces(repoRoot);
 const registry = discoverChecks(repoRoot,workspaces);
 // Kept in the report shape for existing consumers. Workspace checks are
@@ -73,19 +78,33 @@ if (!options.list && !options.audit) for (const entry of plan) {
       continue;
     }
     const result = await runPlannedSuite({repoRoot,entry,timeoutMs:options.timeoutMs,cache,
-      injectEnv:workspaces.rootScripts['check'] !== undefined});
+      injectEnv:workspaces.rootScripts['check'] !== undefined,collectCaseEvidence:Boolean(options.caseEvidence)});
     results.push({...result,stdout:undefined,stderr:undefined,tier:entry.tier,status:modernStatus(result.outcome),
       ...(result.outcome !== OUTCOME.PASSED ? {tailStdout:result.stdout.slice(-8192),tailStderr:result.stderr.slice(-8192)}:{})});
   } catch (error) {results.push({scriptName:entry.scriptName,tier:entry.tier,status:'failed',reason:error.message,steps:[]});}
 }
 const counts = Object.fromEntries(['passed','failed','unavailable','not_run'].map(status => [status,results.filter(r => r.status === status).length]));
+const privateUnavailable=row=>{
+  if(!options.allowMissingPrivateCorpus||row.status!=='unavailable')return false;
+  const unavailable=(row.steps??[]).filter(step=>step.validation&&step.outcome!=='passed');
+  return unavailable.length>0&&unavailable.every(step=>{
+    if(!['executed','reused'].includes(step.execution)||!validCaseEvidence(step.caseEvidence))return false;
+    const skipped=step.caseEvidence.cases.filter(item=>item.status==='skipped');
+    return skipped.length>0&&step.caseEvidence.failed===0&&skipped.every(missingPrivateCorpus);
+  });
+};
 const blocking = results.filter(r => r.status === 'failed' || r.status === 'not_run'
-  || (r.status === 'unavailable' && (options.requireExecuted || options.requiredTiers.includes(r.tier) || options.requiredSuites.includes(r.scriptName))));
+  || (r.status === 'unavailable' && (options.requireExecuted || options.requiredTiers.includes(r.tier) || options.requiredSuites.includes(r.scriptName))&&!privateUnavailable(r)));
 const ok = auditFindings.every(f => f.severity !== 'error') && blocking.length === 0
-  && (options.list || options.audit || results.some(r => r.status === 'passed'));
+  && (options.list || options.audit || results.some(r => r.status === 'passed'||privateUnavailable(r)));
 const completionVerified = ok && !options.list && !options.audit && counts.passed > 0
   && counts.unavailable === 0 && counts.not_run === 0;
+const sourceAfter=captureSourceBinding(repoRoot);
 const report = {ok,completionVerified,mode:options.list ? 'list':options.audit ? 'audit':'run',counts,auditFindings,
+  context:{sourceHead:sourceBefore.head,sourceTree:sourceBefore.tree,sourceVerified:verifiedSourceBinding(sourceBefore,sourceAfter),
+    sourceBefore,sourceAfter,platform:process.platform,node:process.versions.node},
+  requirements:{tiers:options.requiredTiers,suites:options.requiredSuites,requireExecuted:Boolean(options.requireExecuted),allowMissingPrivateCorpus:Boolean(options.allowMissingPrivateCorpus)},
+  blockingChecks:blocking.map(row=>row.scriptName),
   scheduling:summarizePlan(plan),...(options.list ? {suites:plan}:{}),results};
 if (options.jsonOut) {const path = resolve(repoRoot,options.jsonOut);mkdirSync(dirname(path),{recursive:true});writeFileSync(path,`${JSON.stringify(report,null,2)}\n`);}
 console.log(JSON.stringify(report,null,2));

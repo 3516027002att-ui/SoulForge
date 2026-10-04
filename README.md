@@ -54,6 +54,8 @@ node scripts/check.mjs --suite typecheck,test:agent-tool-envelope
 node scripts/check.mjs --suite file:scripts/check.fixture.mjs --require-executed
 ```
 
+`--case-evidence` retains complete executed case identities. The owner-approved `--allow-missing-private-corpus` permits only structured evidence of missing required private game inputs; unavailable counts and `completionVerified:false` remain visible. Unknown skips, missing oracle/control inputs with available game resources, and actual failures still block required checks. Windows CI combines matching-source Linux/Windows case reports so a platform skip requires an actual counterpart pass; unit and E2E requirements remain in place.
+
 `--suite` 保留给定顺序；测试文件按约定自动发现，无须登记。旧 `verify.mjs` 转发到同一条 `check` 执行路径，旧 `--slice` 计划已退役，任务以 GitHub Issues 为准。单项调试仍可直接用 `npm run <名称>`。
 
 同一计划按工作目录、命令参数和显式环境复用已通过的操作，共享重复的 TypeScript 编译；JSON 报告的 `steps.execution` 区分执行与复用。构建、npm 生命周期和无法安全展开的 shell 命令会清除复用结果。复用不跨运行保存，也不用于把 skip/partial 改成 passed。需要全部实际通过时用 `--require-executed`；混合层级可用 `--require-tier governance,unit` 或 `--require-suite test:renderer-e2e` 指定严格范围。

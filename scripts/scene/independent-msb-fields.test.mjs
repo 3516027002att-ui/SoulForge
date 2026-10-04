@@ -6,6 +6,7 @@ import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { compareMsbLayers, inventoryMsbOmissions, compareMsbIndependentFields } from './compare-msb-independent-fields.mjs';
+import { oracleSourcePrerequisites, missingDirectory, missingFile, verificationSkipReason } from '../verification-inputs.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 function fixture() {
@@ -60,8 +61,16 @@ test('unrepresented numeric and structural subtype fields remain explicit omissi
   assert.equal(omissions.parts.coverage, 'partial');
 });
 
+const pinnedMsbReason = verificationSkipReason([
+  ...oracleSourcePrerequisites(process.env.SOULFORGE_MSB_FIELDS,'SOULFORGE_MSB_FIELDS',oracle=>oracle.source,oracle=>{
+    assert.equal(oracle.ok,true); assert.equal(oracle.decoded?.format,'MSBS');
+    assert.equal(oracle.oracle?.commit,'ee1dd61958f60bdc51ce3da548e9a90a8ab39905');
+  }),
+  missingDirectory(process.env.SOULFORGE_MSB_CAPTURE,{kind:'independent-oracle',sourceEnv:'SOULFORGE_MSB_CAPTURE'}),
+  missingFile(process.env.SOULFORGE_MSB_PRODUCER,{kind:'published-control',sourceEnv:'SOULFORGE_MSB_PRODUCER'})
+]);
 test('pinned MSB comparison rejects receipt tampering and localizes receipt-valid corruption', {
-  skip: !process.env.SOULFORGE_MSB_FIELDS || !process.env.SOULFORGE_MSB_CAPTURE || !process.env.SOULFORGE_MSB_PRODUCER
+  skip: pinnedMsbReason ?? false
 }, async () => {
   const temporary = await mkdtemp(join(tmpdir(), 'sf-msb-receipts-'));
   const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');

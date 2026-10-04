@@ -1,17 +1,22 @@
 import { test, expect, electron, testWorkspace } from '../owned-test.mjs';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { missingFile, missingConfiguration, missingPrivateGameRoot, verificationSkipReason } from '../../../../../scripts/verification-inputs.mjs';
 
 // Only one read-only corpus is required. Expected totals must be supplied
 // from an independent raw-byte/external oracle, never from this reader.
 const source = process.env.SF_REAL_TAE_SOURCE?.trim();
 const expectedCount = Number(process.env.SF_REAL_TAE_EXPECTED_ANIMATION_COUNT);
 const here = dirname(fileURLToPath(import.meta.url));
-test.skip(!source || !existsSync(source) || !Number.isSafeInteger(expectedCount) || expectedCount <= 0,
-  '需要真实 TAE 容器及独立核对的动作总数，未配置时明确跳过');
+const inputReason = verificationSkipReason([
+  missingFile(source,{kind:'private-game-input',sourceEnv:'SF_REAL_TAE_SOURCE',logicalResource:'native TAE container'}),
+  ...(!source ? [missingPrivateGameRoot()] : []),
+  missingConfiguration(Number.isSafeInteger(expectedCount)&&expectedCount>0 ? String(expectedCount) : '',
+    {kind:'independent-oracle',sourceEnv:'SF_REAL_TAE_EXPECTED_ANIMATION_COUNT',logicalResource:'independently verified animation total'})
+]);
+test.skip(Boolean(inputReason), inputReason);
 
 test('real native TAE total renders on a bounded initial page and read failures stay visible', async () => {
   test.setTimeout(180_000);

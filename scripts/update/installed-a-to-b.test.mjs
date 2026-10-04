@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile, symlink } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
+import { mkdtemp, mkdir, rm, writeFile, readFile, symlink } from 'node:fs/promises';
+import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runSuite } from './run-suite.mjs';
 import { validateInstalledManifest } from './installed-a-to-b.mjs';
@@ -9,6 +9,9 @@ import * as installed from './installed-a-to-b.mjs';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { captureOwnedBuildInputs, resolveOwnedInstallerTools } from './owned-build-inputs.mjs';
+import { writeAgentProductionBuildManifest } from '../agent-production-build-lib.mjs';
+import { writeBridgeProductionBuildReceipt, BRIDGE_EXTERNAL_BUILD_INPUTS } from '../bridge-production-build.mjs';
 
 const repositoryRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 test('installed suite without actual A/B artifacts is explicitly blocked and never passes', async () => {
@@ -86,6 +89,114 @@ test('approved artifact manifest must bind an actual builder receipt and matchin
     await writeFile(join(root, 'a.config.json'), '{}');
     await assert.rejects(() => validateInstalledManifest(manifest), /BUILD_RECEIPT/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('installed probe rejects a receipt from a different HEAD before installation', async () => {
+  const { root, manifest } = await manifestFixture();
+  try {
+    assert.equal(await validateInstalledManifest(manifest, { expectedHeadSha: 'a'.repeat(40) }), manifest);
+    await assert.rejects(() => validateInstalledManifest(manifest, { expectedHeadSha: 'b'.repeat(40) }),
+      /UPDATE_INSTALLED_BUILD_RECEIPT_INVALID.*current HEAD/i);
+    await assert.rejects(() => validateInstalledManifest(manifest, { expectedHeadSha: '' }),
+      /UPDATE_INSTALLED_BUILD_RECEIPT_INVALID/);
+    if (process.platform === 'win32') {
+      const manifestPath = join(root, 'manifest.json');
+      await writeFile(manifestPath, JSON.stringify(manifest));
+      const probe = await installed.runInstalledProbe({ repositoryRoot, evidenceRoot: join(root, 'evidence'),
+        runId: 'stale-head-fixture', headSha: 'b'.repeat(40), installedConfigPath: manifestPath });
+      assert.equal(probe.status, 'blocked_environment');
+      assert.equal(probe.cases[0].executed, false);
+      assert.equal(probe.commands.length, 0);
+      assert.match(probe.blockers.join(' '), /BUILD_RECEIPT_INVALID.*current HEAD/i);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+async function sourceBoundManifestFixture() {
+  const fixture = await manifestFixture(), repo = join(fixture.root, 'repo');
+  const seed = async (path, content = `unit fixture ${path}`) => {
+    const absolute = join(repo, path); await mkdir(dirname(absolute), { recursive: true }); await writeFile(absolute, content);
+  };
+  for (const path of ['tsconfig.base.json', 'scripts/prepare-electron-sqlite-binding.mjs', 'prompt/system.md', 'package-lock.json',
+    'packages/shared/package.json', 'packages/shared/tsconfig.json', 'packages/shared/src/index.ts', 'packages/core/package.json',
+    'packages/core/tsconfig.json', 'packages/core/src/index.ts', 'packages/agent/package.json', 'packages/agent/src/index.mjs',
+    'apps/desktop/tsconfig.json', 'apps/desktop/electron.vite.config.ts', 'apps/desktop/src/main/index.ts',
+    'apps/desktop/.native/better_sqlite3.node', 'apps/desktop/.native/better_sqlite3.json', 'apps/desktop/out/main/index.js',
+    'apps/desktop/out/preload/index.cjs', 'apps/desktop/out/renderer/index.html', 'bridge/SoulForge.Bridge/Program.cs',
+    'bridge/native/hksc/compiler.c', 'bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Bridge.exe',
+    'bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Hksc.Native.dll', ...BRIDGE_EXTERNAL_BUILD_INPUTS]) await seed(path);
+  await seed('package.json', JSON.stringify({ scripts: { 'bridge:publish': 'fixture bridge publish' } }));
+  await seed('apps/desktop/package.json', JSON.stringify({ name: '@soulforge/desktop', version: '0.9.2' }));
+  await seed('apps/desktop/electron-builder.json', JSON.stringify({ extraResources: [{ from: '../../prompt', to: 'prompt' }] }));
+  await seed('apps/desktop/build/icon.ico', 'unit build resource bytes');
+  await seed('prompt/owned-fixture-note.txt', 'unit extra resource bytes');
+  // A detached fixture HEAD supports a real git read without committing product code.
+  await mkdir(join(repo, '.git/objects'), { recursive: true }); await mkdir(join(repo, '.git/refs'), { recursive: true });
+  await seed('.git/HEAD', `${'a'.repeat(40)}\n`);
+  const tool = join(fixture.root, 'tools/node_modules/electron-builder'), asar = join(fixture.root, 'tools/node_modules/@electron/asar');
+  await mkdir(tool, { recursive: true }); await mkdir(asar, { recursive: true });
+  await writeFile(join(tool, 'package.json'), JSON.stringify({ name: 'electron-builder', version: '26.16.1' }));
+  await writeFile(join(tool, 'cli.js'), '// unit fixture; never a builder execution');
+  await writeFile(join(asar, 'package.json'), JSON.stringify({ name: '@electron/asar', main: 'asar.cjs' }));
+  await writeFile(join(asar, 'asar.cjs'), 'exports.extractFile=()=>{throw new Error("unit archive must never execute");};');
+  await writeAgentProductionBuildManifest(repo); await writeBridgeProductionBuildReceipt(repo);
+  const tools = await resolveOwnedInstallerTools(join(tool, 'cli.js'));
+  const inputs = await captureOwnedBuildInputs(repo, tools);
+  fixture.manifest.asarModulePath = tools.asarModulePath; fixture.manifest.asarModuleSha256 = tools.asarModuleSha256;
+  const receipt = JSON.parse(await readFile(fixture.manifest.buildReceiptPath));
+  receipt.tools = tools; receipt.buildInputs = inputs;
+  const receiptBytes = Buffer.from(JSON.stringify(receipt)); await writeFile(fixture.manifest.buildReceiptPath, receiptBytes);
+  fixture.manifest.buildReceiptSha256 = createHash('sha256').update(receiptBytes).digest('hex');
+  return { ...fixture, repo, seed, tools, inputs };
+}
+
+test('same HEAD cannot accept an installed manifest after actual source/runtime/packaging inputs change', async () => {
+  for (const path of ['packages/core/src/index.ts', 'apps/desktop/out/main/index.js', 'apps/desktop/.native/better_sqlite3.node',
+    'bridge/SoulForge.Bridge/Program.cs', 'bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Bridge.exe',
+    'bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Hksc.Native.dll', 'prompt/system.md',
+    'prompt/owned-fixture-note.txt', 'apps/desktop/build/icon.ico', 'apps/desktop/electron-builder.json']) {
+    const f = await sourceBoundManifestFixture();
+    try {
+      const context = { expectedHeadSha: f.inputs.headSha, repositoryRoot: f.repo };
+      assert.equal(await validateInstalledManifest(f.manifest, context), f.manifest);
+      await f.seed(path, path.endsWith('electron-builder.json')
+        ? JSON.stringify({ compression: 'store', extraResources: [{ from: '../../prompt', to: 'prompt' }] })
+        : 'same HEAD; actual bytes changed');
+      await assert.rejects(() => validateInstalledManifest(f.manifest, context), /BUILD_RECEIPT_INVALID.*(?:BUILD_STALE|INPUT_CHANGED)/i, path);
+    } finally { await rm(f.root, { recursive: true, force: true }); }
+  }
+});
+
+test('actual installed probe cannot use a legacy receipt lacking runtime and packaging input bindings', async () => {
+  const f = await manifestFixture();
+  try {
+    await assert.rejects(() => validateInstalledManifest(f.manifest, { expectedHeadSha: 'a'.repeat(40), repositoryRoot }),
+      /BUILD_RECEIPT_INVALID.*buildInputs/i);
+    if (process.platform === 'win32') {
+      const manifestPath = join(f.root, 'manifest.json'); await writeFile(manifestPath, JSON.stringify(f.manifest));
+      const report = await installed.runInstalledProbe({ repositoryRoot, evidenceRoot: join(f.root, 'evidence'),
+        runId: 'missing-build-inputs-fixture', headSha: 'a'.repeat(40), installedConfigPath: manifestPath });
+      assert.equal(report.status, 'blocked_environment'); assert.equal(report.cases[0].executed, false);
+      assert.equal(report.commands.length, 0); assert.match(report.blockers.join(' '), /BUILD_RECEIPT_INVALID.*buildInputs/i);
+    }
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+
+test('fresh replacement receipts at the same HEAD do not rebind old installers; real probe blocks before any execution', async () => {
+  const f = await sourceBoundManifestFixture();
+  try {
+    await f.seed('apps/desktop/out/main/index.js', 'replacement runtime at same HEAD');
+    await writeAgentProductionBuildManifest(f.repo); await writeBridgeProductionBuildReceipt(f.repo);
+    await assert.rejects(() => validateInstalledManifest(f.manifest, { expectedHeadSha: f.inputs.headSha, repositoryRoot: f.repo }),
+      /BUILD_RECEIPT_INVALID.*INPUT_CHANGED/i);
+    if (process.platform === 'win32') {
+      const manifestPath = join(f.root, 'manifest.json'); await writeFile(manifestPath, JSON.stringify(f.manifest));
+      const report = await installed.runInstalledProbe({ repositoryRoot: f.repo, evidenceRoot: join(f.root, 'evidence'),
+        runId: 'same-head-runtime-fixture', headSha: f.inputs.headSha, installedConfigPath: manifestPath });
+      assert.equal(report.status, 'blocked_environment'); assert.equal(report.cases[0].executed, false);
+      assert.equal(report.commands.length, 0); assert.match(report.blockers.join(' '), /BUILD_RECEIPT_INVALID.*INPUT_CHANGED/i);
+    }
+  } finally { await rm(f.root, { recursive: true, force: true }); }
 });
 
 test('registry matching includes versioned official names without including validation installations', () => {

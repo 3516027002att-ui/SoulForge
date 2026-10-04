@@ -16,6 +16,8 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { delimiter, dirname, resolve } from 'node:path';
 import { existsSync, realpathSync } from 'node:fs';
+import {validCaseEvidence} from './merge-check-reports.mjs';
+import {parseVerificationSkipReason} from '../verification-inputs.mjs';
 // TypeScript's successful checker is intentionally silent. Test entries must
 // still provide execution evidence; there is no per-suite registration table.
 const SILENT_ON_SUCCESS = Object.freeze({typecheck:true});
@@ -317,6 +319,44 @@ export function classifyOutcome(exitCode, stdout, stderr = '', scriptName = '') 
   return { outcome: OUTCOME.PASSED, skippedLegs: [] };
 }
 
+export function extractCaseEvidence(stdout,stderr=''){
+  const envelopes=[],diagnostics=[];
+  for(const source of [stdout,stderr])for(const json of extractTopLevelJsonValues(source??'')){
+    let value;try{value=JSON.parse(json);}catch{continue;}
+    if(value?.soulforgeCheckCases)envelopes.push(value.soulforgeCheckCases);
+    else if(value?.status==='skipped'){
+      const reason=parseVerificationSkipReason(JSON.stringify(value));
+      diagnostics.push({id:`diagnostic:${value.smoke??'unknown'}`,type:'test',status:'skipped',reasonCode:reason?.code??'UNKNOWN',missingPrerequisites:reason?.missingPrerequisites??[]});
+    }
+  }
+  if(!envelopes.length&&!diagnostics.length)return undefined;
+  let complete=envelopes.every(validCaseEvidence);
+  const summaries=[];
+  for(const source of [stdout,stderr]){
+    let row;
+    for(const line of (source??'').replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu,'').split(/\r?\n/u)){
+      const match=/^(?:#\s*|ℹ\s+)(tests|pass|fail|cancelled|skipped|todo)\s+(\d+)\s*$/u.exec(line);
+      if(!match)continue;
+      if(match[1]==='tests')row={tests:Number(match[2])};else if(row)row[match[1]]=Number(match[2]);
+      if(row&&['tests','pass','fail','cancelled','skipped','todo'].every(key=>Number.isSafeInteger(row[key]))){summaries.push(row);row=undefined;}
+    }
+  }
+  const node=envelopes.filter(row=>row.runner==='node');
+  if(summaries.length){
+    const sum=(rows,key)=>rows.reduce((n,row)=>n+(row[key]??0),0);
+    complete&&=node.length>0&&sum(summaries,'tests')===sum(node,'total')&&sum(summaries,'pass')===sum(node,'passed')
+      &&sum(summaries,'fail')===sum(node,'failed')&&sum(summaries,'skipped')+sum(summaries,'todo')===sum(node,'skipped')&&sum(summaries,'cancelled')===0;
+  }
+  if(detectSkipSignals(stdout,stderr).skippedLegs.includes('playwright:incomplete-summary'))complete=false;
+  const cases=[...envelopes.flatMap(row=>row.cases??[]),...diagnostics];
+  const leaves=cases.filter(row=>row.type==='test');
+  const count=status=>leaves.filter(row=>row.status===status).length;
+  const result={schemaVersion:1,runner:envelopes[0]?.runner??'diagnostic',complete,total:leaves.length,
+    passed:count('passed'),failed:count('failed'),skipped:count('skipped'),cases};
+  result.complete&&=validCaseEvidence(result);
+  return result;
+}
+
 /**
  * 执行一条 npm script。
  *
@@ -332,7 +372,7 @@ export function classifyOutcome(exitCode, stdout, stderr = '', scriptName = '') 
  * @param {number} options.timeoutMs
  * @param {boolean} [options.injectEnv] 是否经 env wrapper（默认 true）。
  */
-export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, operation, env = {}, args: extraArgs = [] }) {
+export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, operation, env = {}, args: extraArgs = [], collectCaseEvidence=false }) {
   return new Promise((resolvePromise) => {
     const npmArgs = ['run', scriptName, '--silent', ...(extraArgs.length ? ['--', ...extraArgs] : [])];
     // 始终用 process.execPath 执行 JS 入口，不依赖 shell 解析 `npm`：
@@ -349,11 +389,15 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, op
     }
     const npmCli = npmCandidates.find(path => path && existsSync(path))
       ?? resolve(nodeDir,'node_modules/npm/bin/npm-cli.js');
-    const directArgs = !operation ? [npmCli, ...npmArgs]
+    let directArgs = !operation ? [npmCli, ...npmArgs]
       : operation.command === 'npm' ? [npmCli, ...operation.args]
         : operation.command === 'tsc'
           ? [resolve(repoRoot, 'node_modules/typescript/bin/tsc'), ...operation.args]
           : operation.args;
+    if(collectCaseEvidence&&operation?.command==='node'&&directArgs.includes('--test')&&!directArgs.some(arg=>arg.startsWith('--test-reporter'))){
+      directArgs=[...directArgs];
+      directArgs.splice(directArgs.indexOf('--test')+1,0,'--test-reporter=tap',`--test-reporter=${new URL('./check-case-reporter.mjs',import.meta.url).href}`,'--test-reporter-destination=stdout','--test-reporter-destination=stdout');
+    }
     const args = injectEnv
       ? [resolve(repoRoot, 'scripts/with-local-has-game-env.mjs'), process.execPath, ...directArgs]
       : directArgs;
@@ -362,6 +406,7 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, op
     // Independent checks must not inherit node:test's private child reporter
     // channel; that would suppress the summary used as execution evidence.
     delete childEnv.NODE_TEST_CONTEXT;
+    if(collectCaseEvidence)childEnv.SOULFORGE_CHECK_ROOT=repoRoot;
     // npm normally supplies local binaries on PATH. Expanded node commands may
     // invoke them too, so retain that workspace/root lookup without using a shell.
     const pathKey = Object.keys(childEnv).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
@@ -404,11 +449,13 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, op
 
     child.once('close', (exitCode) => {
       clearTimeout(timer);
-      const { outcome, skippedLegs } = timedOut
+      let { outcome, skippedLegs } = timedOut
         ? { outcome: OUTCOME.FAILED, skippedLegs: [] }
         : operation?.validation === false
           ? { outcome: exitCode === 0 ? OUTCOME.PASSED : OUTCOME.FAILED, skippedLegs: [] }
           : classifyOutcome(exitCode, stdout, stderr, operation?.command === 'tsc' ? 'typecheck' : scriptName);
+      const caseEvidence=collectCaseEvidence?extractCaseEvidence(stdout,stderr):undefined;
+      if(caseEvidence&&(!validCaseEvidence(caseEvidence)||caseEvidence.failed>0))outcome=OUTCOME.FAILED;
       resolvePromise({
         scriptName,
         outcome,
@@ -416,6 +463,7 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, op
         durationMs: Date.now() - startedAt,
         skippedLegs,
         timedOut,
+        ...(collectCaseEvidence?{caseEvidence}:{}),
         stdout,
         stderr
       });
@@ -426,7 +474,7 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, op
 // Cache only successful operations within this invocation. A build/generator is
 // a barrier. Failed/skipped work is never promoted by reuse, and && still stops
 // the remaining operations of that suite on a nonzero exit or timeout.
-export async function runPlannedSuite({ repoRoot, entry, timeoutMs, cache, injectEnv = true, execute = runSuite }) {
+export async function runPlannedSuite({ repoRoot, entry, timeoutMs, cache, injectEnv = true, execute = runSuite, collectCaseEvidence=false }) {
   const startedAt = Date.now();
   const steps = [];
   const outputs = [];
@@ -436,14 +484,15 @@ export async function runPlannedSuite({ repoRoot, entry, timeoutMs, cache, injec
     const remaining = timeoutMs - (Date.now() - startedAt);
     const result = cached ?? (remaining <= 0
       ? { outcome: OUTCOME.FAILED, exitCode: null, durationMs: 0, skippedLegs: [], timedOut: true, stdout: '', stderr: 'Suite timeout budget exhausted.' }
-      : await execute({ repoRoot, scriptName: entry.scriptName, timeoutMs: remaining, injectEnv, operation }));
+      : await execute({ repoRoot, scriptName: entry.scriptName, timeoutMs: remaining, injectEnv, operation,collectCaseEvidence }));
     if (!cached && result.outcome === OUTCOME.PASSED && operation.kind !== 'barrier') {
       cache.set(operation.key, { ...result, reusedFrom: entry.scriptName });
     }
     steps.push({ key: operation.key, command: operation.command, args: operation.args, cwd: operation.cwd,
       outcome: result.outcome, execution: cached ? 'reused' : 'executed',
       validation: operation.validation ?? (operation.kind !== 'prepare'),
-      durationMs: cached ? 0 : result.durationMs, ...(cached ? { reusedFrom: cached.reusedFrom } : {}) });
+      durationMs: cached ? 0 : result.durationMs, ...(cached ? { reusedFrom: cached.reusedFrom } : {}),
+      ...(result.caseEvidence?{caseEvidence:result.caseEvidence}:{}) });
     outputs.push(result);
     if (result.exitCode !== 0 || result.timedOut) break;
   }

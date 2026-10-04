@@ -11,9 +11,45 @@ import { discoverChecks } from './verify/checkRegistry.mjs';
 import { loadWorkspaces } from './verify/scriptGraph.mjs';
 import { planScript } from './verify/commandPlan.mjs';
 import { classifyOutcome, OUTCOME } from './verify/runner.mjs';
+import {extractCaseEvidence} from './verify/runner.mjs';
 
 const runner = fileURLToPath(new URL('./check.mjs', import.meta.url));
 const compatibilityRunner = fileURLToPath(new URL('./verify.mjs', import.meta.url));
+
+test('damaged or explicitly failed case output cannot remain a passed check',()=>{
+  const root=mkdtempSync(join(tmpdir(),'sf-damaged-evidence-'));
+  try{
+    writeFileSync(join(root,'package.json'),JSON.stringify({scripts:{'test:actual':'node actual.mjs'}}));
+    for(const data of [{complete:false,failed:0,passed:1},{complete:true,failed:1,passed:0}]){
+      const envelope={schemaVersion:1,runner:'diagnostic',...data,total:1,skipped:0,cases:[{id:'actual',type:'test',status:data.failed?'failed':'passed'}]};
+      writeFileSync(join(root,'actual.mjs'),`console.log(${JSON.stringify(JSON.stringify({soulforgeCheckCases:envelope}))});`);
+      const result=spawnSync(process.execPath,[runner,'--suite','test:actual','--require-executed','--case-evidence'],{cwd:root,encoding:'utf8'});
+      assert.equal(result.status,1);assert.equal(JSON.parse(result.stdout).results[0].status,'failed');
+    }
+    const fake=extractCaseEvidence(JSON.stringify({status:'skipped',code:'PRIVATE_CORPUS_MISSING',missingPrerequisites:[{kind:'private-game-input',logicalResource:'',status:'missing'},{kind:'GPU',status:'broken'}]}));
+    assert.equal(fake.cases[0].reasonCode,'UNKNOWN');
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test('private-corpus policy retains unavailable cases and blocks unknown skips or actual failures',()=>{
+  const root=mkdtempSync(join(tmpdir(),'sf-private-policy-'));
+  try{
+    writeFileSync(join(root,'package.json'),JSON.stringify({scripts:{'test:actual':'node --test actual.mjs'}}));
+    const privateReason=JSON.stringify({code:'PRIVATE_CORPUS_MISSING',missingPrerequisites:[{kind:'private-game-input',logicalResource:'chr/native',status:'missing'}]});
+    const invoke=extra=>spawnSync(process.execPath,[runner,'--suite','test:actual','--require-executed','--case-evidence',...extra],{cwd:root,encoding:'utf8'});
+    writeFileSync(join(root,'actual.mjs'),`import {test} from 'node:test';test('actual',()=>{});test('private',{skip:${JSON.stringify(privateReason)}},()=>{});`);
+    assert.equal(invoke([]).status,1);
+    const allowed=invoke(['--allow-missing-private-corpus']);
+    assert.equal(allowed.status,0,allowed.stderr||allowed.stdout);
+    const report=JSON.parse(allowed.stdout);
+    assert.equal(report.completionVerified,false);assert.equal(report.results[0].status,'unavailable');
+    assert.equal(report.results[0].steps[0].caseEvidence.skipped,1);
+    writeFileSync(join(root,'actual.mjs'),`import {test} from 'node:test';test('actual',()=>{});test('unknown',{skip:true},()=>{});`);
+    assert.equal(invoke(['--allow-missing-private-corpus']).status,1);
+    writeFileSync(join(root,'actual.mjs'),`import {test} from 'node:test';test('failure',()=>{throw Error('actual failure');});test('private',{skip:${JSON.stringify(privateReason)}},()=>{});`);
+    assert.equal(invoke(['--allow-missing-private-corpus']).status,1);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
 test('discovered desktop noEmit smokes use their source runners and execute actual assertions', () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
   const registry = discoverChecks(root, loadWorkspaces(root));

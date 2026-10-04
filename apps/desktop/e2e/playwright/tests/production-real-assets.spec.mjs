@@ -1,7 +1,8 @@
 import { test, expect, electron, testWorkspace } from '../owned-test.mjs';
-import { existsSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { missingFile, verificationSkipReason } from '../../../../../scripts/verification-inputs.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const productionMain = resolve(here, '../production-main.mjs');
@@ -9,19 +10,15 @@ const repoRoot = resolve(here, '../../../../..');
 const gameRoot = process.env.SF_REAL_GAME_ROOT?.trim()
   || 'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro';
 const overlayRoot = process.env.SF_REAL_OVERLAY_ROOT?.trim() || join(gameRoot, 'mods');
-const hasCorpus = [
-  join(overlayRoot, 'chr', 'c0000.anibnd.dcx'),
-  join(overlayRoot, 'chr', 'c1130.anibnd.dcx'),
-  join(overlayRoot, 'map', 'mapstudio', 'm10_00_00_00.msb.dcx'),
-  join(overlayRoot, 'obj', 'o000100.objbnd.dcx'),
-  join(gameRoot, 'chr', 'c1130.chrbnd.dcx')
-].every(existsSync);
-const hasC5400Corpus = [
-  join(gameRoot, 'chr', 'c5400.chrbnd.dcx'),
-  join(gameRoot, 'chr', 'c5409.texbnd.dcx')
-].every(existsSync);
+const corpusReason = verificationSkipReason([
+  ...['chr/c0000.anibnd.dcx','chr/c1130.anibnd.dcx','map/mapstudio/m10_00_00_00.msb.dcx','obj/o000100.objbnd.dcx']
+    .map(logicalResource=>missingFile(join(overlayRoot,logicalResource),{kind:'private-game-input',sourceEnv:'SF_REAL_OVERLAY_ROOT',logicalResource})),
+  missingFile(join(gameRoot,'chr/c1130.chrbnd.dcx'),{kind:'private-game-input',sourceEnv:'SF_REAL_GAME_ROOT',logicalResource:'chr/c1130.chrbnd.dcx'})
+]);
+const c5400Reason = verificationSkipReason(['chr/c5400.chrbnd.dcx','chr/c5409.texbnd.dcx']
+  .map(logicalResource=>missingFile(join(gameRoot,logicalResource),{kind:'private-game-input',sourceEnv:'SF_REAL_GAME_ROOT',logicalResource})));
 
-test.skip(!hasCorpus, '本机没有配置真实只狼语料，跳过只读生产资源 E2E。');
+test.skip(Boolean(corpusReason), corpusReason);
 
 test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
   test.setTimeout(240_000);
@@ -327,7 +324,7 @@ test.describe('真实只狼资源：ACTION / MAP / 纹理渲染链', () => {
   });
 
   test('真实 c5400 按 FLVER MTD 身份绑定 c5409 纹理，而不是公共材质回退', async () => {
-    test.skip(!hasC5400Corpus, '本机没有 c5400.chrbnd 与 c5409.texbnd，跳过 c5400 原生纹理身份回归。');
+    test.skip(Boolean(c5400Reason), c5400Reason);
     const { window, cleanup } = await launchProduction();
     try {
       await openWorkspace(window);

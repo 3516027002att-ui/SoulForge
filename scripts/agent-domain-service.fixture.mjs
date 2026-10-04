@@ -193,12 +193,60 @@ test('actual no-workspace finite run keeps acceptance, default budgets and visib
     const accepted = await h.request(); assert.equal(accepted.ok, true); await h.waitEvent('session-done');
     assert.equal(h.target.events[0].event.type, 'session-accepted'); assert.equal(h.api.isAgentSessionActive(accepted.sessionId), false);
     const params = h.calls.find(([name]) => name === 'utilityRun')[1]; assert.equal(params.timeoutMs, 180_000);
+    assert.equal(params.maxSteps, 200);
+    assert.equal(params.kernelLimits?.maxCost, undefined); assert.equal(params.pricing, undefined);
+    assert.equal(h.calls.filter(([name]) => name === 'complete').length, 1, 'desktop defaults need no pricing to reach the provider');
     assert.equal(params.permissionMode, 'plan'); assert.equal(params.streaming === true, false); assert.equal(params.compaction.autoCompactTokenLimit, 1600);
     assert.equal(h.target.events.some(({ event }) => event.type === 'agent-message-delta' && event.text === 'Owned task response.'), true);
     assert.equal(JSON.stringify(h.target.events).includes('synthetic-fixture-key'), false);
     assert.equal(h.calls.filter(([name]) => name === 'usage').length, 1);
   } finally { await h.close(); }
 });
+test('desktop step overrides remain bounded by the main-owned ceiling', async () => {
+  const h = await harness(); try {
+    await h.request('plan', { maxSteps: 500 }); await h.waitEvent('session-done');
+    assert.equal(h.calls.find(([name]) => name === 'utilityRun')[1].maxSteps, 200);
+  } finally { await h.close(); }
+});
+
+test('desktop no-cost execution still stops at the requested step budget', { timeout: 5000 }, async () => {
+  let turn = 0, result;
+  const h = await harness({ complete: async () => {
+    const completion = ownedCall('inspect_owned'); completion.message.toolCalls[0].id = `owned-step-${++turn}`; return completion;
+  }, runner: async params => { result = await realCore.runAgentSession(params); return result; } });
+  try {
+    await h.request('plan', { maxSteps: 2 }); await h.waitEvent('session-done');
+    assert.equal(result.kernel.state, 'partial'); assert.equal(result.kernel.reason, 'step_budget'); assert.equal(result.kernel.steps, 2);
+    assert.equal(h.calls.filter(([name]) => name === 'complete').length, 2); assert.equal(h.calls.filter(([name]) => name === 'readTool').length, 2);
+    assert.equal(h.calls.find(([name]) => name === 'utilityRun')[1].kernelLimits?.maxCost, undefined);
+  } finally { await h.close(); }
+});
+
+test('desktop no-cost execution cancels a stalled provider at the total-time budget', { timeout: 5000 }, async () => {
+  let result;
+  const h = await harness({ complete: async () => new Promise(() => {}),
+    runner: async params => { result = await realCore.runAgentSession(params); return result; } });
+  try {
+    await h.request('plan', { timeoutMs: 100 }); await h.waitEvent('session-done');
+    assert.equal(result.kernel.state, 'cancelled'); assert.equal(result.kernel.reason, 'time_budget');
+    assert.equal(h.calls.filter(([name]) => name === 'complete').length, 1);
+    assert.equal(h.calls.find(([name]) => name === 'utilityRun')[1].timeoutMs, 100);
+  } finally { await h.close(); }
+});
+
+test('an explicitly configured trusted maxCost remains enforced in the desktop session runner', { timeout: 5000 }, async () => {
+  let result;
+  const h = await harness({ runner: async params => {
+    result = await realCore.runAgentSession({ ...params, kernelLimits: { maxCost: 0 }, pricing: { inputPerMillion: 1, outputPerMillion: 1 } });
+    return result;
+  } });
+  try {
+    await h.request(); await h.waitEvent('session-done');
+    assert.equal(result.kernel.state, 'partial'); assert.equal(result.kernel.reason, 'cost_budget');
+    assert.equal(h.calls.filter(([name]) => name === 'complete').length, 0, 'explicit cost refusal must precede provider dispatch');
+  } finally { await h.close(); }
+});
+
 test('actual read tool execution remains available and plan denies a proposed write', async () => {
   for (const name of ['inspect_owned', 'commit_owned']) { let first = true; const h = await harness({ complete: async () => { if (first) { first = false; return ownedCall(name); } return response('Owned tool finished.'); } });
     try { await h.request(); await h.waitEvent('session-done'); assert.equal(h.calls.filter(([kind]) => kind === 'readTool').length, name === 'inspect_owned' ? 1 : 0);

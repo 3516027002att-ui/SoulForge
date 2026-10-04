@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { assertTaeInternalProducer, compareTaeInternalResource, compareTaeInternalFields } from '../compare-tae-internal-fields.mjs';
+import { oracleSourcePrerequisites, missingFile, verificationSkipReason } from '../verification-inputs.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 test('TAE reflection assembly must match the complete assembly uniquely embedded in the pinned published producer', () => {
@@ -65,8 +66,20 @@ test('TAE comparator preserves a synthetic null membership without claiming it o
   observed.animations[0].eventGroupOrdinals[1] = 0;
   assert.equal(compareTaeInternalResource(expected, observed).firstMismatch.layer, 'decoded-native');
 });
+const internalOracleReason = verificationSkipReason([
+  ...oracleSourcePrerequisites(process.env.SOULFORGE_TAE_INTERNAL_ORACLE_PATH,'SOULFORGE_TAE_INTERNAL_ORACLE_PATH',
+    oracle=>oracle.originalSource,oracle=>{
+      assert.equal(oracle.schema,'soulforge.external-tae-fields.v1'); assert.equal(oracle.ok,true);
+      assert.equal(oracle.provider?.independentOfSoulForge,true);
+      assert.equal(oracle.provider?.revision,'ee1dd61958f60bdc51ce3da548e9a90a8ab39905');
+      assert.deepEqual(oracle.resources?.map(resource=>resource.id),['a232','a250']);
+    }),
+  missingFile(process.env.SOULFORGE_TAE_PIN_CONTROL_PRODUCT ? join(process.env.SOULFORGE_TAE_PIN_CONTROL_PRODUCT,
+    'bridge/SoulForge.Bridge/bin/Release/net10.0/linux-x64/publish/bridge-production-build.json') : undefined,
+    {kind:'published-control',sourceEnv:'SOULFORGE_TAE_PIN_CONTROL_PRODUCT',logicalResource:'published Linux Bridge receipt'})
+]);
 test('TAE reflection refuses a receipt with omitted compile inputs before creating or building the probe', {
-  skip: !process.env.SOULFORGE_TAE_PIN_CONTROL_PRODUCT || !process.env.SOULFORGE_TAE_INTERNAL_ORACLE_PATH
+  skip: internalOracleReason ?? false
 }, async () => {
   const productRoot = process.env.SOULFORGE_TAE_PIN_CONTROL_PRODUCT;
   const receipt = JSON.parse(await readFile(join(productRoot, 'bridge/SoulForge.Bridge/bin/Release/net10.0/linux-x64/publish/bridge-production-build.json'), 'utf8'));

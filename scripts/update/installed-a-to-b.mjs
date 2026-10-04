@@ -10,6 +10,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import semver from 'semver';
 import { runProcess, processSucceeded } from '../subprocess-control.mjs';
+import { captureOwnedBuildInputs, resolveOwnedInstallerTools } from './owned-build-inputs.mjs';
 
 const entrypoint = fileURLToPath(import.meta.url);
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -19,7 +20,7 @@ const nonClaims = ['Application-initiated automatic update/feed/download/quitAnd
 const inside = (root, path) => { const value = relative(resolve(root), resolve(path)); return value !== '' && value !== '..' && !value.startsWith(`..\\`) && !value.startsWith('../') && !isAbsolute(value); };
 async function exists(path) { try { await lstat(path); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } }
 
-export async function validateInstalledManifest(manifest) {
+export async function validateInstalledManifest(manifest, { expectedHeadSha, repositoryRoot } = {}) {
   if (manifest?.schemaVersion !== 1 || manifest.execute !== true || manifest.scope !== 'unsigned-owned-identity-manual-nsis-a-to-b-same-source') {
     throw fail('UPDATE_INSTALLED_APPROVAL_REQUIRED', 'An explicit approved actual A/B manifest is required.');
   }
@@ -71,6 +72,10 @@ export async function validateInstalledManifest(manifest) {
     const receipt = await readBoundJson(manifest.buildReceiptPath, manifest.buildReceiptSha256);
     assert.equal(receipt.schemaVersion, 1); assert.ok(semver.valid(receipt.builderVersion));
     assert.match(receipt.sourceHead, /^[a-f0-9]{40}$/i); assert.deepEqual(receipt.identity, identity);
+    if (expectedHeadSha !== undefined) {
+      assert.match(expectedHeadSha, /^[a-f0-9]{40}$/i, 'current HEAD must be available before installation');
+      assert.equal(receipt.sourceHead.toLowerCase(), expectedHeadSha.toLowerCase(), 'installer receipt must bind the current HEAD');
+    }
     for (const label of ['a', 'b']) {
       assert.deepEqual(receipt[label], manifest[label], 'receipt must bind the exact approved installer/version/hash');
       const config = await readBoundJson(receipt.configs?.[label]?.path, receipt.configs?.[label]?.sha256);
@@ -82,7 +87,22 @@ export async function validateInstalledManifest(manifest) {
       assert.equal(config.extraMetadata?.productName, identity.productName);
       assert.equal(config.extraMetadata?.version, manifest[label].version);
     }
-  } catch (error) { throw fail('UPDATE_INSTALLED_BUILD_RECEIPT_INVALID', error.message); }
+    if (repositoryRoot !== undefined) {
+      assert.ok(isAbsolute(repositoryRoot), 'actual checkout root must be absolute');
+      assert.ok(receipt.buildInputs && receipt.tools, 'current source/runtime buildInputs and tool binding are required');
+      const tools = await resolveOwnedInstallerTools(receipt.tools.builderCli);
+      assert.deepEqual(tools, receipt.tools, 'UPDATE_INSTALLED_INPUT_CHANGED: builder/tool bytes changed');
+      assert.equal(tools.asarModulePath, manifest.asarModulePath, 'approved ASAR path must match the actual build tool');
+      assert.equal(tools.asarModuleSha256, manifest.asarModuleSha256, 'approved ASAR hash must match the actual build tool');
+      const current = await captureOwnedBuildInputs(repositoryRoot, tools);
+      assert.equal(current.headSha, receipt.sourceHead.toLowerCase(), 'receipt must bind the actual current HEAD');
+      assert.equal(current.headSha, expectedHeadSha?.toLowerCase(), 'probe HEAD must match the actual current checkout');
+      assert.deepEqual(current, receipt.buildInputs, 'UPDATE_INSTALLED_INPUT_CHANGED: source/runtime/packaging inputs changed');
+    }
+  } catch (error) {
+    throw Object.assign(fail('UPDATE_INSTALLED_BUILD_RECEIPT_INVALID', `${error.code ? `${error.code}: ` : ''}${error.message}`),
+      error.code ? { underlyingCode: error.code } : {});
+  }
   return manifest;
 }
 
@@ -200,7 +220,8 @@ export async function runInstalledProbe(input) {
   if (process.platform !== 'win32') return blocked('UPDATE_INSTALLED_PLATFORM_REQUIRED: Actual A/B NSIS execution requires Windows.');
   if (!installedConfigPath) return blocked('UPDATE_INSTALLED_ARTIFACTS_REQUIRED: Approved actual A/B installer manifest is missing.');
   let manifest;
-  try { manifest = await validateInstalledManifest(JSON.parse(await readFile(installedConfigPath, 'utf8'))); }
+  const buildContext = { expectedHeadSha: headSha ?? '', repositoryRoot };
+  try { manifest = await validateInstalledManifest(JSON.parse(await readFile(installedConfigPath, 'utf8')), buildContext); }
   catch (error) { return blocked(error.message); }
   const commands = [], artifacts = [], receipts = [];
   let scratch, scratchParent, installedOwned = false, userData, ownedProfile, appDataRoot, shortcutPaths = [], baseline;
@@ -210,6 +231,7 @@ export async function runInstalledProbe(input) {
     artifacts.push({ relativePath: name, bytes: bytes.length, sha256: sha256(bytes) });
   };
   const execute = async (label, command, args, timeoutMs) => {
+    if (label === 'install-a' || label === 'install-b') await validateInstalledManifest(manifest, buildContext);
     const result = await runProcess({ command, args, cwd: repositoryRoot, timeoutMs });
     await evidence(`${label}.stdout.txt`, result.stdout); await evidence(`${label}.stderr.txt`, result.stderr);
     commands.push({ argv: [command, ...args], exitCode: result.code, status: processSucceeded(result) ? 'executed' : result.timedOut ? 'timeout' : 'failed',
@@ -308,6 +330,7 @@ export async function runInstalledProbe(input) {
       await removeOwnedProfile(ownedProfile);
     }
     assert.equal(await exists(userData), false, 'only the fresh owned profile must be cleaned');
+    await validateInstalledManifest(manifest, buildContext);
     await evidence('receipt.json', { runId, headSha, scope: manifest.scope, identity, a: manifest.a, b: manifest.b, receipts,
       installerIdentities, buildReceiptSha256: manifest.buildReceiptSha256, officialRegistryBefore: baseline, officialRegistryAfter: await registrySnapshot('SoulForge'),
       ownedProfile,

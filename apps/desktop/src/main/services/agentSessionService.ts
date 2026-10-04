@@ -61,6 +61,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
   const APPROVAL_TIMEOUT_MS = 600_000;
 
   const DEFAULT_REQUEST_TIMEOUT_MS = 180_000;
+  const DEFAULT_REQUEST_MAX_STEPS = 200;
 
   const AGENT_EVENT_HISTORY_LIMIT = 4_096;
 
@@ -604,9 +605,10 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
           sessionRunner: deps.sessionRunner,
           ...(coreSession ? { coreSession } : {}),
           composition: {
-            controls: request,
+            // Desktop defaults bound steps and total time without a monetary ceiling.
+            controls: { ...request, maxSteps: request.maxSteps ?? DEFAULT_REQUEST_MAX_STEPS },
             defaultTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
-            maxStepsCeiling: 200,
+            maxStepsCeiling: DEFAULT_REQUEST_MAX_STEPS,
             autoCompaction: true,
             ...(contextWindowTokens !== undefined ? { contextWindowTokens } : {}),
             sampling,

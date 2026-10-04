@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { oracleSourcePrerequisites, verificationSkipReason } from '../verification-inputs.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const require = createRequire(resolve(process.env.SOULFORGE_TOOLING_ROOT ?? root, 'package.json'));
@@ -35,7 +36,13 @@ test('shape capability and scaling preserve Sekiro native discriminants and axis
   }
 });
 
-test('profiles decode dimensions at the actual raw MSBS shape pointer', { skip: !process.env.SOULFORGE_MSB_FIELDS }, async () => {
+const shapeOracleReason = verificationSkipReason(oracleSourcePrerequisites(process.env.SOULFORGE_MSB_FIELDS,
+  'SOULFORGE_MSB_FIELDS',oracle=>oracle.source,oracle=>{
+    assert.equal(oracle.ok,true); assert.equal(oracle.decoded?.format,'MSBS');
+    assert.equal(oracle.oracle?.commit,'ee1dd61958f60bdc51ce3da548e9a90a8ab39905');
+    assert.ok(Array.isArray(oracle.fields?.regions));
+  }));
+test('profiles decode dimensions at the actual raw MSBS shape pointer', { skip: shapeOracleReason ?? false }, async () => {
   const oracle = JSON.parse(await readFile(process.env.SOULFORGE_MSB_FIELDS, 'utf8'));
   assert.equal(oracle.oracle.commit, 'ee1dd61958f60bdc51ce3da548e9a90a8ab39905');
   const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');

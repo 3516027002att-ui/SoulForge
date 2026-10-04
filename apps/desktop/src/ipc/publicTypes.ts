@@ -81,12 +81,11 @@ export interface AiAgentRunRequest {
   streaming?: boolean;
   /** Session-relative rollout path as returned by ai.agent.sessions. */
   resumeSessionPath?: string;
-  /** Optional per-run ceiling; omitted uses the core's safe default. */
+  /** Optional per-run step limit; desktop defaults to and caps requests at 200. */
   maxSteps?: number;
   /**
-   * Per-model-call timeout. Before this was exposed, the loop ran with no
-   * timeout at all: a provider that accepted the connection and then stalled
-   * left the session running until the user cancelled it by hand.
+   * Total Agent run budget and per-model-call timeout; desktop defaults to
+   * 180,000 ms. Cancellation and other transport/resource bounds still apply.
    */
   timeoutMs?: number;
   /** Total output token budget across all steps; the loop stops when exceeded. */

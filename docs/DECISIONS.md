@@ -1,5 +1,11 @@
 # Decisions
 
+## Owner decisions on 2026-10-04
+
+The owner permits CI checks lacking required private game resources to remain explicitly unavailable/not_run without blocking the refactor merge. This permission does not waive actual failures, unknown skips, platform coverage or missing installer A/B configuration. Unit and E2E requirements remain; matching-source platform case reports must show an actual counterpart execution. Coverage limits and skipped cases remain visible and do not become verified passes.
+
+Desktop Agent sessions default to bounded steps and total time without a monetary ceiling. The main-owned defaults are 200 steps and 180 seconds; trusted explicit monetary limits still apply. CLI/evaluator defaults are unchanged. Issue #54 remains deferred, and the independent mimo/reg-rebuild branches remain outside this task.
+
 ## Governance replacement
 
 [Issue #49](https://github.com/3516027002att-ui/SoulForge/issues/49) supersedes the former line-budget and blanket-no-new-check premises in #22/#38/#39. Necessary product constraints stay at their actual execution boundaries. A scoped regression needs a scoped negative test, not a whole-repository claim/seal/freshness ceremony.

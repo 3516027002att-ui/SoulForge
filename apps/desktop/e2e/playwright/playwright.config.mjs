@@ -9,7 +9,8 @@ export default defineConfig({
   retries: 0,
   reporter: [
     ['list'],
-    ['html', { outputFolder: 'playwright-report', open: 'never' }]
+    ['html', { outputFolder: 'playwright-report', open: 'never' }],
+    ['./check-cases-reporter.mjs']
   ],
   outputDir: 'test-results',
   use: {
