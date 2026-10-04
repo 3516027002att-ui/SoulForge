@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { disposeBridgeDaemonPool } from '@soulforge/core';
 import { disposeOperationLogUtility, registerIpcHandlers } from './ipc.js';
 import { disposeAuxiliaryServices, registerAuxiliaryIpcHandlers } from './auxiliaryServices.js';
+import { disposeWorkspaceService } from './services/workspaceService.js';
 
 /**
  * 脱敏函数从 main 入口再导出一次，供安全门禁在生产构建产物上真实调用。
@@ -35,6 +36,7 @@ process.on('uncaughtException', (err: Error & { code?: string }) => {
 
 const here = dirname(fileURLToPath(import.meta.url));
 let bridgeShutdownStarted = false;
+let bridgeShutdownFinished = false;
 
 /**
  * 与 renderer light 主题 `--canvas` / `--ink-0` 的 sRGB 近似。
@@ -175,12 +177,13 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', (event) => {
-  if (bridgeShutdownStarted) return;
+  if (bridgeShutdownFinished) return;
   event.preventDefault();
+  if (bridgeShutdownStarted) return;
   bridgeShutdownStarted = true;
   disposeAuxiliaryServices();
-  void Promise.allSettled([
+  void disposeWorkspaceService().then(() => Promise.allSettled([
     disposeBridgeDaemonPool(),
     disposeOperationLogUtility()
-  ]).finally(() => app.quit());
+  ])).finally(() => { bridgeShutdownFinished = true; app.quit(); });
 });

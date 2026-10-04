@@ -2,6 +2,17 @@
 export class RagRefreshQueue {
   private readonly tails = new Map<string, Promise<void>>();
 
+  /** Wait for real operations, not callers already released by cancellation.
+   * The lifecycle owner must stop new producers before using this for shutdown.
+   */
+  async drain(): Promise<void> {
+    while (this.tails.size > 0) {
+      // A running owner may enqueue another tail while this snapshot settles.
+      // run() makes these tails non-rejecting without hiding callers' failures.
+      await Promise.all([...this.tails.values()]);
+    }
+  }
+
   run<T>(owner: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const abortError = (): Error => Object.assign(new Error('RAG refresh cancelled.'), { name: 'AbortError' });
     if (signal?.aborted) return Promise.reject(abortError());

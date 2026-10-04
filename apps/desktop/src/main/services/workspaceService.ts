@@ -84,6 +84,23 @@ let activeSession: WorkspaceSession | null = null;
 let activeWorkspaceSessionId: string | null = null;
 let activeWorkspaceSessionGeneration = 0;
 let workspaceSessionGenerationCounter = 0;
+// All facades share the process-global session, so their mount lifecycle must
+// also share one queue. A failed request releases the tail without replaying it.
+let workspaceMountTail: Promise<void> = Promise.resolve();
+let workspaceMountEpoch = 0;
+let workspaceOverlayEpoch = 0;
+let workspaceServiceStopped = false;
+let workspaceServiceDisposal: Promise<void> | null = null;
+function serializeWorkspaceMount<Result>(operation: (assertCurrent: () => void) => Promise<Result>): Promise<Result> {
+    const admittedEpoch = workspaceMountEpoch;
+    const assertCurrent = () => {
+        if (workspaceServiceStopped || admittedEpoch !== workspaceMountEpoch)
+            throw Object.assign(new Error('工作区挂载已取消。'), { code: 'WORKSPACE_MOUNT_CANCELLED' });
+    };
+    const result = workspaceMountTail.then(() => { assertCurrent(); return operation(assertCurrent); });
+    workspaceMountTail = result.then(() => undefined, () => undefined);
+    return result;
+}
 const FINGERPRINT_STORE_GENERATION = 1;
 let activeFingerprintStore: FingerprintStoreState | null = null;
 let foregroundActive = false;
@@ -108,6 +125,7 @@ let workspaceAnalyzeInFlight: {
     generation: number;
     promise: Promise<AnalyzeWorkspaceSummary>;
 } | null = null;
+const pendingWorkspaceAnalyses = new Set<Promise<AnalyzeWorkspaceSummary>>();
 let workspaceAnalyzeAbort: AbortController | null = null;
 let workspaceAnalysisRequestedGeneration = -1;
 let workspaceAnalysisStarter: (() => Promise<void>) | null = null;
@@ -536,10 +554,15 @@ export async function waitForWorkspaceIndexing(signal?: AbortSignal): Promise<vo
     }
 }
 export function clearWorkspaceServiceCaches(): void {
+    // Revoke queued admission and the in-flight mount before clearing owners.
+    // Do not reset the tail: its old owner must finish releasing its resources.
+    workspaceMountEpoch += 1;
+    workspaceIndexingAbort?.abort();
     workspaceAnalyzeAbort?.abort();
     workspaceAnalyzeAbort = null;
     workspaceAnalysisRequestedGeneration = -1;
-    actionMembershipForegroundTasks.clear();
+    // Pending ACTION owners remove themselves in finally. Keeping their handles
+    // until then allows shutdown to drain work admitted before cache clearing.
     resolveWorkspaceSemanticIndexingTask();
     if (typeof clearWorkspaceRagSnapshot === 'function')
         clearWorkspaceRagSnapshot();
@@ -547,6 +570,21 @@ export function clearWorkspaceServiceCaches(): void {
         activeRag = null;
     scheduleRagEmbedding = null;
     workspaceAnalysisStarter = null;
+    activeSession = null;
+    activeWorkspaceSessionId = null;
+    activeFingerprintStore = null;
+    activeIndex = null;
+    replaceWorkspaceIndexedFiles([]);
+}
+/** Stop new producers before closing their Bridge and database dependencies. */
+export function disposeWorkspaceService(): Promise<void> {
+    if (workspaceServiceDisposal) return workspaceServiceDisposal;
+    workspaceServiceStopped = true;
+    const pending = [workspaceMountTail, workspaceIndexingTask, ...pendingWorkspaceAnalyses,
+        ...actionMembershipForegroundTasks.values()];
+    clearWorkspaceServiceCaches();
+    workspaceServiceDisposal = Promise.allSettled(pending).then(() => ragRefreshQueue.drain());
+    return workspaceServiceDisposal;
 }
 export interface AdmittedWorkspaceDirectory {
     readonly absolutePath: string;
@@ -592,6 +630,22 @@ export function createWorkspaceService(input: WorkspaceServiceDeps) {
             }
         }
         const effectiveBaseRecord = (baseSelection as AdmittedWorkspaceDirectory | undefined) ?? autoBaseRecord ?? null;
+        return serializeWorkspaceMount(assertCurrent => {
+            // A new overlay request replaces its capability even when its path
+            // returns to the same directory (A -> B -> A).
+            workspaceOverlayEpoch += 1;
+            return mountAdmittedWorkspace(overlaySelection, effectiveBaseRecord, assertCurrent, baseSelection);
+        });
+    };
+    // Both a new overlay and a base-only remount need the same generation,
+    // catalog, fingerprint and background-index owners. Admission stays in the
+    // caller; this operation never accepts a renderer-provided filesystem path.
+    const mountAdmittedWorkspace = async (
+        overlaySelection: AdmittedWorkspaceDirectory,
+        effectiveBaseRecord: AdmittedWorkspaceDirectory | null,
+        assertCurrent: () => void,
+        baseSelection?: AdmittedWorkspaceDirectory
+    ): Promise<RendererWorkspaceScanResult> => {
         // Cancel the native analysis and its bounded persistence requests before
         // replacing session state. The old analysis must not keep consuming the
         // Bridge/SQLite queue after the user opens another workspace.
@@ -608,12 +662,15 @@ export function createWorkspaceService(input: WorkspaceServiceDeps) {
             }
             catch { }
         }
+        assertCurrent();
         resolveWorkspaceSemanticIndexingTask();
         const previousSession = activeSession;
         activeSession = null;
         await deps.clearActiveOperationLog();
+        assertCurrent();
         if (previousSession)
             await disposeBridgeDaemonPool();
+        assertCurrent();
         deps.releaseEditorCaches();
         // A corpus is valid only for its active WorkspaceIndex/session.  Clear it
         // before exposing the new session so an agent cannot query the previous
@@ -624,35 +681,43 @@ export function createWorkspaceService(input: WorkspaceServiceDeps) {
         workspaceSessionGenerationCounter += 1;
         const thisSessionGeneration = workspaceSessionGenerationCounter;
         activeWorkspaceSessionGeneration = thisSessionGeneration;
-        activeSession = await openWorkspaceSession({ overlayRoot: overlaySelection.absolutePath, ...(effectiveBaseRecord ? { baseRoot: effectiveBaseRecord.absolutePath } : {}), game: 'sekiro' });
-        activeWorkspaceSessionId = randomUUID();
-        activateWorkspaceCapabilities();
+        const session = await openWorkspaceSession({ overlayRoot: overlaySelection.absolutePath, ...(effectiveBaseRecord ? { baseRoot: effectiveBaseRecord.absolutePath } : {}), game: 'sekiro' });
+        assertCurrent();
         const physicalOverlayRoot = await (async () => {
             try {
                 const { realpath } = await import('node:fs/promises');
-                return await realpath(activeSession.layers.overlayRoot);
+                return await realpath(session.layers.overlayRoot);
             }
             catch {
-                return activeSession.layers.overlayRoot;
+                return session.layers.overlayRoot;
             }
         })();
+        assertCurrent();
         const physicalOverlayHash = workspacePhysicalRootHash(physicalOverlayRoot);
-        const physicalBaseHash = activeSession.layers.baseRoot ? workspacePhysicalRootHash(await (async () => {
+        const physicalBaseHash = session.layers.baseRoot ? workspacePhysicalRootHash(await (async () => {
             try {
                 const { realpath } = await import('node:fs/promises');
-                return await realpath(activeSession.layers.baseRoot!);
+                return await realpath(session.layers.baseRoot!);
             }
             catch {
-                return activeSession.layers.baseRoot!;
+                return session.layers.baseRoot!;
             }
         })()) : undefined;
-        const workspacePersistentIdentityHash = makeWorkspacePersistentIdentityHash({ workspaceId: activeSession.meta.workspaceId, game: activeSession.meta.game, physicalOverlayRootHash: physicalOverlayHash, ...(physicalBaseHash ? { physicalBaseRootHash: physicalBaseHash } : {}) });
-        const storageRoot = durableStoragePaths(activeSession.meta.workspaceId, activeSession.layers.overlayRoot).root;
+        assertCurrent();
+        const workspacePersistentIdentityHash = makeWorkspacePersistentIdentityHash({ workspaceId: session.meta.workspaceId, game: session.meta.game, physicalOverlayRootHash: physicalOverlayHash, ...(physicalBaseHash ? { physicalBaseRootHash: physicalBaseHash } : {}) });
+        const storageRoot = durableStoragePaths(session.meta.workspaceId, session.layers.overlayRoot).root;
         let fingerprintStore = await loadFingerprintStore({ workspacePersistentIdentityHash, storageRoot, fingerprintStoreGeneration: FINGERPRINT_STORE_GENERATION });
-        activeFingerprintStore = fingerprintStore;
+        assertCurrent();
         const continuity = fingerprintStore.continuity;
         const shellVisibleAt = Date.now();
-        const lightResult = await scanWorkspace({ workspaceRoot: activeSession.layers.overlayRoot, game: activeSession.meta.game, includeContentHashes: false });
+        const lightResult = await scanWorkspace({ workspaceRoot: session.layers.overlayRoot, game: session.meta.game, includeContentHashes: false });
+        assertCurrent();
+        // Publish the session and catalog together, after all asynchronous
+        // preparation and revocation checks, before starting background work.
+        activeSession = session;
+        activeWorkspaceSessionId = randomUUID();
+        activeFingerprintStore = fingerprintStore;
+        activateWorkspaceCapabilities();
         const filesVisibleAt = Date.now();
         replaceWorkspaceIndexedFiles(lightResult.files);
         activeOverlayLabel = overlaySelection.label;
@@ -690,13 +755,19 @@ export function createWorkspaceService(input: WorkspaceServiceDeps) {
         let database: OperationLogUtilityClient | undefined;
         const backgroundTask = (async () => {
             const enriched: IndexedFile[] = [];
+            const isCurrent = () => !controller.signal.aborted
+                && currentGeneration === activeWorkspaceSessionGeneration
+                && currentSession === activeSession && currentSessionId === activeWorkspaceSessionId;
+            const assertIndexCurrent = () => { if (!isCurrent()) throw new Error('aborted'); };
             let primaryHashResolved = false;
             const checkResolvePrimary = () => {
                 if (!primaryHashResolved) {
                     primaryHashResolved = true;
-                    const enrichedMap = new Map(enriched.map((e) => [e.relativePath, e]));
-                    replaceWorkspaceIndexedFiles(lightResult.files.map((lf) => enrichedMap.get(lf.relativePath) ?? lf));
-                    indexForSession.setFiles(indexedFiles);
+                    if (isCurrent()) {
+                        const enrichedMap = new Map(enriched.map((e) => [e.relativePath, e]));
+                        replaceWorkspaceIndexedFiles(lightResult.files.map((lf) => enrichedMap.get(lf.relativePath) ?? lf));
+                        indexForSession.setFiles(indexedFiles);
+                    }
                     resolvePrimaryHash();
                 }
             };
@@ -740,8 +811,11 @@ export function createWorkspaceService(input: WorkspaceServiceDeps) {
             try {
                 const activeDatabase = await deps.ensureActiveOperationLog(currentSession);
                 database = activeDatabase;
+                assertIndexCurrent();
                 await cancelAbandonedWorkspaceJobs(activeDatabase);
+                assertIndexCurrent();
                 await activeDatabase.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'running', progress: { current: 0, total: lightResult.files.length, message: '基础资源已可用，正在后台校验内容索引' }, payload: { workspaceSessionId: activeWorkspaceSessionId, workspaceSessionGeneration: thisSessionGeneration, fingerprintStoreGeneration: fingerprintStore.fingerprintStoreGeneration, workspacePersistentIdentityHash }, createdAt: scanStartedAt, startedAt: scanStartedAt, updatedAt: scanStartedAt });
+                assertIndexCurrent();
                 await activeDatabase.replaceFiles(lightResult.files);
                 const { createHash: _createHash } = await import('node:crypto');
                 const { open: _open } = await import('node:fs/promises');
@@ -885,21 +959,25 @@ export function createWorkspaceService(input: WorkspaceServiceDeps) {
                     activeIndex.setFiles(enriched as unknown as IndexedFile[]);
                 }
                 await activeDatabase.replaceFiles(enriched as unknown as IndexedFile[]);
+                assertIndexCurrent();
                 const quickHydrateFiles = (enriched as unknown as IndexedFile[]).filter((f) => f.resourceKind === 'param' || f.resourceKind === 'msg' || f.relativePath.toLowerCase().includes('gameparam.parambnd'));
                 for (const file of quickHydrateFiles) {
                     if (file.sha256) {
                         try {
                             const cached = await activeDatabase.getSemanticFileCache(file.relativePath);
+                            assertIndexCurrent();
                             if (cached && cached.fileSha256 === file.sha256
                                 && isNativeSemanticBundleCurrent(file, cached.payload)) {
                                 loadSymbolBundleIntoIndex(indexForSession, rebaseSymbolBundleToFileRevision(file, cached.payload));
                             }
                         }
                         catch {
+                            assertIndexCurrent();
                             // 忽略单点缓存读取失败
                         }
                     }
                 }
+                assertIndexCurrent();
                 if (indexForSession.getStats().paramRows > 0) {
                     indexForSession.setParamSemanticState('ready');
                 }
@@ -927,6 +1005,7 @@ export function createWorkspaceService(input: WorkspaceServiceDeps) {
                     await saveFingerprintStore({ storageRoot, state: fingerprintStore });
                 }
                 catch { }
+                assertIndexCurrent();
                 const completedAt = new Date().toISOString();
                 const backgroundCompleteAt = Date.now();
                 await activeDatabase.upsertJob({ jobId: scanJobId, title: '扫描工作区', jobKind: 'workspace_scan', status: 'completed', progress: { current: enriched.length, total: enriched.length }, payload: { workspaceSessionId: currentSessionId, workspaceSessionGeneration: currentGeneration, fingerprintStoreGeneration: currentStoreGen }, result: { fileCount: enriched.length, hashedCount, reuseCount, shellVisibleAt, filesVisibleAt, backgroundCompleteAt, shellVisibleMs: filesVisibleAt - shellVisibleAt, indexingMs: backgroundCompleteAt - shellVisibleAt, openHandles: 0, activeDiskReaders: 0, actionBinderIndex }, createdAt: scanStartedAt, startedAt: scanStartedAt, completedAt, updatedAt: completedAt });
@@ -966,38 +1045,24 @@ export function createWorkspaceService(input: WorkspaceServiceDeps) {
         if (!activeSession)
             throw new Error('请先打开工作区。');
         const baseSelection = admitBase();
-        workspaceAnalyzeAbort?.abort();
-        if (workspaceIndexingAbort) {
-            try {
-                workspaceIndexingAbort.abort();
-            }
-            catch { }
-        }
-        if (workspaceIndexingTask) {
-            try {
-                await workspaceIndexingTask;
-            }
-            catch { }
-        }
-        workspacePrimaryIndexingTask = null;
-        resolveWorkspaceSemanticIndexingTask();
         const previousSession = activeSession;
-        activeSession = null;
-        await deps.clearActiveOperationLog();
-        if (previousSession)
-            await disposeBridgeDaemonPool();
-        deps.releaseEditorCaches();
-        clearWorkspaceRagSnapshot();
-        activeIndex?.clearActionBinderMembership();
-        activeIndex = null;
-        replaceWorkspaceIndexedFiles([]);
-        workspaceSessionGenerationCounter += 1;
-        activeWorkspaceSessionGeneration = workspaceSessionGenerationCounter;
-        activeWorkspaceSessionId = randomUUID();
-        activeSession = await openWorkspaceSession({ overlayRoot: previousSession!.layers.overlayRoot, ...(baseSelection ? { baseRoot: baseSelection.absolutePath } : {}), game: previousSession!.meta.game });
-        activateWorkspaceCapabilities();
-        const workspaceLabel = activeOverlayLabel || activeSession.meta.game;
-        return { workspaceSessionId: activeWorkspaceSessionId, session: { workspaceSessionId: activeWorkspaceSessionId, workspaceLabel, game: activeSession.meta.game, openedAt: activeSession.meta.openedAt, baseMounted: !activeSession.meta.baseMissing, ...(baseSelection ? { baseLabel: baseSelection.label } : {}) } };
+        const overlayEpoch = workspaceOverlayEpoch;
+        return serializeWorkspaceMount(async assertCurrent => {
+            // A remount requested for A while a switch to B is queued must not
+            // reopen A after B publishes. Repeated remounts of the same overlay
+            // can still settle in order, with the newest base selection last.
+            if (!activeSession || workspaceOverlayEpoch !== overlayEpoch || activeSession.meta.workspaceId !== previousSession.meta.workspaceId) {
+                throw Object.assign(new Error('工作区已切换，原版目录重挂请求已丢弃。'), {
+                    code: 'WORKSPACE_REMOUNT_SUPERSEDED'
+                });
+            }
+            const result = await mountAdmittedWorkspace({
+                absolutePath: activeSession.layers.overlayRoot,
+                label: activeOverlayLabel || activeSession.meta.game,
+                kind: 'overlay'
+            }, baseSelection ?? null, assertCurrent, baseSelection);
+            return { workspaceSessionId: result.workspaceSessionId, session: result.session };
+        });
     };
     let lastAnalyze: {
         sessionId: string;
@@ -1282,10 +1347,12 @@ export function createWorkspaceService(input: WorkspaceServiceDeps) {
             return summary;
         })();
         workspaceAnalyzeInFlight = { sessionId, generation, promise };
+        pendingWorkspaceAnalyses.add(promise);
         try {
             return await promise;
         }
         finally {
+            pendingWorkspaceAnalyses.delete(promise);
             if (workspaceAnalyzeInFlight?.promise === promise)
                 workspaceAnalyzeInFlight = null;
             if (workspaceAnalyzeAbort === analyzeController)
