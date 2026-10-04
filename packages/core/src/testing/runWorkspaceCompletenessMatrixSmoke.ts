@@ -14,6 +14,7 @@ import { readFmgDocumentViaBridge } from '../editing/fmgBridgeCommit.js';
 import { readMsbDocumentViaBridge } from '../editing/msbBridgeRead.js';
 import { buildScriptContainerEvidence } from '../script/scriptContainerEvidence.js';
 import { scanWorkspace } from '../workspace/scanWorkspace.js';
+import { classifyNativeRead, summarizeNativeReads, verifyFileCoverage, type NativeReadStatus } from '../../../../scripts/native-read-acceptance.mjs';
 import {
   classifyWorkspaceOpen,
   isSemanticOpenKind,
@@ -28,7 +29,7 @@ interface FileResult {
   familyId: string;
   openKind: WorkspaceOpenKind;
   size: number;
-  status: 'opened' | 'opened-list-only' | 'history' | 'blocked-no-parser' | 'blocked-scope' | 'binary' | 'failed' | 'timed-out';
+  status: 'opened' | 'opened-list-only' | 'history' | 'blocked-no-parser' | 'blocked-scope' | 'binary' | 'unavailable' | 'failed' | 'timed-out';
   detail?: string;
 }
 
@@ -67,7 +68,7 @@ async function bridgeRead(
   filePath: string,
   allowedRoots: string[],
   oodleRuntimeRoot: string | undefined
-): Promise<{ ok: boolean; detail: string }> {
+): Promise<{ status: Exclude<NativeReadStatus, 'not_run'>; detail: string }> {
   const result = await runBridge({
     command,
     filePath,
@@ -75,11 +76,10 @@ async function bridgeRead(
     timeoutMs: FILE_TIMEOUT_MS,
     ...(oodleRuntimeRoot ? { oodleRuntimeRoot } : {})
   });
-  const failed = result.parseStatus === 'failed';
-  const first = result.diagnostics[0];
+  const verdict = classifyNativeRead(result);
   return {
-    ok: !failed,
-    detail: first ? `${first.code}: ${first.message}` : (failed ? 'BRIDGE_READ_FAILED' : result.parseStatus)
+    status: verdict.status,
+    detail: `${verdict.code}: ${verdict.message}`
   };
 }
 
@@ -116,9 +116,9 @@ async function probeFile(
         bridgeRead('read-dcx-document', absolutePath, allowedRoots, oodleRuntimeRoot),
         relativePath
       );
-      return listed.ok
+      return listed.status === 'passed'
         ? { ...base, status: 'opened-list-only', detail: listed.detail }
-        : { ...base, status: 'failed', detail: listed.detail };
+        : { ...base, status: listed.status, detail: listed.detail };
     }
 
     if (family.openKind === 'fmg') {
@@ -176,9 +176,9 @@ async function probeFile(
       bridgeRead(command, absolutePath, allowedRoots, oodleRuntimeRoot),
       relativePath
     );
-    return read.ok
+    return read.status === 'passed'
       ? { ...base, status: 'opened', detail: read.detail }
-      : { ...base, status: 'failed', detail: read.detail };
+      : { ...base, status: read.status, detail: read.detail };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (message.startsWith('TIMEOUT:')) {
@@ -192,8 +192,7 @@ async function main(): Promise<void> {
   const workspaceRoot = resolveWorkspaceRoot();
   if (workspaceRoot === null || !existsSync(workspaceRoot)) {
     console.log(JSON.stringify({
-      ok: null,
-      status: 'skipped',
+      ...summarizeNativeReads([{ family: 'native corpus', status: 'not_run' }]),
       smoke: 'workspace-completeness',
       reason: 'NATIVE_CORPUS_UNAVAILABLE',
       message: '本机 Mod 工作区不存在，跳过完成度矩阵。',
@@ -206,8 +205,7 @@ async function main(): Promise<void> {
   const files = scan.files.filter((file) => !skipIndexedPath(file.relativePath));
   if (files.length === 0) {
     console.log(JSON.stringify({
-      ok: null,
-      status: 'skipped',
+      ...summarizeNativeReads([{ family: 'native corpus', status: 'not_run' }]),
       smoke: 'workspace-completeness',
       reason: 'NATIVE_CORPUS_EMPTY',
       workspaceRoot
@@ -229,7 +227,7 @@ async function main(): Promise<void> {
 
   const failed = results.filter((item) => item.status === 'failed' || item.status === 'timed-out');
   const semanticFailed = failed.filter((item) => isSemanticOpenKind(item.openKind));
-  const byFamily = new Map<string, { familyId: string; openKind: WorkspaceOpenKind; total: number; opened: number; failed: number; blocked: number }>();
+  const byFamily = new Map<string, { familyId: string; openKind: WorkspaceOpenKind; total: number; opened: number; failed: number; blocked: number; unavailable: number }>();
   for (const item of results) {
     const current = byFamily.get(item.familyId) ?? {
       familyId: item.familyId,
@@ -237,29 +235,46 @@ async function main(): Promise<void> {
       total: 0,
       opened: 0,
       failed: 0,
-      blocked: 0
+      blocked: 0,
+      unavailable: 0
     };
     current.total += 1;
     if (item.status === 'opened' || item.status === 'opened-list-only') current.opened += 1;
     if (item.status === 'failed' || item.status === 'timed-out') current.failed += 1;
     if (item.status === 'blocked-no-parser' || item.status === 'blocked-scope') current.blocked += 1;
+    if (item.status === 'unavailable') current.unavailable += 1;
     byFamily.set(item.familyId, current);
   }
 
+  const coverage = verifyFileCoverage(files.map((file) => file.relativePath), results.map((item) => item.relativePath));
+  const acceptanceRows: Array<{ relativePath: string; status: NativeReadStatus }> = results
+    .filter((item) => item.status !== 'history' && item.status !== 'binary')
+    .map((item) => ({ relativePath: item.relativePath,
+      status: item.status === 'opened' || item.status === 'opened-list-only' ? 'passed'
+        : item.status === 'failed' || item.status === 'timed-out' ? 'failed' : 'unavailable' }));
+  const acceptance = summarizeNativeReads([
+    ...acceptanceRows,
+    ...(!coverage.ok ? [{ relativePath: 'input-output coverage', status: 'failed' as const }] : [])
+  ]);
   const summary = {
-    ok: semanticFailed.length === 0,
+    ...acceptance,
     smoke: 'workspace-completeness',
     workspaceRoot,
     scanned: results.length,
+    coverage,
     opened: results.filter((item) => item.status === 'opened' || item.status === 'opened-list-only').length,
-    failed: semanticFailed,
+    failed,
+    semanticFailed,
     blocked: results.filter((item) => item.status === 'blocked-no-parser' || item.status === 'blocked-scope'),
+    unavailable: results.filter((item) => item.status === 'unavailable'),
     history: results.filter((item) => item.status === 'history').length,
+    binary: results.filter((item) => item.status === 'binary').length,
+    results,
     byFamily: [...byFamily.values()].sort((left, right) => right.total - left.total)
   };
   console.log(JSON.stringify(summary, null, 2));
-  if (semanticFailed.length > 0) {
-    throw new Error(`工作区完成度矩阵：${semanticFailed.length} 个语义文件打开失败。`);
+  if (acceptance.status === 'failed') {
+    throw new Error(`工作区完成度矩阵：${failed.length} 个文件打开失败；输入输出覆盖 ${coverage.ok ? '一致' : '不一致'}。`);
   }
 }
 

@@ -1,12 +1,10 @@
-import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { readFile, readdir } from 'node:fs/promises';
+import { createReadStream, existsSync } from 'node:fs';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { cpus } from 'node:os';
 import { extname, join, resolve } from 'node:path';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
+import { createBridgeDaemonScope } from '../packages/core/dist/bridge/runBridge.js';
+import { classifyDcxRead, collectNativeReads, summarizeNativeReads, verifyFileCoverage } from './native-read-acceptance.mjs';
 
 /**
  * 语料根解析。
@@ -42,7 +40,6 @@ const root = (() => {
   const modsUnder = join(base, 'mods');
   return existsSync(modsUnder) ? modsUnder : base;
 })();
-const executable = resolve('bridge/SoulForge.Bridge/bin/Debug/net10.0/win-x64/SoulForge.Bridge.exe');
 
 // frozen schema 对账：Bridge data.variant 输出必须属于 observedVariant 闭集
 // 按 `DCX_` 前缀约定推导出的信封变体集合。schema 是机器可读权威，脚本不复制
@@ -76,8 +73,7 @@ const unrecognizedVariants = new Set();
 // 硬约束 7 要求区分的两种状态。同 runRealModOpenSmoke 的处置口径。
 if (!existsSync(root)) {
   console.log(JSON.stringify({
-    ok: null,
-    status: 'skipped',
+    ...summarizeNativeReads([{ family: 'native corpus', status: 'not_run' }]),
     gate: 'native-dcx-documents',
     reason: `本机 native 语料根不存在：${root}`,
     remedy: 'npm run bridge:verify:dcx-documents -- <语料目录>，或设置 SOULFORGE_NATIVE_FIXTURE_ROOT',
@@ -89,135 +85,111 @@ if (!existsSync(root)) {
 const files = (await walk(root)).filter((path) => extname(path).toLowerCase() === '.dcx');
 const variants = new Map();
 const failures = [];
+const rows = [];
+const processed = [];
+const readOnlyCaches = [];
 let dfltVerified = 0;
-let krakBlocked = 0;
 let krakReadVerified = 0;
 let nestedBnd4Verified = 0;
 let nestedBnd4Entries = 0;
 let krakNestedBnd4Verified = 0;
 let krakNestedBnd4Entries = 0;
-/**
- * 并发度。
- *
- * 为什么必须并发：本脚本对语料根下**每个** .dcx 各 spawn 一次 Bridge。
- * 实测本机语料根是整个游戏目录，8065 个 .dcx，串行耗时 **1264 秒（21 分钟）**
- * ——而 scripts/verify.mjs 的 DEFAULT_TIMEOUT_MS 是 900 秒。也就是说这条套件
- * 经 verify 调度时**必然被判超时失败**，只有直接 npm run 才跑得完。
- * 一条只能绕过调度器才能跑的验证，等于不在验证体系里。
- *
- * 为什么并发是安全的：每次调用都是独立进程、纯只读解析（read-dcx-document），
- * 不写盘、不共享状态，累加全部发生在 await 之后的主循环里，因此结果与串行一致。
- *
- * 取 CPU 核数但夹在 [2,8]：上限压住是因为每个 Bridge 进程会解压 payload，
- * 内存与磁盘 I/O 都不便宜；下限保证单核机器也不退化成串行。
- * 可用 SOULFORGE_DCX_CONCURRENCY 覆盖（排查时设 1 可还原串行行为）。
- */
+// 保留原并发配置；生产 daemon 自身的并发边界不在此提高。
 const CONCURRENCY = (() => {
   const raw = Number.parseInt(process.env.SOULFORGE_DCX_CONCURRENCY ?? '', 10);
   if (Number.isInteger(raw) && raw > 0) return raw;
   return Math.min(8, Math.max(2, cpus().length));
 })();
 
-/** 读一个文件，返回 { file, stdout } 或 { file, error }。不做任何累加。 */
+const bridge = createBridgeDaemonScope();
+const oodleRuntimeRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() || undefined;
+async function sha256(file) {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(file)) hash.update(chunk);
+  return hash.digest('hex');
+}
+
+/** 使用生产 executable 选择、daemon 与 file-backed artifact 传输，不经 CLI stdout 缓冲。 */
 async function readOne(file) {
   try {
-    const { stdout } = await execFileAsync(executable, ['read-dcx-document', file], {
-      windowsHide: true,
-      maxBuffer: 8 * 1024 * 1024,
-      timeout: 60_000
+    const sourceSize = (await stat(file)).size;
+    // 只读大包分支必须绑定调用前独立观察的源版本，不能拿返回值充当 expected。
+    const sourceHash = sourceSize > 64 * 1024 * 1024 ? await sha256(file) : undefined;
+    const result = await bridge.run({
+      command: 'read-dcx-document', filePath: file, allowedRoots: [root], timeoutMs: 60_000,
+      ...(oodleRuntimeRoot ? { oodleRuntimeRoot } : {})
     });
-    return { file, stdout };
+    const sourceUnchanged = sourceHash !== undefined ? sourceHash === await sha256(file) : undefined;
+    return { file, result, context: { file, sourceHash, sourceSize, sourceUnchanged, variants: bridgeEnvelopeVariants } };
   } catch (error) {
     return { file, error };
   }
 }
 
-/** 定容并发池：始终保持 CONCURRENCY 个在飞，按完成顺序产出。 */
-async function* readConcurrently(paths, limit) {
-  const queue = [...paths];
-  const inFlight = new Set();
-  const start = () => {
-    const next = queue.shift();
-    if (next === undefined) return;
-    const p = readOne(next).then((value) => {
-      inFlight.delete(p);
-      return value;
-    });
-    inFlight.add(p);
-  };
-  for (let i = 0; i < limit; i += 1) start();
-  while (inFlight.size > 0) {
-    const done = await Promise.race(inFlight);
-    start();
-    yield done;
-  }
-}
-
-for await (const outcome of readConcurrently(files, CONCURRENCY)) {
-  const file = outcome.file;
-  try {
-    if (outcome.error !== undefined) throw outcome.error;
-    const { stdout } = outcome;
-    const result = JSON.parse(stdout);
-    const data = result.data;
-    if (data?.compressionFormat === 'DFLT' && data.roundTrip?.payloadIdentical === true
-      && data.roundTrip?.variantIdentical === true) {
-      if (!recognizeVariant(data, file)) continue;
-      dfltVerified += 1;
-      variants.set(data.variant, (variants.get(data.variant) ?? 0) + 1);
-      if (data.nested?.format === 'BND4' && data.nested?.roundTrip?.entriesIdentical === true) {
-        if (data.nested?.crud?.allPassed !== true || data.nestedDcxRebuildVerified !== true) {
-          failures.push({ file: relative(file), code: 'BND4_CRUD_ROUNDTRIP_FAILED' });
-          continue;
-        }
-        nestedBnd4Verified += 1;
-        nestedBnd4Entries += data.nested.entryCount;
+try {
+  for await (const outcome of collectNativeReads(files, CONCURRENCY, readOne)) {
+    const file = outcome.file;
+    processed.push(file);
+    try {
+      if (outcome.error !== undefined) throw outcome.error;
+      const verdict = classifyDcxRead(outcome.result, outcome.context);
+      rows.push({ file: relative(file), ...verdict });
+      if (verdict.status === 'failed') {
+        failures.push({ sample: redact(file), code: verdict.code });
+        if (verdict.code === 'UNRECOGNIZED_BRIDGE_VARIANT') unrecognizedVariants.add(outcome.result.data?.variant ?? '<missing>');
+        continue;
       }
-    } else if (data?.compressionFormat === 'KRAK'
-      && typeof data.payloadHash === 'string'
-      && /^[a-f0-9]{64}$/u.test(data.payloadHash)) {
-      if (!recognizeVariant(data, file)) continue;
-      krakReadVerified += 1;
-      variants.set(data.variant, (variants.get(data.variant) ?? 0) + 1);
-      if (data.nested?.format === 'BND4') {
-        const fieldPreservation = data.nested.fieldPreservation;
-        if (data.nested?.crud?.allPassed !== true
-          || !fieldPreservation
-          || fieldPreservation.headerUnknownBytesPreserved !== true
-          || fieldPreservation.entryHeaderFieldsPreserved !== true
-          || fieldPreservation.storedBytesPreserved !== true) {
-          failures.push({ file: relative(file), code: 'KRAK_BND4_PRESERVATION_OR_CRUD_FAILED' });
-          continue;
-        }
-        krakNestedBnd4Verified += 1;
-        krakNestedBnd4Entries += data.nested.entryCount;
+      if (verdict.status !== 'passed') continue;
+      const data = outcome.result.data;
+      if (verdict.kind === 'read-only-cache') {
+        readOnlyCaches.push({ file: relative(file), sourceHash: outcome.context.sourceHash,
+          entryCount: verdict.entryCount, readOnly: true, containerWriteSupported: false, outerRoundTripVerified: false });
+        continue;
       }
-    } else failures.push({ sample: redact(file), code: result.diagnostics?.[0]?.code ?? 'UNEXPECTED_RESULT' });
-  } catch (error) {
-    const stdout = error && typeof error === 'object' && 'stdout' in error ? String(error.stdout) : '';
-    let result;
-    try { result = JSON.parse(stdout); } catch { result = undefined; }
-    const message = result?.diagnostics?.[0]?.message ?? String(error);
-    if (/Oodle|KRAK|运行库/.test(message)) krakBlocked += 1;
-    else failures.push({ sample: redact(file), code: result?.diagnostics?.[0]?.code ?? 'PROCESS_FAILED' });
+      variants.set(data.variant, (variants.get(data.variant) ?? 0) + 1);
+      if (verdict.kind === 'dflt-roundtrip') {
+        dfltVerified += 1;
+        if (data.nested?.format === 'BND4' && data.nested?.roundTrip?.entriesIdentical === true) {
+          nestedBnd4Verified += 1;
+          nestedBnd4Entries += data.nested.entryCount;
+        }
+      } else if (verdict.kind === 'krak-native-read') {
+        krakReadVerified += 1;
+        if (data.nested?.format === 'BND4') {
+          krakNestedBnd4Verified += 1;
+          krakNestedBnd4Entries += data.nested.entryCount;
+        }
+      }
+    } catch (error) {
+      rows.push({ file: relative(file), status: 'failed', code: 'PROCESS_FAILED' });
+      failures.push({ sample: redact(file), code: 'PROCESS_FAILED', message: String(error).slice(0, 300) });
+    }
   }
+} finally {
+  await bridge.dispose();
 }
-if (dfltVerified === 0 || failures.length > 0) {
-  console.error(JSON.stringify({ ok: false, files: files.length, concurrency: CONCURRENCY, dfltVerified, krakReadVerified, krakBlocked, krakNestedBnd4Verified, krakNestedBnd4Entries, variants: Object.fromEntries(variants), unrecognizedVariants: [...unrecognizedVariants], failures }, null, 2));
-  process.exitCode = 1;
-} else {
-  console.log(JSON.stringify({
-    ok: true,
-    message: '真实 DCX 文档完整读取与 DFLT payload roundtrip 验证通过',
+const coverage = verifyFileCoverage(files.map(relative), processed.map(relative));
+const roundTripCoverage = { family: 'DFLT payload roundtrip', status: dfltVerified > 0 ? 'passed' : 'not_run', verifiedFiles: dfltVerified };
+const summary = summarizeNativeReads([
+  ...rows,
+  ...(dfltVerified === 0 ? [roundTripCoverage] : []),
+  ...(!coverage.ok ? [{ family: 'input-output coverage', status: 'failed' }] : [])
+]);
+console.log(JSON.stringify({
+    ...summary,
+    gate: 'native-dcx-documents',
+    message: 'DFLT 往返、KRAK 原生读取与大包只读缓存分别记账；只读缓存不证明外容器可写。',
     files: files.length,
+    coverage,
+    roundTripCoverage,
     concurrency: CONCURRENCY,
     dfltVerified,
     krakReadVerified,
-    krakBlocked,
     krakNestedBnd4Verified,
     krakNestedBnd4Entries,
     nestedBnd4Verified,
     nestedBnd4Entries,
+    readOnlyCaches,
     variants: Object.fromEntries([...variants].sort()),
     reconciliation: {
       observedVariants: [...variants.keys()].sort(),
@@ -225,26 +197,10 @@ if (dfltVerified === 0 || failures.length > 0) {
       unrecognizedVariants: [...unrecognizedVariants],
       frozenEnvelopeVariants: [...bridgeEnvelopeVariants].sort()
     },
-    failures
+    failures,
+    rows
   }, null, 2));
-}
-
-/**
- * 对账门禁：Bridge `data.variant` 必须属于 frozen schema 推导的信封变体闭集。
- * 未识别变体以 UNRECOGNIZED_BRIDGE_VARIANT 失败关闭，不计为 verified。
- */
-function recognizeVariant(data, file) {
-  if (typeof data.variant !== 'string' || !bridgeEnvelopeVariants.has(data.variant)) {
-    unrecognizedVariants.add(data.variant ?? '<missing>');
-    failures.push({
-      file: relative(file),
-      code: 'UNRECOGNIZED_BRIDGE_VARIANT',
-      variant: data.variant ?? '<missing>'
-    });
-    return false;
-  }
-  return true;
-}
+if (summary.status === 'failed') process.exitCode = 1;
 
 async function walk(directory) {
   const output = [];
