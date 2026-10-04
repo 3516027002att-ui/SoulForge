@@ -82,6 +82,8 @@ const SHA256_DIGEST = /^sha256:[a-f0-9]{64}$/;
 const IMMUTABLE_REVISION = /^(?:git:(?:[a-f0-9]{40}|[a-f0-9]{64})|sha256:[a-f0-9]{64})$/;
 const STABLE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}$/;
 const MATCH_TEXT = /^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$/;
+// Only exact package objects returned by successful validation enter this identity cache.
+const validatedPackageResults = new WeakMap<ParamMetadataPackage, ParamMetadataPackageValidation>();
 const SPDX_LICENSE_ID = /^[A-Za-z0-9][A-Za-z0-9.-]*\+?$/;
 const SPDX_LICENSE_REF = /^LicenseRef-[A-Za-z0-9][A-Za-z0-9.-]*$/;
 const SPDX_DOCUMENT_LICENSE_REF = /^DocumentRef-[A-Za-z0-9][A-Za-z0-9.-]*:LicenseRef-[A-Za-z0-9][A-Za-z0-9.-]*$/;
@@ -172,6 +174,11 @@ export function computeParamMetadataPackageDigest(
 }
 
 export function validateParamMetadataPackage(input: unknown): ParamMetadataPackageValidation {
+  if (input !== null && typeof input === 'object') {
+    const cached = validatedPackageResults.get(input as ParamMetadataPackage);
+    if (cached) return cached;
+  }
+
   const snapshot = snapshotUntrustedInput(
     input,
     'PARAM_METADATA_PACKAGE_SNAPSHOT_FAILED',
@@ -234,13 +241,15 @@ export function validateParamMetadataPackage(input: unknown): ParamMetadataPacka
   }
 
   if (diagnostics.length > 0) return rejectedPackage(diagnostics);
-  return deepFreeze({
+  const validation: ParamMetadataPackageValidation = deepFreeze({
     ok: true,
     status: 'schema-valid',
     nativeFormatAuthority: false,
     package: packageInput as unknown as ParamMetadataPackage,
     diagnostics: []
   });
+  if (validation.ok) validatedPackageResults.set(validation.package, validation);
+  return validation;
 }
 
 /** A width hint for native parsing, not a native-read receipt or write authority. */
