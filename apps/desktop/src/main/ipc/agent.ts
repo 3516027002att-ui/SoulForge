@@ -96,9 +96,15 @@ function stoppedAgentResult(): { ok: false; error: { code: string; message: stri
 
 function ownAgentRequest<T>(operation: () => Promise<T>, cancelled: () => T): Promise<T> {
   if (agentIpcStopped) return Promise.resolve(cancelled());
-  const work = Promise.resolve().then(() => agentIpcStopped ? cancelled() : operation());
+  let resolveWork!: (value: T | PromiseLike<T>) => void;
+  let rejectWork!: (reason: unknown) => void;
+  const work = new Promise<T>((resolve, reject) => { resolveWork = resolve; rejectWork = reject; });
   pendingAgentRequests.add(work);
   void work.then(() => pendingAgentRequests.delete(work), () => pendingAgentRequests.delete(work));
+  // Register before entering a reentrant port, but keep the original synchronous
+  // workspace/session capture rather than deferring admission to a microtask.
+  try { resolveWork(operation()); }
+  catch (error) { rejectWork(error); }
   return work;
 }
 
