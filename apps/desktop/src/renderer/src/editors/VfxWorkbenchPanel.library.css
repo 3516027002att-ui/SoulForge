@@ -1,0 +1,4 @@
+
+/* S24：ffxbnd 效果库的 .fxr 子项列表（文件条目下缩进展开）。 */
+.vfx-entries { padding-left: 14px; border-left: 2px solid var(--line); margin-left: 10px; }
+.vfx-entries .wb-row--child { font-size: 11px; }

@@ -6,8 +6,9 @@
  * Electron userData, never at the Mod workspace (hard constraint 3).
  */
 
-import { appendFile, mkdir, readFile, readdir, stat } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { isPathInside } from '../workspace/pathBoundary.js';
 import type { RolloutStorage } from './rolloutRecorder.js';
 import { parseRolloutLines, type ResumedRollout } from './rolloutRecorder.js';
 
@@ -85,10 +86,19 @@ export async function listRolloutSessions(
   limit = 50
 ): Promise<RolloutSessionSummary[]> {
   const root = join(baseDir, 'sessions');
-  const files: Array<{ path: string; fileName: string; sizeBytes: number; modifiedAt: string }> = [];
+  const files: Array<{ path: string; physicalPath: string; fileName: string; sizeBytes: number; modifiedAt: string }> = [];
+  let physicalBase: string;
+  const checkedPath = async (candidate: string): Promise<string> => {
+    const physicalPath = await realpath(candidate);
+    if (!isPathInside(physicalBase, physicalPath)) {
+      throw Object.assign(new Error('Rollout path must stay inside the sessions directory.'), { code: 'ROLLOUT_PATH_FORBIDDEN' });
+    }
+    return physicalPath;
+  };
   let yearDirs: string[] = [];
   try {
-    yearDirs = await readdir(root);
+    physicalBase = await realpath(baseDir);
+    yearDirs = await readdir(await checkedPath(root));
   } catch {
     return [];
   }
@@ -96,7 +106,7 @@ export async function listRolloutSessions(
     const yearPath = join(root, year);
     let monthDirs: string[] = [];
     try {
-      monthDirs = await readdir(yearPath);
+      monthDirs = await readdir(await checkedPath(yearPath));
     } catch {
       continue;
     }
@@ -104,7 +114,7 @@ export async function listRolloutSessions(
       const monthPath = join(yearPath, month);
       let dayDirs: string[] = [];
       try {
-        dayDirs = await readdir(monthPath);
+        dayDirs = await readdir(await checkedPath(monthPath));
       } catch {
         continue;
       }
@@ -112,7 +122,7 @@ export async function listRolloutSessions(
         const dayPath = join(monthPath, day);
         let entries: string[] = [];
         try {
-          entries = await readdir(dayPath);
+          entries = await readdir(await checkedPath(dayPath));
         } catch {
           continue;
         }
@@ -120,9 +130,12 @@ export async function listRolloutSessions(
           if (!entry.endsWith('.jsonl')) continue;
           const filePath = join(dayPath, entry);
           try {
-            const info = await stat(filePath);
+            const physicalPath = await checkedPath(filePath);
+            const info = await stat(physicalPath);
+            if (!info.isFile()) continue;
             files.push({
               path: filePath,
+              physicalPath,
               fileName: entry,
               sizeBytes: info.size,
               modifiedAt: new Date(info.mtimeMs).toISOString()
@@ -138,7 +151,9 @@ export async function listRolloutSessions(
   const summaries: RolloutSessionSummary[] = [];
   for (const file of files.slice(0, limit)) {
     try {
-      const storage = new FileRolloutStorage(file.path);
+      // Keep the lexical path for UI compatibility; read the checked target
+      // so a directory alias cannot redirect a later summary read.
+      const storage = new FileRolloutStorage(await checkedPath(file.physicalPath));
       const lines = await storage.readLines();
       const resumed = parseRolloutLines(lines);
       summaries.push({

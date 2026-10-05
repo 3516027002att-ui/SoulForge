@@ -1,0 +1,34 @@
+
+/* MODEL-51B：FLVER 三栏模型工作台（模型层级 | Viewport | Properties），
+   与 MSB 工作台同族：树栈分组行/属性行复用 binder-child-row 表格骨架，只覆盖列模板。 */
+.flver-tree-list { display: flex; flex-direction: column; gap: 6px; }
+.flver-tree-group {
+  border: 0; border-bottom: 1px solid var(--line);
+  border-radius: 0; background: transparent;
+}
+.flver-tree-group__summary {
+  cursor: pointer; padding: 6px 10px; color: var(--ink-1);
+  font-size: 12px; font-weight: 600; user-select: none;
+  transition: background var(--dur-micro);
+}
+.flver-tree-group__summary:hover { background: var(--forge-hover); }
+.flver-tree-group__empty { padding: 4px 10px; font-size: 12px; }
+/* 树栈行：单列标签 + 计数（覆盖 binder-child-row 的六列默认模板） */
+.flver-tree-row {
+  grid-template-columns: minmax(120px, 1fr) auto;
+  min-width: 150px;
+}
+.flver-tree-row span:nth-child(2) { text-align: right; }
+/* 属性行：Name / Value 两列 */
+.flver-property-row {
+  grid-template-columns: 120px minmax(120px, 1fr);
+  min-width: 260px;
+}
+.flver-viewport { display: flex; flex-direction: column; gap: 8px; }
+.flver-viewport .flver-partial {
+  border: 1px dashed var(--warn); border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  padding: 6px 10px; font-size: 12px;
+}
+.flver-partial summary { cursor: pointer; color: var(--ink-2); font-weight: 600; }
+.flver-partial ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }

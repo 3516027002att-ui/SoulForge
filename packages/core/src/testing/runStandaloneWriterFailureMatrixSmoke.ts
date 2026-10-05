@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * Native EMEVD/MSB standalone writer failure matrix.
  *
@@ -9,7 +10,7 @@
  *
  * Authority cap: partial; only covers actual tested writers.
  */
-import { copyFile, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {

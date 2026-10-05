@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { CharacterPreviewBundle, FlverPreviewBone } from '@soulforge/shared';
+import type { CharacterPreviewBundle, FlverPreviewBone, FlverPreviewVertexColorDiagnostic } from '@soulforge/shared';
 import {
   buildBundleSemanticScene,
+  buildSemanticScene,
   createFlverSkeletonErrorState,
   describeFlverSkeletonLoadState,
-  resolveFlverSkeletonLoadState
+  resolveFlverSkeletonLoadState,
+  toMeshData
 } from './FlverViewer.js';
 
 function float32Base64(values: readonly number[]): string {
@@ -32,6 +34,110 @@ const leaderBone: FlverPreviewBone = {
   scale: [1, 1, 1],
   rotationOrder: 'XZY'
 };
+
+function vertexColorBundle(
+  diagnostics: FlverPreviewVertexColorDiagnostic[],
+  status: 'decoded' | 'unsupported' | 'truncated' = 'decoded'
+): CharacterPreviewBundle {
+  return {
+    meshCount: 1, vertexCount: 1, boneCount: 0, leaderModelId: 'color-model',
+    models: [{
+      modelId: 'color-model',
+      entry: { index: 0, id: 1, name: 'colors.flver', duplicateOrdinal: 0, contentHash: 'color-hash' },
+      meshCount: 1, boneCount: 0, bones: [],
+      meshes: [{
+        meshIndex: 0, vertexCount: 1, indexSize: 16,
+        positionsBase64: float32Base64([0, 0, 0]), indicesBase64: '',
+        skinningMode: 'static', boneIndexSpace: 'none',
+        vertexColorStatus: status,
+        vertexColorFailure: status === 'decoded' ? undefined : 'native member unavailable',
+        vertexColorDiagnostics: diagnostics
+      }]
+    }]
+  };
+}
+
+function colorDiagnostic(values: number[], memberOrdinal = 0): FlverPreviewVertexColorDiagnostic {
+  return {
+    memberOrdinal, memberIndex: 7 + memberOrdinal, layoutType: 3, layoutTypeName: 'Float4',
+    vertexBufferIndex: 2, bufferLayoutIndex: 4, structOffset: 12 + memberOrdinal * 16,
+    rgbaBase64: float32Base64(values)
+  };
+}
+
+describe('FLVER native vertex color evidence', () => {
+  it('preserves the same evidence through the external and readFlverMesh wire converter', () => {
+    const bundle = vertexColorBundle([colorDiagnostic([-2, 3, 0.25, 1.5]), colorDiagnostic([4, -1, 0.5, -0.25], 1)]);
+    const source = bundle.models[0]!.meshes[0]!;
+    source.vertexAlphaBase64 = float32Base64([1.5]);
+    source.positionStatus = 'decoded';
+    source.positionDiagnostics = [{ memberOrdinal: 0, memberIndex: 1, layoutType: 2, layoutTypeName: 'Float3', vertexBufferIndex: 2, bufferLayoutIndex: 4, structOffset: 0, xyzBase64: float32Base64([4, -2, 7]) }];
+    source.normalStatus = 'unsupported';
+    source.normalFailure = 'unverified layout';
+    source.normalDiagnostics = [];
+    source.tangentStatus = 'decoded';
+    source.tangentDiagnostics = [{
+      memberOrdinal: 0, memberIndex: 2, layoutType: 26, layoutTypeName: 'Short4Norm',
+      vertexBufferIndex: 1, bufferLayoutIndex: 3, structOffset: 24,
+      xyzwBase64: float32Base64([-1, 0, 1, -1])
+    }];
+    source.bitangentStatus = 'unsupported';
+    source.bitangentFailure = 'native unsupported layout';
+    source.bitangentDiagnostics = [];
+    const wireScene = buildSemanticScene({
+      meshes: [toMeshData(source)], skeleton: [], dummies: [], texture: null
+    });
+    const bundleScene = buildBundleSemanticScene(bundle);
+    for (const key of ['positionStatus', 'positionDiagnostics', 'normalStatus', 'normalFailure', 'normalDiagnostics', 'vertexColorStatus', 'vertexColorDiagnostics', 'vertexAlpha', 'tangentStatus', 'tangentDiagnostics', 'bitangentStatus', 'bitangentFailure', 'bitangentDiagnostics'] as const) {
+      assert.deepEqual(wireScene.meshes[0]?.[key], bundleScene.meshes[0]?.[key]);
+    }
+    assert.deepEqual([...wireScene.meshes[0]!.vertexAlpha!], [1.5]);
+  });
+
+  it('preserves every RGBA set and native member identity without clamping Float4 values', () => {
+    const diagnostics = [colorDiagnostic([-2, 3, 0.25, 1.5]), colorDiagnostic([4, -1, 0.5, -0.25], 1)];
+    const scene = buildBundleSemanticScene(vertexColorBundle(diagnostics));
+    const mesh = scene.meshes[0] as unknown as {
+      vertexColorStatus?: string;
+      vertexColorDiagnostics?: Array<Omit<FlverPreviewVertexColorDiagnostic, 'rgbaBase64'> & { rgba: Float32Array }>;
+    };
+    assert.equal(mesh.vertexColorStatus, 'decoded');
+    assert.equal(mesh.vertexColorDiagnostics?.length, 2);
+    diagnostics.forEach(({ rgbaBase64: _rgbaBase64, ...metadata }, index) => {
+      const { rgba, ...actualMetadata } = mesh.vertexColorDiagnostics![index]!;
+      assert.deepEqual(actualMetadata, metadata);
+      assert.deepEqual([...rgba], index === 0 ? [-2, 3, 0.25, 1.5] : [4, -1, 0.5, -0.25]);
+    });
+    assert.equal(Object.hasOwn(scene.meshes[0]!, 'vertexColors'), false);
+  });
+
+  it('retains unsupported and truncated source evidence rather than reporting absence', () => {
+    for (const status of ['unsupported', 'truncated'] as const) {
+      const mesh = buildBundleSemanticScene(vertexColorBundle([], status)).meshes[0] as unknown as {
+        vertexColorStatus?: string; vertexColorFailure?: string; vertexColorDiagnostics?: unknown[];
+      };
+      assert.equal(mesh.vertexColorStatus, status);
+      assert.equal(mesh.vertexColorFailure, 'native member unavailable');
+      assert.deepEqual(mesh.vertexColorDiagnostics, []);
+    }
+  });
+
+  it('rejects incomplete and nonfinite RGBA payloads', () => {
+    for (const values of [[0, 1, 2], [0, 1, 2, 3, 4], [0, NaN, 0, 1], [0, 1, Infinity, 1]]) {
+      assert.throws(
+        () => buildBundleSemanticScene(vertexColorBundle([colorDiagnostic(values)])),
+        /FLVER_ATTRIBUTE_(LENGTH_MISMATCH|NONFINITE)/
+      );
+    }
+  });
+
+  it('rejects malformed RGBA in the single-mesh adapter as well', () => {
+    const source = vertexColorBundle([colorDiagnostic([0, 1, 2])]).models[0]!.meshes[0]!;
+    assert.throws(() => buildSemanticScene({
+      meshes: [toMeshData(source)], skeleton: [], dummies: [], texture: null
+    }), /FLVER_ATTRIBUTE_LENGTH_MISMATCH/);
+  });
+});
 
 describe('FLVER skeleton IPC load state', () => {
   it('Bridge 失败保留结构化诊断并显示 code/message', () => {

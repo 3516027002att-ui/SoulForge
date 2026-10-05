@@ -1,0 +1,20 @@
+
+/* TEXTURE-52B：Texture 工作台 Viewer 栏。预览是受界 data URI，必须能在一栏里
+   完整放下又不撑破布局；失败诊断复用 wb-empty/diag-error。 */
+.tpf-viewer { display: flex; flex-direction: column; min-width: 0; }
+.tpf-viewer__image {
+  display: block; max-width: 100%; height: auto; align-self: flex-start;
+  margin: 8px 10px; border: 1px solid var(--line); background: repeating-conic-gradient(
+    var(--forge-2) 0% 25%, var(--forge-3) 0% 50%) 0 0 / 16px 16px;
+  user-select: none;
+}
+
+/* ══════════ 格式写回控件（TEXTURE-52C / VFX-54C / ANIMATION-56C）══════════
+   控件本身复用 .wb-prop / .btn / .wb-empty 布局，这里只补各写回区的专属形态：
+   TPF 纹理替换入口的源选择列、VFX 值编辑行内联的「写回」按钮、TAE 事件编辑区
+   的纵向节奏。无 DDS 源时 TPF 区整体保持可读的禁用态。 */
+.tpf-replace { display: flex; flex-direction: column; gap: 6px; padding: 2px 10px 10px; }
+.tpf-replace__label { font-size: 11px; color: var(--ink-2); }
+.tpf-replace__select { min-width: 0; }
+.tpf-replace__submit { align-self: flex-start; }
+.tpf-replace__ok { color: var(--ink-2); }

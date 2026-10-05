@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { EventExport, IndexedFile } from '@soulforge/shared';
 import { WorkspaceIndex } from './workspaceIndex.js';
+import { assertCursorPrivacy } from '../testing/harness/assertCursorPrivacy.js';
+import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
 
 function file(
   sourceUri: string,
@@ -72,7 +74,8 @@ describe('WorkspaceIndex identity and resource search boundaries', () => {
   });
 
   it('resource search excludes recovery files by default and exposes an opaque, query-bound page cursor', () => {
-    const index = new WorkspaceIndex('fixture');
+    const workspaceId = 'file:///home/alice/private-mod-workspace';
+    const index = new WorkspaceIndex(workspaceId);
     index.setFiles([
       file('file:///event/a.emevd.dcx', 'event/a.emevd.dcx', 'event'),
       file('file:///event/b.emevd.dcx', 'event/b.emevd.dcx', 'event'),
@@ -88,6 +91,13 @@ describe('WorkspaceIndex identity and resource search boundaries', () => {
     assert.equal(first.truncated, true);
     assert.ok(first.nextCursor);
     const firstCursor = first.nextCursor;
+    assert.ok(assertCursorPrivacy(first, [workspaceId, '/home/alice', 'private-mod-workspace']) >= 2);
+    const legacy = createOpaqueCursor({ ...parseOpaqueCursor(firstCursor), sessionId: 'workspace-resource-search-v1',
+      scope: JSON.stringify({ workspaceId, query: '', kinds: [], limit: 2, sourceFilter: 'active' }) });
+    assert.deepEqual(index.searchResourcesPage({ cursor: legacy }).items, index.searchResourcesPage({ cursor: firstCursor }).items);
+    const migrated = index.searchResourcesPage({ cursor: createOpaqueCursor({ ...parseOpaqueCursor(legacy), offset: 0 }) });
+    assert.deepEqual(migrated.items, first.items);
+    assert.ok(assertCursorPrivacy(migrated, [workspaceId, 'private-mod-workspace']) >= 2);
     assert.equal(first.nextActions[0]?.args.cursor, firstCursor);
     assert.ok(first.items.every((item) => !item.item.relativePath.endsWith('.bak')));
 
@@ -112,12 +122,18 @@ describe('WorkspaceIndex identity and resource search boundaries', () => {
       () => otherWorkspace.searchResourcesPage({ cursor: firstCursor }),
       (error: unknown) => (error as { code?: string }).code === 'RESOURCE_SEARCH_CURSOR_SCOPE_MISMATCH'
     );
+    assert.throws(() => otherWorkspace.searchResourcesPage({ cursor: legacy }), (error: unknown) => {
+      assert.ok(!String(error).includes('private-mod-workspace'));
+      return (error as { code?: string }).code === 'RESOURCE_SEARCH_CURSOR_SCOPE_MISMATCH';
+    });
 
     const all = index.searchResourcesPage({ query: '', limit: 10, sourceFilter: 'all' });
     assert.equal(all.total, 4);
     const artifacts = index.searchResourcesPage({ query: '', limit: 10, sourceFilter: 'artifacts' });
     assert.equal(artifacts.total, 1);
     assert.equal(artifacts.items[0]?.item.relativePath, 'event/a.emevd.dcx.bak');
+    index.setFiles([file('file:///event/a.emevd.dcx', 'event/a.emevd.dcx', 'event')]);
+    for (const cursor of [firstCursor, legacy]) assert.throws(() => index.searchResourcesPage({ cursor }), { code: 'STALE_READ_CURSOR' });
   });
 
   it('semantic map search excludes backup projections while keeping them catalog-visible', () => {

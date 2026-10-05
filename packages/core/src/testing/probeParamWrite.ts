@@ -1,5 +1,5 @@
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir } from 'node:fs/promises';
+import { createSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { dirname, join } from 'node:path';
 import type { ParamDefDocument } from '@soulforge/shared';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
@@ -8,10 +8,11 @@ import { applyParamFieldMutation } from '../param/paramFieldMutation.js';
 
 async function main(): Promise<void> {
   const sourceBnd = await resolveNativeFixture(process.argv[2], 'param-primary', '../../mods/param/gameparam/gameparam.parambnd.dcx');
-  const scratch = await mkdtemp(join(tmpdir(), 'soulforge-param-write-probe-'));
+  const workspace = await createSmokeWorkspace('param-write-probe');
+  const scratch = workspace.root;
   const staging = join(scratch, 'staging');
-  await mkdir(staging, { recursive: true });
   try {
+    await mkdir(staging, { recursive: true });
     const extract = await runBridge<{ contentSize?: number }>({
       command: 'extract-bnd4-child',
       filePath: sourceBnd,
@@ -58,8 +59,8 @@ async function main(): Promise<void> {
     const t3 = Date.now();
     console.log('reread-param', t3 - t2, 'ms', reread.data?.rows?.length, reread.data?.rows?.map((r) => r.dataBase64 !== null));
   } finally {
-    await rm(scratch, { recursive: true, force: true });
     await disposeBridgeDaemonPool();
+    await workspace.dispose();
   }
 }
 

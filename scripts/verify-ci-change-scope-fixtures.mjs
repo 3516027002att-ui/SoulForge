@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { classifyCiChanges } from './ci-change-scope.mjs';
 assert.deepEqual(classifyCiChanges(['docs/guide.md']), { build: false, installer: false, tiers: 'governance' });
-assert.equal(classifyCiChanges(['docs/governance/slices.json']).build, false);
+assert.deepEqual(classifyCiChanges(['docs/governance/slices.json']), { build: true, installer: false, tiers: 'governance,unit,synthetic' });
 assert.equal(classifyCiChanges(['apps/desktop/src/main/index.ts']).build, true);
 assert.equal(classifyCiChanges(['apps/desktop/src/main/index.ts']).installer, false);
 for (const path of ['package-lock.json', 'apps/desktop/package.json', 'apps/desktop/electron.vite.config.ts',

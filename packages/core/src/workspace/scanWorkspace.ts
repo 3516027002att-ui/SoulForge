@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { readdir, stat } from 'node:fs/promises';
+import { readdir, realpath, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Diagnostic, IndexedFile, ResourceKind, ScanProgress, WorkspaceScanResult } from '@soulforge/shared';
 import { detectResourceFileType } from './resourceFileTypes.js';
@@ -29,9 +29,29 @@ export interface ScanWorkspaceOptions {
 
 export async function scanWorkspace(options: ScanWorkspaceOptions): Promise<WorkspaceScanResult> {
   const workspaceRoot = options.workspaceRoot;
-  const workspaceId = makeWorkspaceId(workspaceRoot);
   const diagnostics: Diagnostic[] = [];
   const files: IndexedFile[] = [];
+  throwIfAborted(options.signal);
+  let workspaceId: string;
+  try {
+    // Match the opened session's physical identity without changing the
+    // selected path namespace used for file locations and relative paths.
+    workspaceId = makeWorkspaceId(await realpath(workspaceRoot));
+  } catch (error) {
+    return {
+      workspaceId: makeWorkspaceId(workspaceRoot),
+      workspaceRoot,
+      files,
+      diagnostics: [{
+        severity: 'error',
+        code: 'WORKSPACE_ROOT_NOT_DIRECTORY',
+        message: 'Workspace root is not a readable directory.',
+        details: { workspaceRoot, cause: error instanceof Error ? error.message : String(error) }
+      }],
+      countsByKind: countByKind(files)
+    };
+  }
+  throwIfAborted(options.signal);
 
   if (options.includeKinds && options.includeKinds.length > 0) {
     await scanKnownResourceDirectories(options, workspaceRoot, workspaceId, files, diagnostics);

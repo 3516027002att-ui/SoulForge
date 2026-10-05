@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * Script container evidence smoke (W-BEHAVIOR-MAP-01 frozen inventory).
  * 1) Synthetic classification/magic assertions (always run, deterministic).
@@ -23,9 +24,11 @@ import {
   buildScriptContainerEvidence,
   type ScriptContainerEvidence
 } from '../script/scriptContainerEvidence.js';
-import { resolveNativeFixture } from './nativeFixtureRegistry.js';
+import { materializeFixedNativeFixture, fixedFixtureNumber } from './nativeFixtureRegistry.js';
 import { disposeBridgeDaemonPool } from '../bridge/runBridge.js';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -118,19 +121,11 @@ function syntheticChecks(): void {
 
 syntheticChecks();
 
-// Real branch triggers on an explicit path (arg 2) OR on registry env
-// presence (SOULFORGE_NATIVE_FIXTURE_REGISTRY + SOULFORGE_NATIVE_FIXTURE_ROOT,
-// e.g. injected by scripts/with-local-has-game-env.mjs). Without either, the
-// real leg is a structured skip — it is never a silent pass.
-const explicitPath = process.argv[2]?.trim();
-const registryConfigured = Boolean(
-  process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY?.trim()
-    && process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
-);
-
-if (explicitPath || registryConfigured) {
-  try {
-    const path = await resolveNativeFixture(explicitPath, 'luabnd-primary', explicitPath ?? '');
+const root=await mkdtemp(join(tmpdir(),'sf-script-fixed-corpus-'));
+try {
+ const fixed=await materializeFixedNativeFixture('luabnd-primary',root,process.argv[2]?.trim());
+ if(fixed.status==='available'){
+    const path=fixed.path;
     const evidence = await buildScriptContainerEvidence({
       containerPath: path,
       allowedRoots: [dirname(path)],
@@ -141,14 +136,14 @@ if (explicitPath || registryConfigured) {
     assert(evidence.ok === true, 'real luabnd evidence must build');
     assert(evidence.authority === 'candidate', 'authority cap = candidate');
     assert(evidence.containerFormat.includes('BND4'), `container format: ${evidence.containerFormat}`);
-    assert(evidence.entryCount >= 200, `entryCount >= 200 (${evidence.entryCount})`);
+    assert(evidence.entryCount===fixedFixtureNumber(fixed.fixture,'entryCount'),`independent pinned entry count (${evidence.entryCount})`);
     assert(evidence.entries.length > 0, 'entries must be enumerated');
 
     // Extension distribution across the whole container must be present and
     // dominated by script extensions (.lua for aicommon.luabnd).
     const extDist = evidence.extensionDistribution ?? {};
     const luaExtCount = extDist['lua'] ?? 0;
-    assert(luaExtCount > 0, `extensionDistribution has .lua (${luaExtCount})`);
+    assert(luaExtCount===fixedFixtureNumber(fixed.fixture,'luaEntryCount'),`independent pinned Lua count (${luaExtCount})`);
     assert(evidence.scriptEntryCount > 0, `scriptEntryCount > 0 (${evidence.scriptEntryCount})`);
 
     // Classification: script entries classified (no unknown for .lua).
@@ -177,7 +172,8 @@ if (explicitPath || registryConfigured) {
     // printed output must not contain the containerPath or any absolute path.
     const printed = JSON.stringify({
       ok: true,
-      message: 'real script container evidence: ok',
+      message: 'pinned script container evidence: ok',
+      corpusVersion:fixed.version,corpusSourceSha256:fixed.fixture.sha256,
       containerFormat: evidence.containerFormat,
       entryCount: evidence.entryCount,
       entriesSampled: evidence.entries.length,
@@ -198,13 +194,7 @@ if (explicitPath || registryConfigured) {
     }
 
     console.log(printed);
-  } finally {
-    await disposeBridgeDaemonPool();
-  }
-} else {
-  console.log(JSON.stringify({
-    ok: true,
-    message: 'real container not provided (no arg / no native fixture registry env), skipping real inventory',
-    skipped: true
-  }));
-}
+ }else{
+  console.log(JSON.stringify({...fixed,ok:null,status:'skipped',availability:'unavailable'}));
+ }
+}finally{await disposeBridgeDaemonPool();await rm(root,{recursive:true,force:true});}

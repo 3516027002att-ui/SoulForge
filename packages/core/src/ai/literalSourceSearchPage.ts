@@ -1,4 +1,5 @@
 import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
+import { cursorIdentity } from '../workspace/cursorIdentity.js';
 
 /** Exact, case-sensitive source search. Scans at most a page plus one lookahead; no full hit-list allocation. */
 export function literalSourceSearchPage(input: {
@@ -8,11 +9,13 @@ export function literalSourceSearchPage(input: {
   const fail = (code: string, message: string): never => { throw Object.assign(new Error(message), { code }); };
   if (!input.query || input.query.length > 256) fail('INVALID_SOURCE_QUERY', 'query 必须为 1 到 256 个字符的精确源码片段。');
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 6) fail('INVALID_SOURCE_WINDOW', 'limit 必须为 1 到 6 的整数。');
-  const scope = JSON.stringify({ sourceKey: input.sourceKey, query: input.query });
+  const scope = JSON.stringify({ sourceKey: cursorIdentity(input.sourceKey), query: input.query });
   let start = 0;
   if (input.cursor) {
     const c = parseOpaqueCursor(input.cursor);
-    if (c.sessionId !== 'literal-source-v1' || c.domain !== 'script' || c.scope !== scope) fail('SOURCE_CURSOR_SCOPE_MISMATCH', '源码搜索游标不匹配来源或查询。');
+    const expectedScope = c.sessionId === 'literal-source-v1'
+      ? JSON.stringify({ sourceKey: input.sourceKey, query: input.query }) : scope;
+    if (!['literal-source-v1', 'literal-source-v2'].includes(c.sessionId) || c.domain !== 'script' || c.scope !== expectedScope) fail('SOURCE_CURSOR_SCOPE_MISMATCH', '源码搜索游标不匹配来源或查询。');
     if (c.sourceHash !== input.sourceHash) fail('STALE_READ_CURSOR', '源码已变化，请重新搜索。');
     start = c.offset;
   }
@@ -37,6 +40,6 @@ export function literalSourceSearchPage(input: {
     query: input.query, matches, returned: matches.length, returnedCount: matches.length, limit,
     hasMore, truncated: hasMore, searchComplete: !hasMore,
     scan: { offset: start, nextOffset: hasMore ? position : input.text.length, complete: !hasMore },
-    ...(hasMore ? { nextCursor: createOpaqueCursor({ sessionId: 'literal-source-v1', domain: 'script', scope, sourceHash: input.sourceHash, offset: position }) } : {})
+    ...(hasMore ? { nextCursor: createOpaqueCursor({ sessionId: 'literal-source-v2', domain: 'script', scope, sourceHash: input.sourceHash, offset: position }) } : {})
   };
 }

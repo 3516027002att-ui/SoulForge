@@ -1,0 +1,9 @@
+
+/* 状态栏里的可点项：外观与静态 st-item 一致，但有 hover/focus 反馈。
+   诊断计数此前是死文本（显示「1035 条诊断」却点不开），现在是日志开关。 */
+.st-item--button {
+  font: inherit; color: inherit; background: none;
+  border: none; padding: 0 4px; cursor: pointer; border-radius: var(--radius-s);
+}
+.st-item--button:hover { background: var(--control-hover-bg); color: var(--ink-0); }
+.st-item--button:focus-visible { outline: 2px solid var(--ember); outline-offset: -1px; }

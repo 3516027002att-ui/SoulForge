@@ -7,7 +7,7 @@
  * point may import them, scan their locations, or turn their environment
  * variables into runtime requirements.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { readdirSync, existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -15,12 +15,42 @@ const root = resolve(import.meta.dirname, '..');
 
 const productionFiles = [
   'apps/desktop/src/main/ipc.ts',
+  'apps/desktop/src/main/services/workspaceUtilityLifecycleService.ts',
+  'apps/desktop/src/main/ipc/documents.ts',
+  'apps/desktop/src/main/services/documentService.ts',
+  'apps/desktop/src/main/ipc/operations.ts',
+  'apps/desktop/src/main/services/operationService.ts',
+  'apps/desktop/src/main/services/semanticRefreshService.ts',
+  'apps/desktop/src/main/ipc/workspace.ts',
+  'apps/desktop/src/main/services/workspaceService.ts',
+  'apps/desktop/src/main/services/workspaceRuntimeService.ts',
+  'apps/desktop/src/main/ipc/agent.ts',
+  'apps/desktop/src/main/services/agentSessionService.ts',
+  'apps/desktop/src/main/services/agentEvidenceService.ts',
+  'apps/desktop/src/main/services/agentLocalService.ts',
   'apps/desktop/src/main/ipc/event.ts',
+  'apps/desktop/src/main/services/eventService.ts',
   'apps/desktop/src/main/ipc/param.ts',
+  'apps/desktop/src/main/services/paramService.ts',
+  'apps/desktop/src/main/services/paramSessionService.ts',
+  'apps/desktop/src/ipc/publicContract.ts',
+  'apps/desktop/src/ipc/publicTypes.ts',
   'apps/desktop/src/main/ipc/raw.ts',
+  'apps/desktop/src/main/services/rawResourceService.ts',
+  'apps/desktop/src/main/ipc/text.ts',
+  'apps/desktop/src/main/services/textService.ts',
   'apps/desktop/src/main/ipc/resource.ts',
+  'apps/desktop/src/main/services/resourceReadService.ts',
+  'apps/desktop/src/main/services/resourceMutationService.ts',
+  'apps/desktop/src/main/services/scriptSourceService.ts',
+  'apps/desktop/src/main/services/resourceWriteContext.ts',
   'apps/desktop/src/main/ipc/action.ts',
+  'apps/desktop/src/main/services/actionService.ts',
+  'apps/desktop/src/main/services/characterPreviewService.ts',
+  'apps/desktop/src/main/services/actionDiagnostics.ts',
   'apps/desktop/src/main/ipc/assets.ts',
+  'apps/desktop/src/main/services/assetReadService.ts',
+  'apps/desktop/src/main/services/assetMutationService.ts',
   'apps/desktop/src/main/ragEmbedding.ts',
   'apps/desktop/src/main/ragEmbeddingWorker.ts',
   'apps/desktop/src/main/ragLocalModel.ts',
@@ -30,6 +60,8 @@ const productionFiles = [
   'apps/desktop/src/renderer/src/editors/ParamDefPanel.tsx',
   'apps/desktop/src/renderer/src/workbench/ParamWorkbench.tsx',
   'packages/core/src/ai/toolRegistry.ts',
+  'packages/core/src/ai/toolRegistrySupport.ts',
+  ...readdirSync(resolve(root,'packages/core/src/ai/tools')).filter(file=>file.endsWith('.ts')).map(file=>`packages/core/src/ai/tools/${file}`),
   'packages/core/src/editing/emevdEdit.ts',
   'packages/core/src/editing/nativeEditSession.ts',
   'packages/core/src/emevd/emedfRegistryResolver.ts',

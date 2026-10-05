@@ -69,22 +69,22 @@ export function operationKey(operation) {
   return createHash('sha256').update(JSON.stringify([
     operation.cwd, operation.command, operation.args,
     Object.entries(operation.env ?? {}).sort(([a], [b]) => a.localeCompare(b)),
-    operation.kind
+    operation.kind, operation.validation ?? (operation.kind === 'test')
   ])).digest('hex').slice(0, 20);
 }
 
 function isDirectNodeScript(tokens) {
   if (tokens[0] !== 'node') return false;
-  const flags = new Set(['--experimental-strip-types', '--enable-source-maps', '--no-warnings']);
+  const flags = new Set(['--experimental-strip-types', '--enable-source-maps', '--no-warnings', '--test']);
   let index = 1;
   while (flags.has(tokens[index])) index += 1;
   return Boolean(tokens[index] && !tokens[index].startsWith('-') && /\.(?:mjs|cjs|js|ts)$/.test(tokens[index]));
 }
 
-export function planScript(repoRoot, workspaces, scriptName, { args = [], env = {} } = {}) {
+export function planScript(repoRoot, workspaces, scriptName, { args = [], env = {}, workspace = null } = {}) {
   const stack = new Set();
-  const operation = (cwd, command, commandArgs, owner, kind) => {
-    const value = { cwd: resolve(repoRoot, cwd), command, args: commandArgs, env, owner, kind };
+  const operation = (cwd, command, commandArgs, owner, kind, validation = kind === 'test') => {
+    const value = { cwd: resolve(repoRoot, cwd), command, args: commandArgs, env, owner, kind, validation };
     return { ...value, key: operationKey(value) };
   };
   const walk = (name, dir, scripts, extraArgs = []) => {
@@ -93,9 +93,11 @@ export function planScript(repoRoot, workspaces, scriptName, { args = [], env = 
     if (typeof scripts[name] !== 'string') throw new Error(`Missing npm script: ${id}`);
     // Builds, generators and lifecycle scripts may mutate the inputs of earlier
     // tests. Keep them as barriers; do not reuse test evidence across them.
-    const kind = name.startsWith('test') || name === 'verify:audit' || name === 'handoff:fingerprint'
+    const kind = name.startsWith('test') || name.startsWith('bridge:verify:')
       ? 'test' : name === 'typecheck' ? 'prepare' : 'barrier';
-    const opaque = () => [operation(dir, 'npm', ['run', name, '--silent', ...(extraArgs.length ? ['--', ...extraArgs] : [])], id, 'barrier')];
+    // Cache invalidation and assertion evidence are separate: an opaque test
+    // still needs strict execution evidence, while a silent build does not.
+    const opaque = () => [operation(dir, 'npm', ['run', name, '--silent', ...(extraArgs.length ? ['--', ...extraArgs] : [])], id, 'barrier', kind === 'test')];
     const segments = tokenizeCommands(scripts[name]);
     if (scripts[`pre${name}`] || scripts[`post${name}`] || !segments
       || (extraArgs.length > 0 && segments.length !== 1) || kind === 'barrier') return opaque();
@@ -122,6 +124,11 @@ export function planScript(repoRoot, workspaces, scriptName, { args = [], env = 
       return steps.length ? steps : opaque();
     } finally { stack.delete(id); }
   };
+  if (workspace !== null) {
+    const target = workspaces.byName.get(workspace);
+    if (!target) throw new Error(`Unknown workspace: ${workspace}`);
+    return walk(scriptName, target.dir, target.scripts, args);
+  }
   return walk(scriptName, '', workspaces.rootScripts, args);
 }
 

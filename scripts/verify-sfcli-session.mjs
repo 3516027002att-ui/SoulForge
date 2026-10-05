@@ -37,17 +37,25 @@ function waitForExit(child, timeoutMs = 120_000) {
 const repoRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const cliPath = join(repoRoot, 'tools', 'soulforge-cli', 'sfcli.mjs');
 const workspace = mkdtempSync(join(tmpdir(), 'soulforge-cli-session-'));
+// A Windows caller may select a different spelling of the same physical root,
+// including the runner's 8.3 TEMP alias. Keep this alias in the CLI request so
+// the smoke catches an index/session identity mismatch on every Windows run.
+const selectedWorkspace = process.platform === 'win32' ? workspace.toUpperCase() : workspace;
+const cliEnvironment = {
+  ...process.env,
+  SF_E2E_WORKSPACE_STORAGE_ROOT: join(workspace, '.soulforge', 'cli-test-storage')
+};
 
 try {
   const child = spawn(process.execPath, [
     cliPath,
-    '--workspace', workspace,
+    '--workspace', selectedWorkspace,
     '--mode', 'plan',
     '--no-cache',
     '--quiet',
     '--diagnostics',
     'session'
-  ], { cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'] });
+  ], { cwd: repoRoot, env: cliEnvironment, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
 
   child.stdin.write(JSON.stringify({
     id: 'search-1',
@@ -81,6 +89,8 @@ try {
   const closeResponse = lines.find((line) => line.id === 'close-1');
   assert(searchResponses.length === 2, 'request ids were not preserved');
   assert(JSON.stringify(searchResponses[0]) === JSON.stringify(searchResponses[1]), 'duplicate request was not deduplicated');
+  assert(searchResponses.every((response) => response.requestState === 'completed'),
+    `search never reached its tool result: stdout=${result.stdout}; stderr=${result.stderr}`);
   assert(statusResponse?.result?.session === 'stdin', 'status response missing');
   assert(closeResponse?.result?.closed === true, 'close response missing');
 
@@ -89,21 +99,23 @@ try {
     'workspace scan diagnostic missing');
   assert(diagnostics.some((event) => event.phase === 'semantic.cache' && event.status === 'complete'),
     'semantic cache diagnostic missing');
-  assert(diagnostics.some((event) => event.phase === 'tool' && event.status === 'complete'),
+  const toolTimings = diagnostics.filter((event) => event.phase === 'tool' && event.status === 'complete'
+    && event.details?.requestId === 'search-1' && event.details?.tool === 'search_param_rows');
+  assert(toolTimings.length === 1 && Number.isFinite(toolTimings[0].elapsedMs) && toolTimings[0].elapsedMs >= 0,
     'tool timing diagnostic missing');
   assert(diagnostics.every((event) => event.type === 'soulforge-cli-diagnostic'),
     'stderr contained non-diagnostic output in diagnostics mode');
 
   const toolChild = spawn(process.execPath, [
     cliPath,
-    '--workspace', workspace,
+    '--workspace', selectedWorkspace,
     '--mode', 'fullPermission',
     '--no-analyze',
     '--json',
     '--quiet',
     '--diagnostics',
     'call', 'list_operations', '{}'
-  ], { cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { cwd: repoRoot, env: cliEnvironment, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const toolResult = await waitForExit(toolChild);
   assert(toolResult.code === 0, `no-analyze list_operations exited with ${toolResult.code}; stderr=${toolResult.stderr}`);
   const operationEnvelope = JSON.parse(toolResult.stdout.trim());

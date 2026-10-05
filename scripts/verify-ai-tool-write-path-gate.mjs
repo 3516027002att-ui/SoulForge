@@ -29,12 +29,14 @@
  *
  * 不做的事：不做类型推断、不跨文件追踪调用链。宁可漏报也不误报。
  */
+import { extractToolDeclarations, extractFunctionDeclarations } from './testing/tool-source-analysis.mjs';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const LABEL = 'ai-tool-write-path';
-const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const rootIndex=process.argv.indexOf('--root');
+const root = rootIndex>=0 ? resolve(process.argv[rootIndex+1]) : resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REGISTRY = join(root, 'packages', 'core', 'src', 'ai', 'toolRegistry.ts');
 
 /** 受控写入入口。每一个都必须在 patch/ 或 transactions/ 下有定义（判据③）。 */
@@ -65,6 +67,7 @@ const CONTROLLED_ENTRIES = Object.freeze([
   // Engine，定义在 editing/ 下，不直接写盘。
   'setTaeEventTimes',
   'setTaeEventFields',
+  'insertTaeEvents',
   'setMsbPartTransform',
   // Canonical MSB map operations: these lower into MapEditTransaction and
   // then through the Patch Engine/native reread boundary.
@@ -106,7 +109,10 @@ if (!existsSync(REGISTRY)) {
   }, 1);
 }
 
-const source = readFileSync(REGISTRY, 'utf8');
+const toolDirectory = join(root,'packages','core','src','ai','tools');
+const sourceFiles = [REGISTRY,join(root,'packages','core','src','ai','toolRegistrySupport.ts'),...(existsSync(toolDirectory)?readdirSync(toolDirectory).filter(file=>file.endsWith('.ts')).map(file=>join(toolDirectory,file)):[])];
+const sources = sourceFiles.filter(file=>existsSync(file)).map(file=>({file,source:readFileSync(file,'utf8')}));
+const source = sources.map(item=>item.source).join('\n');
 
 /** 剥掉注释与字符串，避免把说明文字里的词当调用。 */
 function stripCommentsAndStrings(text) {
@@ -129,6 +135,15 @@ function stripCommentsAndStrings(text) {
 
 const code = stripCommentsAndStrings(source);
 const findings = [];
+
+// Newly integrated insertion must use the actual native transaction facade;
+// merely adding its name to the controlled-entry list is insufficient.
+const insertionPath=join(root,'packages','core','src','editing','taeEdit.ts');
+const insertion=existsSync(insertionPath)?extractFunctionDeclarations(readFileSync(insertionPath,'utf8'),insertionPath).filter(fn=>fn.name==='insertTaeEvents'):[];
+if(insertion.length!==1||!insertion[0].calls.includes('applyNativeMutation')
+  || insertion[0].calls.some(call=>FORBIDDEN_WRITE_CALLS.includes(call))){
+  findings.push({code:'CONTROLLED_INSERTION_PATH_INVALID',entry:'insertTaeEvents',message:'TAE insertion must enter applyNativeMutation and cannot directly write Mod resources.'});
+}
 
 // 判据③：受控入口必须真实存在。清单指向不存在的符号等于判据失效。
 for (const entry of CONTROLLED_ENTRIES) {
@@ -173,23 +188,18 @@ for (const call of FORBIDDEN_WRITE_CALLS) {
 }
 
 // 判据②：写类工具必须引用受控入口。
-const toolBlocks = [...source.matchAll(/registry\.register\(\{([\s\S]*?)\n  \}\);/g)];
+const toolBlocks = sources.flatMap(item=>extractToolDeclarations(item.source,item.file));
 if (toolBlocks.length === 0) {
   report({
     ok: false, gate: LABEL, status: 'failed', code: 'AI_TOOL_BLOCKS_UNEXTRACTABLE',
-    message: '未能从注册表提取任何 registry.register 块；提取失败必须失败关闭，'
+    message: '未能从工具模块/注册表提取任何实际工具声明；提取失败必须失败关闭，'
       + '否则本门禁的判据会变成必然通过。'
   }, 1);
 }
 
 const writeLike = [];
 for (const block of toolBlocks) {
-  const body = block[1];
-  const nameMatch = /name:\s*'([a-z0-9_]+)'/.exec(body);
-  const permMatch = /permission:\s*'([a-z]+)'/.exec(body);
-  if (nameMatch === null) continue;
-  const name = nameMatch[1];
-  const permission = permMatch === null ? 'unknown' : permMatch[1];
+  const {body,name,permission} = block;
   // 判据以 **permission 为主**，名字只用于捕捉「permission 写得太宽松」的情况。
   //
   // 不能只看名字：build_patch_graph 名字含 patch 但 permission=analyze，
@@ -203,8 +213,8 @@ for (const block of toolBlocks) {
   const looksWriteLike = WRITE_PERMISSIONS.has(permission);
   if (!looksWriteLike) continue;
   writeLike.push({ name, permission });
-  const usesControlled = CONTROLLED_ENTRIES.some((entry) => new RegExp(`\\b${entry}\\s*\\(`).test(body))
-    || (name === 'write_memory' && CONTROLLED_NON_MOD_ENTRIES.some((entry) => new RegExp(`\\b${entry}\\s*\\(`).test(body)));
+  const usesControlled = CONTROLLED_ENTRIES.some(entry=>block.calls.includes(entry))
+    || (name === 'write_memory' && CONTROLLED_NON_MOD_ENTRIES.some(entry=>block.calls.includes(entry)));
   if (!usesControlled) {
     findings.push({
       code: 'AI_WRITE_TOOL_BYPASSES_PATCH_ENGINE',

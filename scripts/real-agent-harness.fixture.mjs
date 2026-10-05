@@ -32,6 +32,53 @@ import {
 } from './real-agent-harness-lib.mjs';
 import { matchesAssertion, parseGoalContract, validateTaskContractGoals } from './real-agent-goal-contract.mjs';
 import { FOUR_TASKS } from './testing/real-agent-four-task-manifest.mjs';
+import * as harness from './real-agent-harness-lib.mjs';
+
+test('declared read-only task can complete in observation mode without resource mutation', () => {
+  const coverage = evaluateGoalCoverage([{
+    goalId: 'read-event', kind: 'native-tool', tool: 'read_emevd_event',
+    required: true, verified: true, status: 'verified',
+    verificationEvidence: [{ sourceUri: 'file://event/sample.emevd', sourceHashes: ['a'.repeat(64)] }]
+  }], true, { intent: 'read', postconditions: ['read-event'] });
+  assert.equal(coverage.taskCompletionVerified, true);
+  assert.equal(coverage.status, 'verified');
+});
+
+test('actual failed native assertion remains failed instead of unverified', () => {
+  const coverage = evaluateGoalCoverage([{
+    goalId: 'wrong-event', kind: 'native-tool', tool: 'read_emevd_event',
+    required: true, verified: false, status: 'failed'
+  }], false);
+  assert.equal(coverage.status, 'failed');
+  assert.deepEqual(coverage.failedGoalIds, ['wrong-event']);
+  assert.deepEqual(coverage.unverifiedGoalIds, []);
+});
+
+test('declared PARAM postcondition is complete without a mandatory semantic goal category', () => {
+  const coverage = evaluateGoalCoverage([{
+    goalId: 'hp', kind: 'param-field', required: true, verified: true
+  }], false, { intent: 'ensure', postconditions: ['hp'] });
+  assert.equal(coverage.taskCompletionVerified, true);
+});
+
+test('native postcondition separates unchanged success, wrong value and unavailable evidence', () => {
+  assert.equal(typeof harness.evaluateNativeGoalOutcome, 'function');
+  assert.equal(harness.evaluateNativeGoalOutcome({
+    nativeReadOk: true, assertionOk: true, proofOk: true, resourceChanged: false
+  }).status, 'verified');
+  assert.equal(harness.evaluateNativeGoalOutcome({
+    nativeReadOk: true, assertionOk: false, proofOk: true, resourceChanged: true
+  }).status, 'failed');
+  assert.equal(harness.evaluateNativeGoalOutcome({
+    nativeReadOk: true, assertionOk: true, proofOk: false, resourceChanged: true
+  }).status, 'unverified');
+  assert.equal(harness.evaluateNativeGoalOutcome({
+    nativeReadOk: false, assertionOk: false, proofOk: false, unavailable: true
+  }).status, 'unverified');
+  assert.equal(harness.evaluateNativeGoalOutcome({
+    nativeReadOk: true, assertionOk: true, proofOk: true, resourceChanged: false, requireMutation: true
+  }).status, 'failed');
+});
 
 test('unknown harness options are rejected instead of turning their values into task text', () => {
   const runnerPath = fileURLToPath(new URL('./run-real-agent-gyoubu.mjs', import.meta.url));
@@ -88,14 +135,13 @@ test('required unsupported behavior goals are terminal and cannot be masked by P
   assert.equal(forged.taskCompletionVerified, false);
 });
 
-test('required unsupported goals block ordinary writes but allow explicit candidate experiments without completion', () => {
+test('required unsupported effect metadata does not prevent a run; final coverage remains unsupported', () => {
   const task = FOUR_TASKS.find((item) => item.id === 'four-3-xiuwan-super-poison');
   assert.ok(task);
-  const blocked = evaluateWriteAdmission(task.goals, { observationOnly: false, candidateWrite: false });
-  assert.equal(blocked.allowed, false);
-  assert.equal(blocked.executionMode, 'write-blocked');
-  assert.equal(blocked.code, 'REQUIRED_GOAL_UNSUPPORTED_WRITE_BLOCKED');
-  assert.deepEqual(blocked.unsupportedGoalIds, ['xiuwan-combo-poison-accumulation', 'xiuwan-super-poison-effect']);
+  const ordinary = evaluateWriteAdmission(task.goals, { observationOnly: false, candidateWrite: false });
+  assert.equal(ordinary.allowed, true);
+  assert.equal(ordinary.executionMode, 'write');
+  assert.deepEqual(ordinary.unsupportedGoalIds, ['xiuwan-combo-poison-accumulation', 'xiuwan-super-poison-effect']);
 
   const observation = evaluateWriteAdmission(task.goals, { observationOnly: true, candidateWrite: false });
   assert.equal(observation.allowed, true);
@@ -107,6 +153,14 @@ test('required unsupported goals block ordinary writes but allow explicit candid
   const coverage = evaluateGoalCoverage(task.goals.map((goal) => ({ ...goal, verified: true })), false, task.contract);
   assert.equal(coverage.status, 'unsupported');
   assert.equal(coverage.taskCompletionVerified, false);
+});
+
+test('read contracts force observation-only admission and contradictory candidate mode remains invalid', () => {
+  const contract = { intent: 'read' };
+  assert.equal(evaluateWriteAdmission([], { taskContract: contract }).executionMode, 'observation-only');
+  assert.equal(evaluateWriteAdmission([], { taskContract: contract, candidateWrite: true }).code, 'REAL_AGENT_MODE_INVALID');
+  assert.equal(evaluateWriteAdmission([], { observationOnly: true, candidateWrite: true }).allowed, false);
+  for (const task of FOUR_TASKS) assert.equal(evaluateWriteAdmission(task.goals).allowed, true);
 });
 
 test('interrupted reports retain unsupported goal classification instead of falling back to PARAM-only mode', () => {

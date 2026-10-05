@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * Install / upgrade recovery smoke — W-A-RECOVERY-INTEGRATION-04.
  *
@@ -23,7 +24,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import BetterSqlite3 from 'better-sqlite3';

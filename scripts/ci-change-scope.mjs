@@ -4,11 +4,11 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export function classifyCiChanges(paths, { forceInstaller = false } = {}) {
-  // Only well-known documentation/governance paths take the narrow route.
+  // Only well-known documentation paths take the narrow route.
   // New or unclassified files conservatively get the product checks.
   const governanceOnly = paths.length > 0 && paths.every((path) =>
     path === 'AGENTS.md' || /^docs\/.*\.(?:md|png|jpe?g|svg)$/.test(path)
-    || /^docs\/governance\/.*\.jsonl?$/.test(path) || /^\.github\/[^/]+\.md$/.test(path));
+    || /^\.github\/[^/]+\.md$/.test(path));
   const installer = forceInstaller || paths.length === 0 || paths.some((path) =>
     /^(?:package(?:-lock)?\.json|apps\/desktop\/(?:package\.json|electron[.-]|build\/)|bridge\/|prompt\/|mutter\.md$|LICENSE$|NOTICE$|licenses\/|\.github\/workflows\/windows-ci\.yml)/.test(path)
     || ['global.json', 'scripts/run-dotnet.mjs', 'scripts/prepare-electron-sqlite-binding.mjs'].includes(path)

@@ -415,6 +415,7 @@ export interface RolloutSessionMeta {
 
 export type RolloutItem =
   | { type: 'session-meta'; meta: RolloutSessionMeta }
+  | { type: 'protocol-event'; envelope: import('../../../agent/src/index.mjs').AgentProtocolEvent }
   | { type: 'message'; step: number; message: ChatMessage }
   | ({ type: 'provider-usage' } & ProviderUsageSample)
   | {
@@ -724,7 +725,8 @@ export type ContextBrokerResult =
         | 'EVIDENCE_ALL_STALE'
         | 'BYTE_BUDGET_INTERNAL';
       message: string;
-      diagnostics: [{ severity: 'error'; code: string; message: string }];
+      /** Unavailable evidence may warn; execution/identity/budget failures remain errors. */
+      diagnostics: [{ severity: 'warning' | 'error'; code: string; message: string }];
     };
 
 export interface ContextBroker {

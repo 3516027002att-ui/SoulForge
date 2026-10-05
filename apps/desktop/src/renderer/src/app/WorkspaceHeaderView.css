@@ -1,0 +1,85 @@
+
+/* ═══════════ 标题栏 ═══════════ */
+.titlebar {
+  height: env(titlebar-area-height, var(--titlebar-h)); flex: none;
+  display: flex; align-items: center; gap: 12px;
+  padding-left: max(12px, env(titlebar-area-x, 12px));
+  padding-right: max(12px, calc(100% - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100%) + 12px));
+  background: var(--forge-1); border-bottom: 1px solid var(--line);
+  -webkit-app-region: drag; position: relative; z-index: 40;
+}
+.titlebar__brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.brand-mark { display: block; flex: none; width: 16px; height: 16px; object-fit: contain; }
+.brand-name { font-weight: 600; letter-spacing: .01em; }
+.workspace-switcher { position: relative; display: flex; align-items: center; min-width: 0; }
+.workspace-switcher__trigger {
+  -webkit-app-region: no-drag;
+  display: inline-flex; align-items: center; gap: 4px; min-width: 0;
+  max-width: 36ch; padding: 2px 6px;
+  font-size: 11px; color: var(--ink-3); white-space: nowrap;
+  border-radius: var(--radius-s);
+  transition: color var(--dur-micro), background var(--dur-micro), box-shadow var(--dur-micro);
+}
+.workspace-switcher__trigger:hover { color: var(--ink-1); background: var(--control-hover-bg); box-shadow: var(--control-hover-shadow); }
+.workspace-switcher__trigger[aria-expanded='true'] { color: var(--ink-1); background: var(--ember-soft); }
+.workspace-switcher__label { overflow: hidden; text-overflow: ellipsis; }
+.workspace-switcher__caret { font-size: 9px; opacity: .7; }
+.workspace-switcher__backdrop { position: fixed; inset: 0; z-index: 39; }
+.workspace-switcher__menu {
+  -webkit-app-region: no-drag;
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 41;
+  display: flex; flex-direction: column; min-width: 180px; padding: 4px;
+  background: var(--forge-2); border: 1px solid var(--line); border-radius: var(--radius-m);
+  box-shadow: var(--control-hover-shadow);
+}
+.workspace-switcher__menu button[role='menuitem'] {
+  text-align: left; padding: 6px 10px; font-size: 12px; color: var(--ink-2);
+  border-radius: var(--radius-s);
+}
+.workspace-switcher__menu button[role='menuitem']:hover { color: var(--ink-0); background: var(--control-hover-bg); }
+.workspace-indexing {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 34ch;
+  color: var(--ink-2); font-size: 11px; white-space: nowrap;
+}
+.workspace-indexing--failed { color: var(--warn); }
+.workspace-indexing__label { overflow: hidden; text-overflow: ellipsis; }
+.workspace-indexing__spinner {
+  width: 10px; height: 10px; flex: none; border: 1px solid var(--line-strong);
+  border-top-color: var(--ember); border-radius: 50%; animation: workspace-indexing-spin 800ms linear infinite;
+}
+@keyframes workspace-indexing-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .workspace-indexing__spinner { animation: none; } }
+.titlebar__center { flex: 1; display: flex; justify-content: center; }
+.cmdk-trigger {
+  -webkit-app-region: no-drag;
+  display: flex; align-items: center; gap: 8px;
+  width: min(380px, 100%); padding: 4px 12px;
+  color: var(--ink-2); font-size: 12px;
+  background: var(--forge-1); border: 1px solid var(--line); border-radius: var(--radius-m);
+  transition: border-color var(--dur-micro), color var(--dur-micro);
+}
+.cmdk-trigger:hover { border-color: var(--line-strong); color: var(--ink-1); }
+.cmdk-trigger span { flex: 1; text-align: left; }
+.tb-btn {
+  width: 28px; height: 28px; display: grid; place-items: center;
+  color: var(--ink-1); border-radius: var(--radius-m);
+  background: var(--control-rest-bg);
+  transition: background var(--dur-micro), color var(--dur-micro), box-shadow var(--dur-micro);
+}
+.tb-btn:hover { background: var(--control-hover-bg); color: var(--ink-0); box-shadow: var(--control-hover-shadow); }
+.tb-btn:active { background: var(--control-active-bg); box-shadow: var(--control-active-shadow); }
+/* 低存在感控件五态收尾：disabled 不响应 hover、标签保持可读 */
+.tb-btn:disabled,
+.resource-tab:disabled,
+.domain-tab:disabled,
+.ab-item:disabled,
+.agent-icon-btn:disabled {
+  opacity: .45; cursor: default; box-shadow: none;
+}
+.tb-btn:disabled:hover,
+.resource-tab:disabled:hover,
+.domain-tab:disabled:hover,
+.ab-item:disabled:hover,
+.agent-icon-btn:disabled:hover {
+  background: var(--control-rest-bg); color: var(--ink-1);
+}

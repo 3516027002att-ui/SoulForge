@@ -1,0 +1,99 @@
+
+/* ═══════════ 侧栏（与画布同色，hairline 分隔） ═══════════ */
+.sidebar {
+  width: var(--sidebar-w); flex: none; min-width: 44px; max-width: 480px;
+  background: var(--forge-1); border-right: 1px solid var(--line);
+  position: relative; overflow: hidden;
+  transition: margin-left var(--dur-trans) var(--ease-standard);
+}
+.sidebar.is-collapsed { margin-left: calc(-1 * var(--sidebar-w)); border-right-color: transparent; pointer-events: none; visibility: hidden; }
+.sidebar-resizer {
+  position: absolute; top: 0; right: -2px; width: 5px; height: 100%;
+  cursor: col-resize; pointer-events: auto; z-index: 5;
+}
+.sidebar-resizer:hover { background: var(--ember-soft); }
+
+/* 侧栏头部关闭按钮：透明小圆钮，hover 变 --forge-hover；follows .panel__header 的
+   space-between flex，靠右放置即可。 */
+.sidebar__close {
+  width: 22px; height: 22px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: 50%; padding: 0;
+  background: transparent; color: var(--ink-3);
+  cursor: pointer;
+  transition: background var(--dur-micro), color var(--dur-micro);
+}
+.sidebar__close:hover {
+  background: var(--forge-hover); color: var(--ink-0);
+}
+.sidebar__close:active { background: var(--forge-active); }
+.sidebar__close:focus-visible { outline: 2px solid var(--ember-text); outline-offset: 1px; }
+
+/* 注意：布局关键容器不使用 opacity 入场动画 ——
+   隐藏窗口（e2e fixture show:false）下 Chromium 节流 BeginFrame，
+   opacity 动画会冻结在首帧导致内容不可见。 */
+.sidebar .panel { display: none; height: 100%; flex-direction: column; }
+.sidebar .panel.is-active { display: flex; }
+.panel__header {
+  flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 12px 16px 8px;
+}
+.panel__title {
+  font-size: 11px; font-weight: 600;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2);
+}
+.panel__hint { font-weight: 400; font-size: 10px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.panel__body { flex: 1; overflow-y: auto; min-height: 0; }
+.panel__body--pad { padding: 4px 12px 12px; }
+[data-panel-id="explorer"] .panel__body { display: flex; flex-direction: column; overflow: hidden; }
+
+/* ── 资源浏览器 ── */
+.explorer-base-note {
+  font-size: 10.5px; color: var(--ink-3); font-family: var(--font-mono);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.btn--block { width: 100%; }
+
+/* 资源目录分类已迁至顶部 .resource-bar；左侧不再保留第二套分类按钮。 */
+
+/* ── 文件列表（e2e 钩子：.file-item） ── */
+.file-list {
+  /* 保底高度：矮视口下 explorer-actions 收缩后文件列表至少保留可滚动空间。
+     正常高度下 flex:1 自然增长，min-height 不产生视觉差异。 */
+  flex: 1 1 0; min-height: 120px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.file-item {
+  display: flex; flex-direction: column; gap: 1px; width: 100%; text-align: left;
+  padding: 5px 10px; border-radius: var(--radius-m);
+  transition: background var(--dur-micro);
+}
+.file-item:hover { background: var(--forge-hover); }
+.file-item.selected { background: var(--ember-soft); box-shadow: inset 2px 0 0 var(--ember); }
+.file-item__name {
+  font-size: 12.5px; color: var(--ink-1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.file-item.selected .file-item__name { color: var(--ink-0); }
+.file-item__meta { font-size: 10px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.library-list {
+  flex: 1 1 0; min-height: 80px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.library-item {
+  display: flex; flex-direction: column; gap: 1px; width: 100%; text-align: left;
+  padding: 5px 10px; border-radius: var(--radius-m);
+  transition: background var(--dur-micro);
+}
+.library-item:hover { background: var(--forge-hover); }
+.library-item.is-selected { background: var(--ember-soft); box-shadow: inset 2px 0 0 var(--ember); }
+.library-item__name {
+  font-size: 12.5px; color: var(--ink-1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.library-item.is-selected .library-item__name { color: var(--ink-0); }
+.library-item__meta {
+  font-size: 10px; color: var(--ink-3); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}

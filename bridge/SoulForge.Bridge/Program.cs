@@ -20,8 +20,7 @@ if (args.Length > 0 && args[0].Equals("daemon", StringComparison.OrdinalIgnoreCa
     await using var stdin = Console.OpenStandardInput();
     await using var stdout = Console.OpenStandardOutput();
     using var reader = new StreamReader(stdin, new UTF8Encoding(false), detectEncodingFromByteOrderMarks: false, bufferSize: 64 * 1024, leaveOpen: true);
-    await using var writer = new StreamWriter(stdout, new UTF8Encoding(false), bufferSize: 64 * 1024, leaveOpen: true) { AutoFlush = true, NewLine = "\n" };
-    await BridgeDaemonHost.RunAsync(reader, writer, CancellationToken.None);
+    await BridgeDaemonHost.RunStreamAsync(reader, stdout, CancellationToken.None);
     return;
 }
 

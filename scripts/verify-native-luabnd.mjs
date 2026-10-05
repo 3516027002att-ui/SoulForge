@@ -1,181 +1,300 @@
-import { execFile } from 'node:child_process';
+import assert from 'node:assert/strict';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, rm } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import { promisify } from 'node:util';
-import assert from 'node:assert';
+import { mkdir, open, readFile, realpath, writeFile } from 'node:fs/promises';
+import { isAbsolute, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { assertBridgeProductionBuildFresh, bridgeBuildTarget } from './bridge-production-build.mjs';
+import { createOwnedTemporaryDirectory } from './owned-temporary-directory.mjs';
 
-const execFileAsync = promisify(execFile);
+const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+const role = 'luabnd-primary';
+const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
-const sekiroRoot = 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
-const modsAicommon = join(sekiroRoot, 'mods/script/aicommon.luabnd.dcx');
-const modsM11 = join(sekiroRoot, 'mods/script/m11_00_00_00.luabnd.dcx');
-const vanillaAicommon = join(sekiroRoot, 'script/aicommon.luabnd.dcx');
+function validationError(code, message, status = 'failed') {
+  return Object.assign(new Error(message), { code, status });
+}
 
-const bridgeExe = resolve('bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Bridge.exe');
-
-async function runBridge(command, filePath, options = {}) {
-  const args = [command, filePath];
-  if (Object.keys(options).length > 0) {
-    args.push(JSON.stringify(options));
-  }
+async function readInput(path) {
+  const handle = await open(path, 'r');
   try {
-    const { stdout } = await execFileAsync(bridgeExe, args, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
-    const parsed = JSON.parse(stdout);
-    parsed.ok = parsed.parseStatus === 'ok' || parsed.parseStatus === 'partial';
-    return parsed;
-  } catch (err) {
-    if (err && typeof err === 'object' && 'stdout' in err && typeof err.stdout === 'string') {
-      try {
-        const parsed = JSON.parse(err.stdout);
-        parsed.ok = parsed.parseStatus === 'ok' || parsed.parseStatus === 'partial';
-        return parsed;
-      } catch {}
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size < 1 || stat.size > 64 * 1024 * 1024) {
+      throw validationError('LUABND_INPUT_INVALID', 'Lua input must be a regular file of at most 64 MiB.');
     }
-    throw err;
+    const bytes = Buffer.alloc(stat.size + 1);
+    let count = 0;
+    while (count < bytes.length) {
+      const read = await handle.read(bytes, count, bytes.length - count, count);
+      if (read.bytesRead === 0) break;
+      count += read.bytesRead;
+    }
+    if (count !== stat.size) throw validationError('LUABND_INPUT_CHANGED', 'Lua input changed during its bounded read.');
+    return bytes.subarray(0, count);
+  } finally { await handle.close(); }
+}
+
+export async function selectNativeLuabndInput(explicitPath) {
+  const explicit = explicitPath?.trim() || process.env.SOULFORGE_LUABND_PATH?.trim();
+  if (explicit) return { path: await realpath(resolve(explicit)), selection: 'explicit-source' };
+  const fixtureRoot = process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
+    || process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+  const registry = process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY?.trim();
+  if (!fixtureRoot) throw validationError('LUABND_INPUT_UNAVAILABLE',
+    'Configure SOULFORGE_LUABND_PATH, a positional input, or the native fixture root/registry.', 'unavailable');
+  const manifest = JSON.parse(await readFile(join(repoRoot, 'testdata/corpus/sekiro-1.6.corpus-manifest.json'), 'utf8'));
+  const fixtures = manifest.correctnessFixtures?.fixtures?.filter(item => item.role === role);
+  if (fixtures?.length !== 1) throw validationError('FIXED_CORPUS_MANIFEST_INVALID', 'Pinned Lua fixture must be unique.');
+  const fixture = fixtures[0];
+  const root = await realpath(resolve(fixtureRoot));
+  let path;
+  if (registry) {
+    if (!process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()) {
+      throw validationError('NATIVE_FIXTURE_ROOT_REQUIRED', 'The native registry requires SOULFORGE_NATIVE_FIXTURE_ROOT.');
+    }
+    const { resolveNativeFixture } = await import('../packages/core/dist/testing/nativeFixtureRegistry.js');
+    try { path = await resolveNativeFixture(undefined, role, fixture.relativePath); }
+    catch (error) {
+      // The shared fixture resolver exposes its structured code as a message
+      // prefix. Preserve it in this script's JSON report without changing it.
+      const code = /^([A-Z][A-Z0-9_]+):/u.exec(error.message)?.[1];
+      if (code) error.code = code;
+      throw error;
+    }
+  } else {
+    path = await realpath(resolve(root, fixture.relativePath));
+  }
+  const rel = relative(root, path);
+  if (rel === '..' || rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) || isAbsolute(rel)) {
+    throw validationError('NATIVE_FIXTURE_OUTSIDE_ROOT', 'Pinned Lua input escaped its configured root.');
+  }
+  return { path, fixture, selection: registry ? 'registered-pinned-corpus' : 'pinned-corpus' };
+}
+
+export async function runNativeLuabndValidation(explicitPath) {
+  const selected = await selectNativeLuabndInput(explicitPath);
+  const bytes = await readInput(selected.path);
+  const sourceHash = sha256(bytes);
+  if (selected.fixture && (bytes.length !== selected.fixture.byteLength || sourceHash !== selected.fixture.sha256)) {
+    throw validationError('FIXED_CORPUS_HASH_MISMATCH', 'Lua input differs from the pinned correctness corpus.');
+  }
+  // Never select an arbitrary binary or an implicit dotnet rebuild. The same
+  // production receipt used by the app must match the current Bridge inputs.
+  const buildOptions = { runtimeIdentifier: process.platform === 'linux' ? 'linux-x64' : 'win-x64' };
+  const fresh = await assertBridgeProductionBuildFresh(repoRoot, buildOptions);
+  const bridgeExecutablePath = join(repoRoot, bridgeBuildTarget(buildOptions).executable);
+  const { createBridgeDaemonScope } = await import('../packages/core/dist/bridge/runBridge.js');
+  const owned = await createOwnedTemporaryDirectory('native-luabnd-validation');
+  const scope = createBridgeDaemonScope();
+  try {
+    const inputRoot = join(owned.root, 'input');
+    const stageRoot = join(owned.root, 'staging');
+    await mkdir(inputRoot);
+    await mkdir(stageRoot);
+    const source = join(inputRoot, 'original.luabnd.dcx');
+    await writeFile(source, bytes, { flag: 'wx' });
+    const run = (command, filePath = source, commandOptions) => scope.run({
+      bridgeExecutablePath, command, filePath,
+      allowedRoots: [inputRoot, stageRoot], writableRoots: [stageRoot],
+      commandOptions, timeoutMs: 120_000, maxFrameBytes: 32 * 1024 * 1024,
+      ...(process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim()
+        ? { oodleRuntimeRoot: process.env.SOULFORGE_SEKIRO_GAME_ROOT.trim() } : {})
+    });
+    const document = requireData(await run('read-luabnd-document'), 'read-luabnd-document');
+    assert.equal(document.format, 'LUABND');
+    assert.equal(document.sourceHash, sourceHash);
+    assert.equal(document.scriptCount, document.scripts.length);
+    assert.ok(document.scriptCount > 0);
+    if (selected.fixture) {
+      assert.equal(document.entryCount, selected.fixture.expected.entryCount);
+      assert.equal(document.scriptCount, selected.fixture.expected.luaEntryCount);
+      // Retain the existing independent observations for this exact pinned
+      // aicommon hash; arbitrary explicit inputs do not inherit these counts.
+      assert.equal(document.hasLuagnl, true);
+      assert.equal(document.hasLuainfo, true);
+      assert.equal(document.luagnl.symbolCount, 1739);
+      assert.equal(document.luagnl.symbolsSample[0], 'GOAL_COMMON_TopGoal');
+      assert.equal(document.luainfo.goalCount, 96);
+      assert.equal(document.luainfo.goalsSample[0].goalId, 2000);
+      assert.equal(document.luainfo.goalsSample[0].name, 'Wait');
+    }
+    assert.equal(document.roundTrip?.byteIdentical, true);
+    assert.equal(document.layoutGuard?.acceptsNoOp, true);
+    requirePreservation(document.fieldPreservation);
+    const baseline = requireData(await run('read-dcx-document'), 'read-dcx-document', ['ok', 'partial']);
+    assert.equal(baseline.sourceHash, sourceHash);
+    assert.equal(baseline.nested?.entryCount, document.entryCount);
+    assert.equal(baseline.nested?.entries.length, document.entryCount);
+    requirePreservation(baseline.nested.fieldPreservation);
+
+    // Every script is read with both source and child CAS hashes. Bytecode is
+    // inspected and preserved as bytes; only a plaintext entry is modified.
+    let target;
+    for (const script of document.scripts) {
+      const detail = requireData(await run('read-luabnd-script', source, {
+        entryIndex: script.index, expectedContainerHash: sourceHash, expectedChildHash: script.contentHash
+      }), 'read-luabnd-script');
+      assert.equal(detail.contentHash, script.contentHash);
+      assert.equal(sha256(Buffer.from(detail.contentBase64, 'base64')), script.contentHash);
+      assert.equal(detail.isBytecode, script.isBytecode);
+      if (selected.fixture && script.sanitizedName === '000110_platoon.lua') {
+        assert.equal(detail.isBytecode, true);
+        assert.equal(detail.isPlainText, false);
+        assert.equal(detail.magic, '\\x1bLuaP');
+        assert.ok(detail.variant.includes('Havok Script / Sekiro variant'));
+        assert.ok(detail.embeddedSymbols.includes('Platoon000110_Activate'));
+        assert.ok(detail.embeddedSymbols.includes('SetEnablePlatoonMove'));
+        assert.ok(detail.textPreview.includes('SoulForge Lua Bytecode Preview'));
+      }
+      if (selected.fixture && script.sanitizedName === 'goal_list.lua') {
+        assert.equal(detail.isPlainText, true);
+        assert.ok(detail.textContent.includes('GOAL_COMMON_TopGoal = 0'));
+        assert.ok(detail.lineCount > 100);
+      }
+      if (!target && detail.isPlainText && Buffer.from(detail.contentBase64, 'base64').some(byte => byte >= 65 && byte <= 90)) target = detail;
+    }
+    if (!target) throw validationError('LUABND_PLAINTEXT_INPUT_UNAVAILABLE', 'A plaintext Lua script is required for the scoped staged write check.', 'unavailable');
+    const replacement = Buffer.from(target.contentBase64, 'base64');
+    const position = replacement.findIndex(byte => byte >= 65 && byte <= 90);
+    replacement[position] += 32; // same-size owned test mutation
+    const mutation = { entryIndex: target.index, expectedContainerHash: sourceHash,
+      expectedChildHash: target.contentHash, contentBase64: replacement.toString('base64') };
+
+    const blockedOutput = join(inputRoot, 'forbidden-output.luabnd.dcx');
+    const outputBoundary = requireFailure(await run('write-luabnd-script', source, {
+      ...mutation, outputPath: blockedOutput
+    }), 'BRIDGE_OUTPUT_OUTSIDE_WRITABLE_ROOTS');
+    assert.equal(existsSync(blockedOutput), false);
+    const containerHash = requireFailure(await run('read-luabnd-script', source, {
+      entryIndex: target.index, expectedContainerHash: '0'.repeat(64)
+    }), 'LUABND_CONTAINER_HASH_MISMATCH');
+    const childHash = requireFailure(await run('read-luabnd-script', source, {
+      entryIndex: target.index, expectedContainerHash: sourceHash, expectedChildHash: '0'.repeat(64)
+    }), 'LUABND_CHILD_HASH_MISMATCH');
+    const missingScript = requireFailure(await run('read-luabnd-script', source, {
+      childPath: `__missing_${randomUUID()}.lua`
+    }), 'LUABND_SCRIPT_READ_FAILED');
+
+    const exportDirectory = join(stageRoot, 'export');
+    const exported = requireData(await run('export-luabnd', source, {
+      outputPath: exportDirectory, includeMetadataJson: true
+    }), 'export-luabnd');
+    assert.equal(exported.scriptCount, document.scriptCount);
+    for (const file of exported.files) {
+      const rel = relative(exportDirectory, file.path);
+      assert.ok(rel && !rel.startsWith('..') && !isAbsolute(rel), 'Export escaped owned staging.');
+      const content = await readFile(file.path);
+      if (file.hash) assert.equal(sha256(content), file.hash);
+    }
+    for (const script of document.scripts) {
+      assert.equal(sha256(await readFile(join(exportDirectory, script.sanitizedName))), script.contentHash);
+    }
+    const manifest = JSON.parse((await readFile(join(exportDirectory, 'luabnd.manifest.json'), 'utf8')).replace(/^\uFEFF/u, ''));
+    assert.equal(manifest.sourceHash, sourceHash);
+    assert.equal(manifest.totalEntries, document.entryCount);
+    assert.equal(manifest.scriptCount, document.scriptCount);
+    for (const [metadata, filename, key] of [[document.luagnl, 'luagnl.symbols.json', 'symbolCount'],
+      [document.luainfo, 'luainfo.goals.json', 'goalCount']]) {
+      if (!metadata) continue;
+      const json = JSON.parse((await readFile(join(exportDirectory, filename), 'utf8')).replace(/^\uFEFF/u, ''));
+      assert.equal(json[key], metadata[key]);
+    }
+
+    const outputPath = join(stageRoot, 'modified.luabnd.dcx');
+    const written = await run('write-luabnd-script', source, { ...mutation, outputPath });
+    const proof = requireData(written, 'write-luabnd-script', ['partial']);
+    assert.ok(written.diagnostics.some(item => item.code === 'BND4_STAGING_WRITE_VERIFIED'));
+    assert.equal(proof.rereadVerified, true);
+    const preservation = proof.bndWriteResult?.preservation;
+    assert.equal(proof.bndWriteResult?.rereadVerified, true);
+    assert.equal(preservation?.allPreserved, true);
+    assert.equal(preservation.matchedEntryCount, document.entryCount);
+    assert.equal(preservation.headerFieldsPreservedCount, document.entryCount);
+    assert.equal(preservation.storedBytesCheckedCount, document.entryCount - 1);
+    assert.equal(preservation.storedBytesPreservedCount, document.entryCount - 1);
+    requirePreservation(proof.bndWriteResult.fieldPreservation);
+    const outputHash = sha256(await readInput(outputPath));
+    assert.notEqual(outputHash, sourceHash);
+    const reread = requireData(await run('read-luabnd-script', outputPath, {
+      entryIndex: target.index, expectedContainerHash: outputHash,
+      expectedChildHash: sha256(replacement)
+    }), 'read-luabnd-script');
+    assert.deepEqual(Buffer.from(reread.contentBase64, 'base64'), replacement);
+    const after = requireData(await run('read-dcx-document', outputPath), 'read-dcx-document', ['ok', 'partial']);
+    assert.equal(after.sourceHash, outputHash);
+    assert.equal(after.nested.entryCount, baseline.nested.entryCount);
+    requirePreservation(after.nested.fieldPreservation);
+    for (const entry of baseline.nested.entries) {
+      const next = after.nested.entries[entry.index];
+      assert.equal(next.index, entry.index);
+      assert.equal(next.id, entry.id);
+      assert.equal(next.name, entry.name);
+      assert.equal(next.flags, entry.flags);
+      assert.equal(next.unknown, entry.unknown);
+      assert.equal(next.compressedSize, entry.compressedSize);
+      assert.equal(next.uncompressedSize, entry.uncompressedSize);
+      if (entry.index !== target.index) assert.equal(next.contentHash, entry.contentHash);
+    }
+    assert.equal(sha256(await readInput(source)), sourceHash);
+    assert.equal(sha256(await readInput(selected.path)), sourceHash);
+    return { ok: true, status: 'passed', scope: 'single-source Lua binder read/export/staged-write/readback',
+      selection: selected.selection, sourceHash, outputHash,
+      bridgeSourceHash: fresh.current.source.sha256, bridgeExecutableHash: fresh.current.executable.sha256,
+      entryCount: document.entryCount, scriptCount: document.scriptCount,
+      symbolCount: document.luagnl?.symbolCount ?? null, goalCount: document.luainfo?.goalCount ?? null,
+      compression: document.dcxCompression, unchangedEntriesVerified: document.entryCount - 1,
+      sourceUnchanged: true, stagedWriteVerified: true, nativeWriterPreservationVerified: true,
+      exportVerified: true, unknownFieldsPreserved: true,
+      negativeControls: { outputBoundary, containerHash, childHash, missingScript },
+      fullCorpusAcceptance: false,
+      notRun: ['other Lua binders', ...(document.dcxCompression !== 'KRAK' ? ['KRAK/Oodle corpus'] : []), 'Patch Engine commit/rollback', 'game execution'] };
+  } finally {
+    // Drain our daemon before deleting its source/stage root, including failures.
+    try { await scope.dispose(); } finally { await owned.dispose(); }
+  }
+}
+
+function requireData(result, command, statuses = ['ok']) {
+  if (!statuses.includes(result.parseStatus) || !result.data || result.diagnostics?.some(item => item.severity === 'error')) {
+    const diagnostic = result.diagnostics?.find(item => item.severity === 'error') ?? result.diagnostics?.[0];
+    throw validationError(diagnostic?.code ?? 'LUABND_BRIDGE_PROOF_MISSING',
+      `${command}: ${diagnostic?.message ?? 'Native result/proof missing.'}`,
+      diagnostic?.code === 'LUABND_KRAK_OODLE_UNAVAILABLE' ? 'unavailable' : 'failed');
+  }
+  return result.data;
+}
+
+function requireFailure(result, code) {
+  assert.equal(result.parseStatus, 'failed');
+  assert.ok(result.diagnostics.some(item => item.code === code), `Expected ${code}, got ${JSON.stringify(result.diagnostics)}`);
+  return code;
+}
+
+function requirePreservation(preservation) {
+  for (const key of ['headerUnknownBytesPreserved', 'entryHeaderFieldsPreserved', 'storedBytesPreserved', 'namesPreserved']) {
+    assert.equal(preservation?.[key], true, `Native field preservation missing: ${key}`);
   }
 }
 
 async function main() {
-  console.log('--- 开始 FromSoftware *.luabnd.dcx 专有模块集成验证 ---');
-  assert(existsSync(bridgeExe), `Bridge 可执行文件不存在: ${bridgeExe}`);
-  assert(existsSync(modsAicommon), `测试 Mod 资源不存在: ${modsAicommon}`);
-
-  const tempRoot = resolve('.tmp/luabnd-verify-' + Date.now());
-  await mkdir(tempRoot, { recursive: true });
-
+  const args = process.argv.slice(2);
+  if (args.includes('--help')) {
+    console.log('Usage: node scripts/verify-native-luabnd.mjs [input.luabnd.dcx]\n'
+      + 'Input: SOULFORGE_LUABND_PATH, or SOULFORGE_NATIVE_FIXTURE_ROOT / SOULFORGE_SEKIRO_GAME_ROOT\n'
+      + 'with the pinned corpus and optional SOULFORGE_NATIVE_FIXTURE_REGISTRY. Writes use owned staging.');
+    return;
+  }
   try {
-    // 1. read-luabnd-document / inspect-luabnd
-    console.log('1. 验证 read-luabnd-document (mods/script/aicommon.luabnd.dcx)...');
-    const docRes = await runBridge('read-luabnd-document', modsAicommon);
-    assert.strictEqual(docRes.ok, true, `read-luabnd-document 应该成功: ${JSON.stringify(docRes.diagnostics)}`);
-    const doc = docRes.data;
-    assert.strictEqual(doc.format, 'LUABND');
-    assert.strictEqual(doc.entryCount, 106, '总条目应为 106');
-    assert.strictEqual(doc.scriptCount, 104, 'Lua 脚本条目应为 104');
-    assert.strictEqual(doc.hasLuagnl, true, '应含有 LUAGNL');
-    assert.strictEqual(doc.hasLuainfo, true, '应含有 LUAINFO');
-    assert.strictEqual(doc.luagnl.symbolCount, 1739, 'aiCommon.luagnl 应有 1739 个全局符号');
-    assert.strictEqual(doc.luagnl.symbolsSample[0], 'GOAL_COMMON_TopGoal', '首个符号应为 GOAL_COMMON_TopGoal');
-    assert.strictEqual(doc.luainfo.goalCount, 96, 'aiCommon.luainfo 应有 96 个目标定义');
-    assert.strictEqual(doc.luainfo.goalsSample[0].goalId, 2000, '首个目标 ID 应为 2000');
-    assert.strictEqual(doc.luainfo.goalsSample[0].name, 'Wait', '首个目标名应为 Wait');
-    assert.strictEqual(doc.roundTrip.byteIdentical, true, 'BND4 roundTrip 必须 byte-identical');
-    assert.strictEqual(doc.layoutGuard.acceptsNoOp, true, 'BND4 layoutGuard 必须通过');
-    assert.strictEqual(doc.fieldPreservation.headerUnknownBytesPreserved, true, '未知字段保持');
-    console.log('   ✓ 容器解析成功：104 个脚本、1739 个全局符号、96 个 AI 目标、字段完好保持。');
-
-    // 2. 地图脚本容器验证 (m11_00_00_00.luabnd.dcx)
-    console.log('2. 验证地图脚本容器 read-luabnd-document (mods/script/m11_00_00_00.luabnd.dcx)...');
-    const m11Res = await runBridge('read-luabnd-document', modsM11);
-    assert.strictEqual(m11Res.ok, true);
-    assert.strictEqual(m11Res.data.entryCount, 86);
-    assert.strictEqual(m11Res.data.scriptCount, 84);
-    assert.strictEqual(m11Res.data.luagnl.symbolCount, 4);
-    assert.strictEqual(m11Res.data.luainfo.goalCount, 1);
-    console.log('   ✓ 地图脚本容器解析成功：84 个脚本、4 个符号、1 个目标。');
-
-    // 3. read-luabnd-script 字节码脚本探测
-    console.log('3. 验证 read-luabnd-script (字节码脚本 000110_platoon.lua)...');
-    const platoonRes = await runBridge('read-luabnd-script', modsAicommon, { childPath: '000110_platoon.lua' });
-    assert.strictEqual(platoonRes.ok, true);
-    const platoon = platoonRes.data;
-    assert.strictEqual(platoon.isBytecode, true);
-    assert.strictEqual(platoon.isPlainText, false);
-    assert.strictEqual(platoon.magic, '\\x1bLuaP');
-    assert(platoon.variant.includes('Havok Script / Sekiro variant'));
-    assert(platoon.embeddedSymbols.includes('Platoon000110_Activate'), '应提取出 Platoon000110_Activate 符号');
-    assert(platoon.embeddedSymbols.includes('SetEnablePlatoonMove'), '应提取出 SetEnablePlatoonMove 符号');
-    assert(platoon.textPreview.includes('SoulForge Lua Bytecode Preview'), '应生成结构化预览文本');
-    console.log('   ✓ 字节码脚本探测成功：Magic \\x1bLuaP、Havok Script 变体，成功提取出内嵌符号常量池与结构化预览。');
-
-    // 4. read-luabnd-script 明文脚本读取
-    console.log('4. 验证 read-luabnd-script (明文脚本 goal_list.lua)...');
-    const goalRes = await runBridge('read-luabnd-script', modsAicommon, { childPath: 'goal_list.lua' });
-    assert.strictEqual(goalRes.ok, true);
-    const goal = goalRes.data;
-    assert.strictEqual(goal.isBytecode, false);
-    assert.strictEqual(goal.isPlainText, true);
-    assert(goal.textContent.includes('GOAL_COMMON_TopGoal = 0'), '应包含明文常数定义');
-    assert(goal.lineCount > 100, '明文脚本行数应大于 100 行');
-    console.log(`   ✓ 明文脚本探测成功：全明文 UTF-8，共 ${goal.lineCount} 行。`);
-
-    // 5. export-luabnd 容器全量解包与 JSON 描述符生成
-    console.log('5. 验证 export-luabnd 导出所有脚本与符号/目标清单...');
-    const exportDir = join(tempRoot, 'export_out');
-    const exportRes = await runBridge('export-luabnd', modsAicommon, { outputDirectory: exportDir });
-    assert.strictEqual(exportRes.ok, true);
-    assert.strictEqual(exportRes.data.scriptCount, 104);
-    assert(existsSync(join(exportDir, '000110_platoon.lua')), '000110_platoon.lua 必须存在');
-    assert(existsSync(join(exportDir, 'goal_list.lua')), 'goal_list.lua 必须存在');
-    assert(existsSync(join(exportDir, 'aiCommon.luagnl')), 'aiCommon.luagnl 必须存在');
-    assert(existsSync(join(exportDir, 'aiCommon.luainfo')), 'aiCommon.luainfo 必须存在');
-    assert(existsSync(join(exportDir, 'luagnl.symbols.json')), 'luagnl.symbols.json 必须存在');
-    assert(existsSync(join(exportDir, 'luainfo.goals.json')), 'luainfo.goals.json 必须存在');
-    const rawJson = await readFile(join(exportDir, 'luagnl.symbols.json'), 'utf8');
-    const exportedSymbols = JSON.parse(rawJson.replace(/^\uFEFF/, ''));
-    assert.strictEqual(exportedSymbols.symbolCount, 1739);
-    console.log(`   ✓ 导出功能验证成功：解包了全部 104 个脚本及符号/目标 JSON 描述符。`);
-
-    // 6. write-luabnd-script 精确替换写回机制与无损 DCX/BND4 封装
-    console.log('6. 验证 write-luabnd-script 精确替换写回...');
-    const writeOutPath = join(tempRoot, 'aicommon_modified.luabnd.dcx');
-    const updatedContent = 'GOAL_COMMON_TopGoal = 0\n-- SoulForge Luabnd Writeback Verification\nGOAL_COMMON_Normal = 1\n';
-    const writeRes = await runBridge('write-luabnd-script', modsAicommon, {
-      outputPath: writeOutPath,
-      childPath: 'goal_list.lua',
-      expectedContainerHash: doc.sourceHash,
-      expectedChildHash: goal.contentHash,
-      text: updatedContent
-    });
-    assert.strictEqual(writeRes.ok, true, `写入应成功: ${JSON.stringify(writeRes.diagnostics)}`);
-    assert.strictEqual(writeRes.data.rereadVerified, true, '重读必须通过验证');
-
-    // 重新打开修改后的容器，检验修改是否生效且其他条目是否无损
-    const rereadRes = await runBridge('read-luabnd-script', writeOutPath, { childPath: 'goal_list.lua' });
-    assert.strictEqual(rereadRes.ok, true);
-    assert.strictEqual(rereadRes.data.textContent, updatedContent, '修改后的脚本内容必须精确一致');
-
-    const rereadPlatoon = await runBridge('read-luabnd-script', writeOutPath, { childPath: '000110_platoon.lua' });
-    assert.strictEqual(rereadPlatoon.ok, true);
-    assert.strictEqual(rereadPlatoon.data.contentHash, platoon.contentHash, '其余 105 个条目必须保持字节完全不变');
-    console.log('   ✓ 写回与重读验证成功：目标脚本精确替换，DCX/BND4 重新封包合法，其余条目完全保持！');
-
-    // 7. 原版游戏 KRAK 压缩容器验证
-    if (existsSync(vanillaAicommon)) {
-      console.log('7. 验证原版游戏 KRAK 压缩容器 read-luabnd-document (script/aicommon.luabnd.dcx)...');
-      process.env.SOULFORGE_SEKIRO_GAME_ROOT = sekiroRoot;
-      const krakRes = await runBridge('read-luabnd-document', vanillaAicommon);
-      assert.strictEqual(krakRes.ok, true, `KRAK 解包应成功: ${JSON.stringify(krakRes.diagnostics)}`);
-      assert.strictEqual(krakRes.data.dcxCompression, 'KRAK');
-      assert.strictEqual(krakRes.data.entryCount, 106);
-      assert.strictEqual(krakRes.data.luagnl.symbolCount, 1738);
-      console.log('   ✓ 原版 KRAK 压缩 luabnd 解包验证成功！');
-    }
-
-    // 8. 异常与边界防御测试
-    console.log('8. 验证异常诊断与边界防御...');
-    const notFoundRes = await runBridge('read-luabnd-script', modsAicommon, { childPath: 'non_existent_script.lua' });
-    assert.strictEqual(notFoundRes.ok, false, '不存在的脚本必须返回失败');
-    assert.strictEqual(notFoundRes.diagnostics[0].code, 'LUABND_SCRIPT_READ_FAILED');
-
-    const mismatchRes = await runBridge('read-luabnd-script', modsAicommon, {
-      childPath: 'goal_list.lua',
-      expectedContainerHash: '0000000000000000000000000000000000000000000000000000000000000000'
-    });
-    assert.strictEqual(mismatchRes.ok, false, 'Container Hash 不匹配必须返回失败');
-    assert.strictEqual(mismatchRes.diagnostics[0].code, 'LUABND_CONTAINER_HASH_MISMATCH');
-    console.log('   ✓ 结构化错误诊断与防篡改 Hash 检查生效。');
-
-    console.log('\n======================================================');
-    console.log('🎉 所有 8 项 Luabnd 专有模块集成验证全部通过！');
-    console.log('======================================================');
-  } finally {
-    await rm(tempRoot, { recursive: true, force: true });
+    if (args.length > 1 || args[0]?.startsWith('--')) throw validationError('LUABND_VALIDATION_USAGE', 'Expected one optional Lua input path.');
+    const report = await runNativeLuabndValidation(args[0]);
+    console.log(JSON.stringify(report, null, 2));
+  } catch (error) {
+    const missing = ['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM'].includes(error.code);
+    console.error(JSON.stringify({ ok: false, status: missing ? 'unavailable' : error.status ?? 'failed',
+      code: missing ? 'LUABND_INPUT_UNAVAILABLE' : error.code ?? 'LUABND_VALIDATION_FAILED',
+      message: error.message, fullCorpusAcceptance: false }, null, 2));
+    process.exitCode = missing || error.status === 'unavailable' ? 2 : 1;
   }
 }
 
-main().catch((err) => {
-  console.error('Luabnd 验证失败:', err);
-  process.exit(1);
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

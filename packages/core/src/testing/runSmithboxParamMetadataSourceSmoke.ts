@@ -1,5 +1,6 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 import { createHash } from 'node:crypto';
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {

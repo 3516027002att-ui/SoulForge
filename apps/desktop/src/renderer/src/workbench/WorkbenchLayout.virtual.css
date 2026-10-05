@@ -1,0 +1,29 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/* ── 虚拟滚动列表 ── */
+/* 虚拟化器要一个自己测量的滚动容器。它嵌在已 overflow:auto 的
+   .workbench__column-body 里会出现双层滚动条，所以那一层由 .wb-list--virtual
+   压成不滚动，滚动权交给这里。
+   flex:1 + min-height:0 是必需的：缺 min-height 时 sizer 的绝对高度（5275×22px）
+   会把容器撑开，虚拟化失效并退化成全量渲染的观感。 */
+.wb-virtual-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+/* sizer 撑出总高度，行用 transform 定位到各自偏移。
+   用 transform 而非 top：transform 不触发布局，滚动时更稳。 */
+.wb-virtual-sizer { position: relative; width: 100%; }
+.wb-virtual-row {
+  position: absolute; top: 0; left: 0; width: 100%;
+  align-items: center;
+}

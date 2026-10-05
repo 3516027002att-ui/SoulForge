@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory } from './harness/smokeWorkspace.js';
 /** T01/T09 原生读取证明冒烟：无台账 read→require 成功；伪造/过期/越权拒绝。 */
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
@@ -283,10 +284,10 @@ export async function runNativeReadProofSmoke(): Promise<void> {
   assert.throws(() => buildWriteRequirement('mutate_param_fields', { edits: [] }, 'outer'), /WRITE_REQUIREMENT_EMPTY_EDITS/);
   // 会话证明边界端到端（stub 注册表，无原生环境）：
   // 预读证明 → stub 写入放行；无证明 → 拒绝且 writer 未被调用。
-  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
+  const { mkdir, writeFile, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const overlayRoot = await mkdtemp(join(tmpdir(), 'soulforge-proof-gate-'));
+  const overlayRoot = await createSmokeTemporaryDirectory(join(tmpdir(), 'soulforge-proof-gate-'));
   const containerDir = join(overlayRoot, 'param', 'gameparam');
   await mkdir(containerDir, { recursive: true });
   const containerPath = join(containerDir, 'gameparam.parambnd.dcx');

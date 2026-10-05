@@ -12,6 +12,14 @@ internal static class OodleRuntimeLocator
 
     public static OodleRuntimeOpenResult Open(string? gameRoot, string? sourceUri = null)
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return Failed(
+                "platform-unavailable", "none", "OODLE_PLATFORM_PROVIDER_UNAVAILABLE",
+                "The configured Sekiro runtime uses a Windows Oodle library. This host needs a separately supplied, compatible native provider; SoulForge will not load the Windows game DLL or download a substitute.",
+                sourceUri);
+        }
+
         if (string.IsNullOrWhiteSpace(gameRoot))
         {
             return Failed(

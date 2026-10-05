@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
+import { cursorIdentity } from '../workspace/cursorIdentity.js';
 
-type SearchTool = 'search_param_rows' | 'search_text_entries';
+type SearchTool = 'search_param_rows' | 'search_text_entries' | 'search_tae_events';
 interface SearchScope {
   workspaceId: string;
   tool: SearchTool;
@@ -38,15 +39,16 @@ export function contentSearchPage<T>(options: {
   let offset = input.offset ?? 0;
   let expectedHash: string | undefined;
   let legacyScope: SearchScope | undefined;
-  const domain = options.tool === 'search_param_rows' ? 'param' : 'fmg';
+  const domain = options.tool === 'search_param_rows' ? 'param' : options.tool === 'search_tae_events' ? 'tae' : 'fmg';
   if (input.cursor !== undefined) {
     if (typeof input.cursor !== 'string' || input.offset !== undefined) invalid('续页只传 cursor，不同时传 offset。');
     const payload = parseOpaqueCursor(input.cursor);
-    if (!['content-search-v1', 'content-search-v2'].includes(payload.sessionId) || payload.domain !== domain) invalid('游标不属于当前内容搜索。');
+    if (!['content-search-v1', 'content-search-v2', 'content-search-v3'].includes(payload.sessionId) || payload.domain !== domain) invalid('游标不属于当前内容搜索。');
     let parsed: SearchScope;
     try { parsed = JSON.parse(payload.scope) as SearchScope; }
     catch { invalid('搜索游标范围无效。'); }
-    if (!parsed || parsed.workspaceId !== options.workspaceId || parsed.tool !== options.tool
+    const expectedWorkspaceId = payload.sessionId === 'content-search-v3' ? cursorIdentity(options.workspaceId) : options.workspaceId;
+    if (!parsed || parsed.workspaceId !== expectedWorkspaceId || parsed.tool !== options.tool
       || typeof parsed.query !== 'string' || !Array.isArray(parsed.paramNames)
       || parsed.paramNames.some((name) => typeof name !== 'string')
       || !Number.isSafeInteger(parsed.limit) || parsed.limit < 1 || parsed.limit > 6) invalid('游标与当前工作区或搜索工具不匹配。');
@@ -54,7 +56,7 @@ export function contentSearchPage<T>(options: {
       || (input.paramNames !== undefined && JSON.stringify(paramNames) !== JSON.stringify(parsed.paramNames))) invalid('续页时不能改变搜索条件。');
     if (input.limit !== undefined && scope.limit > parsed.limit) invalid('恢复当前页只能缩小窗口，不能扩大 limit。');
     if (payload.sessionId === 'content-search-v1') legacyScope = parsed;
-    scope = { ...parsed, limit: input.limit === undefined ? parsed.limit : scope.limit };
+    scope = { ...parsed, workspaceId: options.workspaceId, limit: input.limit === undefined ? parsed.limit : scope.limit };
     offset = payload.offset;
     expectedHash = payload.sourceHash;
   }
@@ -77,7 +79,8 @@ export function contentSearchPage<T>(options: {
   const end = offset + matches.length;
   const truncated = end < all.length;
   const nextCursor = truncated ? createOpaqueCursor({
-    sessionId: 'content-search-v2', domain, scope: JSON.stringify(scope), sourceHash, offset: end
+    sessionId: 'content-search-v3', domain,
+    scope: JSON.stringify({ ...scope, workspaceId: cursorIdentity(options.workspaceId) }), sourceHash, offset: end
   }) : undefined;
   return {
     query: scope.query, matches, total: all.length, totalCount: all.length,

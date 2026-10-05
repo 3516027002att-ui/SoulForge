@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * Imported-registry coverage cross-validation smoke.
  *
@@ -6,8 +7,7 @@
  *    distributions — clean kinds, vararg kinds, length-mismatch diagnostics,
  *    unknown kinds and instance-level accounting.
  * 2) Real corpus cross-validation (env-gated): `read-emevd-document` aggregate
- *    distribution of the registered common.emevd (142 kinds / 33,266
- *    instructions) is analyzed against an imported registry. Mismatch and
+ *    distribution of the registered common.emevd (hash-bound counts and kind distribution) is analyzed against an imported registry. Mismatch and
  *    unknown kinds get structured diagnostics (bank:id, observed length vs
  *    schema length). The imported registry comes from our synthetic DS3 JSON
  *    (deterministic leg) or from the user's real DarkScript3 EMEDF file when
@@ -21,7 +21,7 @@
  * Authority cap: partial — aggregate distribution only, no payload semantics.
  */
 
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
@@ -37,7 +37,7 @@ import {
   createSyntheticImportedEmedf
 } from './syntheticEmevdBytes.js';
 import { searchRealEmedf } from './realEmedfLocator.js';
-import { resolveNativeFixture } from './nativeFixtureRegistry.js';
+import { materializeFixedNativeFixture, fixedFixtureNumber, assertFixedInstructionDistribution, type FixedNativeFixture } from './nativeFixtureRegistry.js';
 
 interface EmevdEnvelope {
   sourceHash: string;
@@ -193,6 +193,7 @@ function syntheticChecks(): void {
 async function realCorpusCoverage(
   root: string,
   sourceDcx: string,
+  fixture: FixedNativeFixture,
   registry: EmedfRegistry,
   label: string
 ): Promise<EmevdCoverageAnalysis> {
@@ -213,9 +214,12 @@ async function realCorpusCoverage(
   assert(read.data?.instructionCount === distribution.reduce((sum, e) => sum + e.count, 0),
     'distribution instance total must equal envelope instructionCount');
 
+  assertFixedInstructionDistribution(fixture,distribution);
   const analysis = analyzeEmedfCoverage(registry, distribution, read.data?.instructionDistributionTruncated ?? false);
   assert(analysis.totalInstances === read.data?.instructionCount, 'analysis instance total');
-  assert(analysis.totalInstances === 33_266, `expected 33,266 instances, got ${analysis.totalInstances}`);
+  assert(read.data?.eventCount===fixedFixtureNumber(fixture,'eventCount'),'independent pinned event count');
+  assert(analysis.totalKinds===fixedFixtureNumber(fixture,'instructionKindCount'),'independent pinned instruction kinds');
+  assert(analysis.totalInstances === fixedFixtureNumber(fixture,'instructionCount'), `expected pinned instruction count, got ${analysis.totalInstances}`);
   assert(analysis.cleanInstances + analysis.mismatchInstances + analysis.unknownInstances === analysis.totalInstances,
     'instance buckets must sum to total');
 
@@ -256,29 +260,27 @@ async function main(): Promise<void> {
   const emedfPathArg = process.env.SOULFORGE_EMEDF_PATH?.trim()
     || process.argv[3]?.trim()
     || (await searchRealEmedf());
-  const nativeEnvAvailable = Boolean(
-    (process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY?.trim() && process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim())
-    || nativeFixtureArg
-  );
   const skipReasons: string[] = [];
   let realEmedfCovered = false;
   try {
+  const fixed=await materializeFixedNativeFixture('emevd-primary',root,nativeFixtureArg);
+  const nativeEnvAvailable=fixed.status==='available';
     syntheticChecks();
 
-    if (nativeEnvAvailable) {
-      const sourceDcx = await resolveNativeFixture(nativeFixtureArg, 'emevd-primary', '../../mods/event/common.emevd.dcx');
+    if (fixed.status==='available') {
+      const sourceDcx = fixed.path;
 
       // Deterministic cross-validation: synthetic imported registry vs real corpus.
       const syntheticImported = createSyntheticImportedEmedf();
-      const cleanAnalysis = await realCorpusCoverage(root, sourceDcx, syntheticImported, 'synthetic-imported');
+      const cleanAnalysis = await realCorpusCoverage(root, sourceDcx, fixed.fixture, syntheticImported, 'synthetic-imported');
       assert(cleanAnalysis.cleanKinds === 2, `synthetic-imported cleanKinds ${cleanAnalysis.cleanKinds}`);
       assert(cleanAnalysis.varargKinds === 1, `synthetic-imported varargKinds ${cleanAnalysis.varargKinds}`);
       assert(cleanAnalysis.mismatchInstances === 0, 'clean synthetic schema must have no mismatches');
-      assert(cleanAnalysis.unknownKinds.length === 140, `synthetic-imported unknownKinds ${cleanAnalysis.unknownKinds.length}`);
+      assert(cleanAnalysis.unknownKinds.length === fixedFixtureNumber(fixed.fixture,'instructionKindCount')-2, `synthetic-imported unknownKinds ${cleanAnalysis.unknownKinds.length}`);
 
       // Length-signature mismatch probe against real data: 1000:4 is observed at
       // 4 bytes but the probe schema claims 8 — must be a structured mismatch.
-      const probeAnalysis = await realCorpusCoverage(root, sourceDcx, mismatchProbeRegistry(syntheticImported), 'mismatch-probe');
+      const probeAnalysis = await realCorpusCoverage(root, sourceDcx, fixed.fixture, mismatchProbeRegistry(syntheticImported), 'mismatch-probe');
       const probeMismatch = probeAnalysis.lengthMismatches.find((m) => m.bank === 1000 && m.id === 4);
       assert(probeMismatch !== undefined, 'real-corpus mismatch probe must report 1000:4');
       assert(probeMismatch.schemaLength === 8 && probeMismatch.observedLengths.includes(4),
@@ -288,25 +290,26 @@ async function main(): Promise<void> {
       if (emedfPathArg) {
         const realImport = importDs3EmedfFile(emedfPathArg);
         if (!realImport.ok) throw new Error(`real EMEDF import failed: ${realImport.message}`);
-        await realCorpusCoverage(root, sourceDcx, realImport.registry, 'real-emedf');
+        await realCorpusCoverage(root, sourceDcx, fixed.fixture, realImport.registry, 'real-emedf');
         realEmedfCovered = true;
       } else {
         skipReasons.push('SOULFORGE_EMEDF_PATH 未设置且未提供 arg 3：真实 DarkScript3 EMEDF 文件缺失，真实导入 EMEDF 的真实 corpus 交叉验证 fail-closed 跳过。');
       }
     } else {
-      skipReasons.push('SOULFORGE_NATIVE_FIXTURE_REGISTRY/SOULFORGE_NATIVE_FIXTURE_ROOT 未设置：真实 corpus 分布 leg 跳过。');
+      skipReasons.push(fixed.status==='unavailable'?`${fixed.code}: ${fixed.message}`:'Pinned corpus unavailable.');
     }
 
     console.log(JSON.stringify({
       ok: true,
       message: '导入 registry 覆盖交叉验证 smoke 完成',
       syntheticChecks: 'passed',
-      realCorpusLegs: nativeEnvAvailable ? 'synthetic-imported + mismatch-probe（含真实 142 种 / 33,266 条）' : 'skipped',
+      realCorpusLegs: nativeEnvAvailable ? 'pinned synthetic-imported + mismatch-probe' : 'skipped',
       realEmedfCoverage: realEmedfCovered ? 'passed' : 'skipped',
+      corpusInput: fixed.status==='available'?{status:'available',version:fixed.version,sha256:fixed.fixture.sha256}:fixed,
       skips: skipReasons,
       nonClaims: [
         '覆盖分析只基于聚合分布（长度签名），不读取 payload 语义。',
-        '合成导入 registry 只覆盖 0:0 / 2000:0 / 2003:1 三种指令族，真实 corpus 其余 140 种保持 unknown/unsupported。',
+        '合成导入 registry 只覆盖 0:0 / 2000:0 / 2003:1 三种指令族，真实 corpus 其它未覆盖种类保持 unknown/unsupported。',
         'authority 上限为 partial；cleanKinds 高不代表参数类型正确，只代表长度签名一致。'
       ]
     }, null, 2));

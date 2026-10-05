@@ -1,3 +1,4 @@
+import { journalStateWithRequest, noteOperationStarted } from '../runtime/operationOutcome.js';
 /**
  * Durable PatchIR commit: pending op log → WorkspaceTransaction → committed/recovery.
  * Ensures ok=true implies a findable recoverable operation record (or recovery metadata).
@@ -79,6 +80,7 @@ export async function executePatchIrThroughTransaction(
 ): Promise<TransactionCommitCompatResult> {
   const opId = patch.patchId || randomUUID();
   const store: OperationLogStore = options.operationLog ?? getDefaultOperationLogStore();
+  noteOperationStarted(opId, store);
   const workspaceRoot = options.workspaceRoot
     ?? options.session?.layers.overlayRoot;
   if (!workspaceRoot) {
@@ -213,7 +215,7 @@ export async function executePatchIrThroughTransaction(
         transactionId: tx.transactionId,
         opId,
         phase: 'pending',
-        state: { operationCount: patch.operations.length },
+        state: journalStateWithRequest({ operationCount: patch.operations.length }),
         createdAt: now,
         updatedAt: now
       });
@@ -479,7 +481,7 @@ export async function executePatchIrThroughTransaction(
       payload: { changedFileCount: committed.committedPaths.length },
       createdAt: new Date().toISOString()
     };
-    const finalState = { changedFileCount: committed.committedPaths.length };
+    const finalState = journalStateWithRequest({ changedFileCount: committed.committedPaths.length });
     if (store.finalizeCommit) {
       await store.finalizeCommit({
         operation,
@@ -688,7 +690,7 @@ async function transitionJournal(
 ): Promise<Diagnostic | null> {
   if (!store.transitionTransaction) return null;
   try {
-    await store.transitionTransaction({ transactionId, expectedPhase, nextPhase, state });
+    await store.transitionTransaction({ transactionId, expectedPhase, nextPhase, state: journalStateWithRequest(state) });
     return null;
   } catch (error) {
     return journalDiagnostic('TRANSACTION_JOURNAL_TRANSITION_FAILED', error, transactionId, {

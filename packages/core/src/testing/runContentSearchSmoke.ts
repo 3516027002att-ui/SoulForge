@@ -5,9 +5,24 @@ import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { resolveEntity } from '../ai/entityResolution.js';
 import { buildNameMatchEdges } from '../references/referenceProviderRegistry.js';
 import { buildParamReferenceEdges } from '../references/paramReferenceProvider.js';
+import { assertCursorPrivacy } from './harness/assertCursorPrivacy.js';
+import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
 
 const original = ('函数("中文 😀", "\\路径");\n').repeat(600);
 let cursor: string | undefined;
+const privateSourceKey = 'file:///home/alice/private-mod-workspace|file://msg/item.msgbnd.dcx|Title|10';
+for (const domain of ['script', 'fmg'] as const) {
+  const privatePage = sourceTextPage({ text: 'native-text'.repeat(500), sourceKey: privateSourceKey, sourceHash: 'native-child', domain });
+  assert.equal(assertCursorPrivacy(privatePage, [privateSourceKey, '/home/alice', 'private-mod-workspace']), 1);
+  const continued = sourceTextPage({ text: 'native-text'.repeat(500), sourceKey: privateSourceKey, sourceHash: 'native-child', domain, cursor: privatePage.nextCursor! });
+  assert.equal(continued.offset, privatePage.returned);
+  assert.throws(() => sourceTextPage({ text: 'native-text'.repeat(500), sourceKey: privateSourceKey + '-other-resource', sourceHash: 'native-child', domain, cursor: privatePage.nextCursor! }), { code: 'SOURCE_CURSOR_SCOPE_MISMATCH' });
+  const legacy = createOpaqueCursor({ ...parseOpaqueCursor(privatePage.nextCursor!), sessionId: 'source-text-v1',
+    scope: JSON.stringify({ sourceKey: privateSourceKey, limit: privatePage.limit }) });
+  const migrated = sourceTextPage({ text: 'native-text'.repeat(500), sourceKey: privateSourceKey, sourceHash: 'native-child', domain, cursor: legacy });
+  assert.equal(migrated.offset, privatePage.returned);
+  assert.equal(assertCursorPrivacy(migrated, [privateSourceKey, 'private-mod-workspace']), 1);
+}
 let assembled = '';
 let pages = 0;
 do {

@@ -27,6 +27,7 @@ function makeTaeExport(): TaeExport {
   });
   return {
     chrId: 'c0000',
+    readerSchemaRevision: 2,
     sourceUri: 'file:///chr/c0000.anibnd.dcx',
     sourceHash: 'aggregate-hash',
     taeEntryCount: 2,

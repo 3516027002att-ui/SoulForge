@@ -45,13 +45,43 @@ declare const __SOULFORGE_RENDERER_ROOT__: string;
  * 期真的生效，那部分由 e2e 覆盖。
  */
 function readAppSource(): string {
-  return readFileSync(resolve(__SOULFORGE_RENDERER_ROOT__, 'App.tsx'), 'utf8');
+  const app = readFileSync(resolve(__SOULFORGE_RENDERER_ROOT__, 'App.tsx'), 'utf8');
+  // State now belongs to domain controllers invoked by App. Follow only those
+  // actual imports, preserving the existing missing/extra-setter negatives.
+  const owners = [...app.matchAll(/from ['"]\.\/app\/(use\w+Controller)\.js['"]/g)]
+    .map(match => readFileSync(resolve(__SOULFORGE_RENDERER_ROOT__, 'app', `${match[1]}.ts`), 'utf8'));
+  return [app, ...owners].join('\n');
 }
 
 function makeActions(record: DocumentFamily[]): DocumentResetActions {
   return Object.fromEntries(
     DOCUMENT_FAMILIES.map((family) => [family, () => { record.push(family); }])
   ) as DocumentResetActions;
+}
+
+function functionBody(source: string, name: string): string {
+  return new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`).exec(source)?.[0]
+    ?? new RegExp(`const ${name} = useCallback\\([\\s\\S]*?\\n  \\}, \\[[^\\]]*\\]\\);`).exec(source)?.[0]
+    ?? '';
+}
+
+function workspaceDelegateHasReset(source: string, name: string): boolean {
+  const target = functionBody(source, name);
+  if (/resetAllDocuments\(documentResetActions\)/.test(target)) return true;
+  // The Workspace owner invokes its explicit installation callback; inspect
+  // the actual App binding and reset body, rather than trusting a callback name.
+  if (!/onWorkspaceInstalled\(result\)/.test(target)) return false;
+  const binding = /onWorkspaceInstalled:\s*(\w+)/.exec(source)?.[1];
+  return binding !== undefined && /resetAllDocuments\(documentResetActions\)/.test(functionBody(source, binding));
+}
+
+function selectionDelegateHasReset(source: string): boolean {
+  const select = functionBody(source, 'selectFile');
+  if (/resetAllDocuments\(documentResetActions\)/.test(select)) return true;
+  if (!/activateSelection\(file, true\)/.test(select)) return false;
+  if (!/portsRef\.current\.onSelectionActivated\(\)/.test(functionBody(source, 'activateSelection'))) return false;
+  const binding = /onSelectionActivated:\s*(\w+)/.exec(source)?.[1];
+  return binding !== undefined && /resetAllDocuments\(documentResetActions\)/.test(functionBody(source, binding));
 }
 
 describe('resetAllDocuments', () => {
@@ -164,16 +194,13 @@ describe('两处复位站点必须走统一调度', () => {
     // 委派形态：await someFn(...)。取被调用者名字，再断言它复位。
     const delegated = [...body.matchAll(/await\s+(\w+)\s*\(/g)]
       .map((hit) => hit[1])
-      .filter((name) => name !== 'bridge');
+      .filter((name): name is string => typeof name === 'string' && name !== 'bridge');
     assert.ok(
       delegated.length > 0,
       'openWorkspace 既不自己调用 resetAllDocuments，也没有委派给任何函数：'
       + '实测它此前 8 个族一个都没复位'
     );
-    const delegateHasReset = delegated.some((name) => {
-      const target = new RegExp(`async function ${name}\\([\\s\\S]*?\\n  \\}`).exec(source);
-      return target !== null && /resetAllDocuments\(documentResetActions\)/.test(target[0]);
-    });
+    const delegateHasReset = delegated.some(name => workspaceDelegateHasReset(source, name));
     assert.ok(
       delegateHasReset,
       `openWorkspace 委派给了 ${delegated.join(' / ')}，但其中没有一个调用 `
@@ -182,14 +209,32 @@ describe('两处复位站点必须走统一调度', () => {
     );
   });
 
+  it('工作区复位委派丢掉真实安装callback绑定或其reset时必须报错', () => {
+    assert.equal(workspaceDelegateHasReset(source, 'mountWorkspace'), true);
+    const detached = source.replace(/onWorkspaceInstalled:\s*installWorkspaceViews/, 'onWorkspaceInstalled: disconnectedWorkspaceViews');
+    assert.notEqual(detached, source, '真实安装callback绑定已移动，请更新负例');
+    assert.equal(workspaceDelegateHasReset(detached, 'mountWorkspace'), false);
+    const body = functionBody(source, 'installWorkspaceViews');
+    assert.ok(body.includes('resetAllDocuments(documentResetActions)'));
+    const omitted = source.replace(body, body.replace('resetAllDocuments(documentResetActions);', ''));
+    assert.equal(workspaceDelegateHasReset(omitted, 'mountWorkspace'), false);
+  });
+
   it('selectFile 调用 resetAllDocuments', () => {
-    const match = /async function selectFile\([\s\S]*?\n  \}/.exec(source);
-    assert.ok(match, '找不到 selectFile，测试靶标已失效');
-    assert.match(
-      match[0],
-      /resetAllDocuments\(documentResetActions\)/,
+    assert.ok(functionBody(source, 'selectFile'), '找不到 selectFile，测试靶标已失效');
+    assert.equal(
+      selectionDelegateHasReset(source), true,
       'selectFile 必须清空全部资源族：实测它此前漏掉 FMG/PARAM/EMEVD/MSB'
     );
+  });
+
+  it('资源选择复位委派必须连接真实App callback且执行统一reset', () => {
+    const detached = source.replace(/onSelectionActivated:\s*activateResourceSelection/, 'onSelectionActivated: disconnectedResourceSelection');
+    assert.notEqual(detached, source, '实际资源选择callback已移动，请更新负例');
+    assert.equal(selectionDelegateHasReset(detached), false);
+    const body = functionBody(source, 'activateResourceSelection');
+    const omitted = source.replace(body, body.replace('resetAllDocuments(documentResetActions);', ''));
+    assert.equal(selectionDelegateHasReset(omitted), false);
   });
 
   it('复位站点不得退回手写清空列表', () => {
@@ -210,11 +255,8 @@ describe('两处复位站点必须走统一调度', () => {
      * 启动自动挂载共用后者）。继续扫 openWorkspace 等于扫一个空壳 —— 判据会
      * 恒真，而「有人在挂载流程里逐个手写 setTaeData(null)」正好逃掉。
      */
-    for (const [label, pattern] of [
-      ['mountWorkspace', /async function mountWorkspace\([\s\S]*?\n  \}/],
-      ['selectFile', /async function selectFile\([\s\S]*?\n  \}/]
-    ] as const) {
-      const body = pattern.exec(source)?.[0] ?? '';
+    for (const label of ['mountWorkspace', 'installWorkspaceViews', 'selectFile', 'activateResourceSelection']) {
+      const body = functionBody(source, label);
       assert.ok(body.length > 0, `找不到 ${label}，测试靶标已失效`);
       const handWritten = registered.filter(
         (setter) => new RegExp(`${setter}${clearingArgument}`).test(body)
@@ -229,17 +271,15 @@ describe('两处复位站点必须走统一调度', () => {
   });
 
   it('该判据能抓到手写清空的回退（负向）', () => {
-    // 在 selectFile 体内注入一条手写清空，判据必须报出来。
+    // 在 selectFile 实际委派的复位协调体内注入手写清空，判据必须报出来。
     // 用正则而不是字面量匹配：源文件是 CRLF，字面量里的 \n 不会命中，注入会静默
     // 失败而本用例照样通过——那正是「负向 fixture 自己失效」的形态。
-    const injected = source.replace(
-      /resetAllDocuments\(documentResetActions\);(\r?\n\s*)setBnd4Forced\(false\);/,
-      'setTaeData(null);$1setBnd4Forced(false);'
-    );
+    const target = functionBody(source, 'activateResourceSelection');
+    const injected = source.replace(target, target.replace('resetAllDocuments(documentResetActions);', 'setTaeData(null);'));
     assert.notEqual(injected, source, '注入失败：靶标已变，请更新本用例');
 
-    const body = /async function selectFile\([\s\S]*?\n  \}/.exec(injected)?.[0] ?? '';
-    assert.ok(body.length > 0, '注入后仍需能定位 selectFile 函数体');
+    const body = functionBody(injected, 'activateResourceSelection');
+    assert.ok(body.length > 0, '注入后仍需能定位资源复位协调体');
 
     // 复用生产判据的同一口径，确认它在注入后确实报出该 setter。
     const registered = DOCUMENT_FAMILIES.flatMap((family) => [...DOCUMENT_STATE_SETTERS[family]]);

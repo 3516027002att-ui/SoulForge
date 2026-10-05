@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * W-PARAM-META-NATIVE-01: Paramdex-compatible metadata ↔ native PARAM consistency.
  *
@@ -12,7 +13,7 @@
  *
  * Authority: partial — metadata is Paramdex-compatible, not native format authority.
  */
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';

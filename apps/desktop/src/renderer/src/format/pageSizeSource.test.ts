@@ -35,10 +35,10 @@ const PAGE_SIZE_CONSUMERS: ReadonlyArray<{
   files: readonly string[];
 }> = [
   {
-    // IPC 物理拆分后，FMG 分页通道位于 ipc/text.ts。
+    // IPC 物理拆分后，FMG 分页通道位于 services/textService.ts。
     symbol: 'FMG_PAGE_SIZE',
     files: [
-      'apps/desktop/src/main/ipc/text.ts',
+      'apps/desktop/src/main/services/textService.ts',
       // FmgWorkbenchPanel 3-C 起一次拿全表（REVEAL_SCAN_PAGE_SIZE 100000），
       // 不再分页消费该常量（同 PARAM 的 ParamTablePanel 先例）。
       'apps/desktop/e2e/editorFunctionalSmokeMain.mjs'
@@ -48,17 +48,17 @@ const PAGE_SIZE_CONSUMERS: ReadonlyArray<{
     symbol: 'PARAM_PAGE_SIZE',
     files: [
       'apps/desktop/src/main/ipc.ts',
-      // ParamDefPanel 已全量渲染行表（问题 5），不再分页消费该常量；PARAM_PAGE_SIZE
-      // 只作为跨进程运输契约保留（App 打开一张 param 经 includeAllPayloads 一次取回）。
-      'apps/desktop/src/renderer/src/App.tsx',
+      // PARAM document ownership moved from App to its session/index controller;
+      // the transport page size remains shared, with selected payload reads separate.
+      'apps/desktop/src/renderer/src/app/useParamDocumentController.ts',
       'apps/desktop/e2e/editorFunctionalSmokeMain.mjs'
     ]
   },
   {
-    // IPC 物理拆分后，容器/脚本分页通道位于 ipc/raw.ts。
+    // IPC 物理拆分后，容器/脚本分页通道位于 services/rawResourceService.ts。
     symbol: 'CONTAINER_PAGE_SIZE',
     files: [
-      'apps/desktop/src/main/ipc/raw.ts',
+      'apps/desktop/src/main/services/rawResourceService.ts',
       'apps/desktop/src/renderer/src/editors/Bnd4WorkbenchPanel.tsx',
       'apps/desktop/e2e/editorFunctionalSmokeMain.mjs'
     ]
@@ -66,7 +66,7 @@ const PAGE_SIZE_CONSUMERS: ReadonlyArray<{
   {
     symbol: 'SCRIPT_PAGE_SIZE',
     files: [
-      'apps/desktop/src/main/ipc/raw.ts',
+      'apps/desktop/src/main/services/rawResourceService.ts',
       'apps/desktop/src/renderer/src/editors/ScriptContainerPanel.tsx',
       'apps/desktop/e2e/editorFunctionalSmokeMain.mjs'
     ]
@@ -134,7 +134,7 @@ describe('页大小只有一个定义处', () => {
   });
 
   it('对账能发现本地重新定义（负向：注入一份本地定义）', () => {
-    const injected = `${readRepoFile('apps/desktop/src/main/ipc/text.ts')}\nconst FMG_PAGE_SIZE = 999;\n`;
+    const injected = `${readRepoFile('apps/desktop/src/main/services/textService.ts')}\nconst FMG_PAGE_SIZE = 999;\n`;
     assert.match(
       injected,
       /(?:const|let|var)\s+FMG_PAGE_SIZE\s*=\s*\d+/,
@@ -144,8 +144,8 @@ describe('页大小只有一个定义处', () => {
 
   it('对账能发现 import 被摘掉（负向：从 import 块里删掉符号）', () => {
     // FMG 面板 3-C 起全量加载，不再消费 FMG_PAGE_SIZE；负向靶标改用仍在消费它的
-    // ipc/text.ts（多符号 import 块，用通用替换摘掉该标识符）。
-    const source = readRepoFile('apps/desktop/src/main/ipc/text.ts');
+    // services/textService.ts（多符号 import 块，用通用替换摘掉该标识符）。
+    const source = readRepoFile('apps/desktop/src/main/services/textService.ts');
     const stripped = source.replace(/\bFMG_PAGE_SIZE\b/g, '');
     assert.notEqual(stripped, source, '注入失败：靶标已变，请更新本用例');
     const sharedImports = [...stripped.matchAll(/import\s*\{([^}]*)\}\s*from\s*'@soulforge\/shared'/g)]

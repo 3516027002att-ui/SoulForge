@@ -6,7 +6,8 @@
  * Covers: OpenAI + Anthropic complete()/stream(), real Anthropic SSE parsing
  * (partial_json tool-arg accumulation), Anthropic multi-turn tool loop
  * (assistant tool_use echo + tool_result mapping), policy/plan gating, evidence
- * gate, and the four-form secret redaction matrix (sk- / Bearer / header inline).
+ * typed zero-argument dispatch, and the four-form secret redaction matrix
+ * (sk- / Bearer / header inline).
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createConfiguredModelServiceAdapter } from '../model-services/configuredAdapter.js';
@@ -53,7 +54,7 @@ function startOpenAiFake(): Promise<{ baseUrl: string; close: () => Promise<void
     const preferredTool = parsed.tools?.[0]?.function?.name ?? 'search_workspace';
     const toolArgs = preferredTool === 'apply_patch'
       ? '{"patch":"demo"}'
-      : preferredTool === 'empty_args_test'
+      : preferredTool === 'workspace_stats'
         ? '{}'
       : '{"query":"boss"}';
     if (parsed.stream) {
@@ -225,6 +226,7 @@ async function main(): Promise<void> {
   const tools: ToolDefinition[] = [{
     name: 'search_workspace',
     description: 'Search workspace index',
+    permissionLevel: 'read',
     parametersJsonSchema: {
       type: 'object',
       properties: { query: { type: 'string' } },
@@ -233,6 +235,7 @@ async function main(): Promise<void> {
   }, {
     name: 'apply_patch',
     description: 'Would write via Patch Engine',
+    permissionLevel: 'commit',
     parametersJsonSchema: { type: 'object', properties: {} }
   }];
 
@@ -320,6 +323,7 @@ async function main(): Promise<void> {
       messages: [{ role: 'user', content: 'Find boss events' }],
       tools,
       permissionMode: 'normal',
+      requestApproval: async () => ({ decision: 'once' }),
       executeTool: async (call) => ({
         ok: true,
         content: JSON.stringify({ hits: 1, query: call.name, note: 'no secrets' })
@@ -333,6 +337,7 @@ async function main(): Promise<void> {
       messages: [{ role: 'user', content: 'Find ember refs' }],
       tools,
       permissionMode: 'normal',
+      requestApproval: async () => ({ decision: 'once' }),
       executeTool: async (call) => ({
         ok: true,
         content: JSON.stringify({ hits: 2, tool: call.name })
@@ -383,9 +388,11 @@ async function main(): Promise<void> {
       tools: [{
         name: 'apply_patch',
         description: 'write',
+        permissionLevel: 'commit',
         parametersJsonSchema: { type: 'object', properties: { patch: { type: 'string' } } }
       }],
       permissionMode: 'full',
+      requestApproval: async () => ({ decision: 'once' }),
       executeTool: async () => ({
         ok: false,
         code: 'PATCH_ENGINE_REQUIRED',
@@ -397,30 +404,41 @@ async function main(): Promise<void> {
       }),
       maxSteps: 3
     });
+    if (fullRun.audit.approvals?.length !== 1
+      || fullRun.audit.approvals[0]?.decision !== 'once'
+      || fullRun.audit.toolCalls.length !== 1
+      || fullRun.audit.toolCalls[0]?.code !== 'PATCH_ENGINE_REQUIRED'
+      || !fullRun.messages.some((message) => message.role === 'tool' && message.content.includes('PATCH_ENGINE_REQUIRED'))) {
+      throw new Error('Full permission must preserve explicit approval and Patch Engine refusal');
+    }
 
-    let fullEmptyArgsExecuted = false;
+    let fullEmptyArgsExecuted = 0;
     const fullEmptyArgsRun = await runAgentToolLoop(openaiAdapter, {
       config: openaiConfig,
       apiKey: OPENAI_KEY,
-      messages: [{ role: 'user', content: '无证据调用' }],
+      messages: [{ role: 'user', content: 'Read workspace statistics' }],
       tools: [{
-        name: 'empty_args_test',
-        description: 'must be rejected without evidence',
+        name: 'workspace_stats',
+        description: 'Read workspace statistics without arguments',
+        permissionLevel: 'read',
         parametersJsonSchema: { type: 'object', properties: {} }
       }],
       permissionMode: 'full',
-      executeTool: async () => {
-        fullEmptyArgsExecuted = true;
-        return { ok: true, content: '不应执行' };
+      executeTool: async (call) => {
+        if (call.name !== 'workspace_stats' || call.argumentsJson !== '{}') {
+          throw new Error('Declared zero-argument read received the wrong call');
+        }
+        fullEmptyArgsExecuted += 1;
+        return { ok: true, content: JSON.stringify({ files: 1 }) };
       },
-      maxSteps: 1
+      maxSteps: 2
     });
-    if (fullEmptyArgsExecuted
-      || !fullEmptyArgsRun.audit.toolCalls.some((call) => call.code === 'insufficient_evidence')) {
-      throw new Error('完全权限不得绕过证据门。');
+    if (fullEmptyArgsExecuted !== 1 || fullEmptyArgsRun.finishReason !== 'stop'
+      || fullEmptyArgsRun.audit.toolCalls.length !== 1 || !fullEmptyArgsRun.audit.toolCalls[0]?.ok) {
+      throw new Error('Declared zero-argument read must reach its executor exactly once');
     }
 
-    // insufficient evidence path
+    // Read permission remains independent of whether arguments are empty.
     const emptyArgsDeny = isToolAllowedInMode('search_workspace', 'normal', new Set(['search_workspace']));
     if (!emptyArgsDeny.ok) throw new Error('search should be allowed in normal');
 
@@ -514,7 +532,11 @@ async function main(): Promise<void> {
       },
       planModeDeniedWrite: denied.code,
       fullPermissionStillGated: fullRun.audit.toolCalls,
-      fullPermissionEvidenceGate: true,
+      declaredZeroArgumentRead: fullEmptyArgsExecuted === 1,
+      taskVerdicts: {
+        transportLoops: 'unverified: scripted responses contain no independent domain completion proof',
+        refusedWrite: 'blocked: Patch Engine refused the approved proposal'
+      },
       secretsRedacted: true,
       contextBroker: {
         assembledSections: assembled.sections.length,

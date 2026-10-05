@@ -1,14 +1,19 @@
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
 import { expandParamFieldQuery } from '../param/containerParamEdit.js';
 import { paramContainerRecoveryUri, paramReadCoverage, paramReadSourceHash, paramReadWindow } from '../param/paramReadWindow.js';
+import { assertCursorPrivacy } from './harness/assertCursorPrivacy.js';
 
-const overlayRoot = 'C:\\workspace\\mods';
+const fixtureRoot = join(tmpdir(), 'soulforge-param-read-window-fixture');
+const overlayRoot = join(fixtureRoot, 'mods');
 assert.equal(
-  paramContainerRecoveryUri(overlayRoot, 'C:\\workspace\\mods\\param\\gameparam\\gameparam.parambnd.dcx'),
+  paramContainerRecoveryUri(overlayRoot, join(overlayRoot, 'param', 'gameparam', 'gameparam.parambnd.dcx')),
   'file://param/gameparam/gameparam.parambnd.dcx'
 );
-assert.equal(paramContainerRecoveryUri(overlayRoot, 'D:\\outside\\gameparam.parambnd.dcx'), undefined);
+assert.equal(paramContainerRecoveryUri(overlayRoot, join(fixtureRoot, 'outside', 'gameparam.parambnd.dcx')), undefined);
+assert.equal(paramContainerRecoveryUri(overlayRoot, join(fixtureRoot, 'mods-other', 'gameparam.parambnd.dcx')), undefined);
 assert.ok(expandParamFieldQuery('ninsatsuNum').includes('ninsatu'), 'near-name recovery must surface the trusted field ID spelling');
 
 assert.deepEqual(paramReadCoverage({ missingRows: 0, missingFields: 0, hasMore: false }), {
@@ -38,6 +43,7 @@ assert.equal(page.fieldDefinitions.length, 4);
 assert.ok(page.nextCursor && page.nextCursor.length < 400);
 assert.ok(!page.queryScope.includes('private'));
 const cursor = page.nextCursor!;
+assert.equal(assertCursorPrivacy(page, ['file:///C:/private/container', 'private', 'long-field-scope']), 1);
 const delivered = [...page.items];
 while (page.nextCursor) {
   page = paramReadWindow({ ...input, cursor: page.nextCursor });
@@ -54,4 +60,5 @@ const migrated = paramReadWindow({ ...input, cursor: legacy });
 assert.equal(migrated.offset, 4);
 assert.ok(migrated.nextCursor && migrated.nextCursor.length < 400);
 assert.equal(parseOpaqueCursor(migrated.nextCursor!).sessionId, 'param-fields-v2');
+assert.equal(assertCursorPrivacy(migrated, ['file:///C:/private/container', 'private', 'long-field-scope']), 1);
 console.log('PARAM bounded cursor and per-page definitions smoke passed.');

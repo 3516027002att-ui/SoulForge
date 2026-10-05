@@ -131,16 +131,46 @@ export interface DiffLineView {
 /**
  * 逐行分类 unified diff。
  *
- * 顺序有讲究:`---` / `+++` 必须先判为 header,否则会被当成
- * remove / add —— 文件头会被染成一条删除行和一条新增行,而那是最容易
- * 被忽略的错色(它看起来"像是"改动的一部分)。
+ * 文件头只在 hunk 之外成对出现。hunk 内的 `---` / `+++` 可能是
+ * 原文的增删前缀，必须按 hunk 的两侧行数消费，不能仅凭文本形状染成文件头。
  */
 export function classifyDiffLines(unifiedDiff: string): DiffLineView[] {
-  return unifiedDiff.split('\n').map((text) => {
-    if (text.startsWith('---') || text.startsWith('+++')) return { kind: 'header' as const, text };
-    if (text.startsWith('@@')) return { kind: 'hunk' as const, text };
-    if (text.startsWith('+')) return { kind: 'add' as const, text };
-    if (text.startsWith('-')) return { kind: 'remove' as const, text };
+  const lines = unifiedDiff.split('\n');
+  let oldRemaining = 0;
+  let newRemaining = 0;
+  let afterHeaderIndex = -1;
+
+  return lines.map((text, index) => {
+    if (text.startsWith('diff --git ')) {
+      oldRemaining = 0;
+      newRemaining = 0;
+      return { kind: 'header' as const, text };
+    }
+    if (text.startsWith('@@')) {
+      const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(text);
+      oldRemaining = hunk === null ? 0 : Number(hunk[1] ?? 1);
+      newRemaining = hunk === null ? 0 : Number(hunk[2] ?? 1);
+      return { kind: 'hunk' as const, text };
+    }
+    if (oldRemaining === 0 && newRemaining === 0) {
+      if (index === afterHeaderIndex) return { kind: 'header' as const, text };
+      if (text.startsWith('--- ') && lines[index + 1]?.startsWith('+++ ')) {
+        afterHeaderIndex = index + 1;
+        return { kind: 'header' as const, text };
+      }
+    }
+    if (text.startsWith('+')) {
+      newRemaining = Math.max(0, newRemaining - 1);
+      return { kind: 'add' as const, text };
+    }
+    if (text.startsWith('-')) {
+      oldRemaining = Math.max(0, oldRemaining - 1);
+      return { kind: 'remove' as const, text };
+    }
+    if (text.startsWith(' ')) {
+      oldRemaining = Math.max(0, oldRemaining - 1);
+      newRemaining = Math.max(0, newRemaining - 1);
+    }
     return { kind: 'context' as const, text };
   });
 }
@@ -206,6 +236,21 @@ export function extractApprovalPreview(argumentsJson: string): AgentApprovalPrev
   const record = parsed as Record<string, unknown>;
 
   const changes = Array.isArray(record.changes) ? record.changes : null;
+  if (changes !== null && changes.length > 1) {
+    const files = changes.map((value, index) => {
+      const change = typeof value === 'object' && value !== null && !Array.isArray(value)
+        ? value as Record<string, unknown> : {};
+      const label = pickString(change.targetPath) ?? pickString(change.targetUri) ?? `(change ${index + 1})`;
+      const edit = typeof change.structuredEdit === 'object' && change.structuredEdit !== null
+        ? change.structuredEdit as Record<string, unknown> : null;
+      return { label, text: typeof edit?.newText === 'string' ? edit.newText : '文本预览不可用，请查看原始参数。' };
+    });
+    return {
+      targetPath: files.map(file => file.label).join('、'), targetUri: null,
+      newText: files.map(file => `${file.label}\n${file.text}`).join('\n\n'),
+      truncatedBytes: 0, changeCount: changes.length
+    };
+  }
   const firstChange = changes?.[0];
   const changeRecord = typeof firstChange === 'object' && firstChange !== null
     ? firstChange as Record<string, unknown>
@@ -216,7 +261,9 @@ export function extractApprovalPreview(argumentsJson: string): AgentApprovalPrev
   const structuredEdit = typeof changeRecord?.structuredEdit === 'object' && changeRecord.structuredEdit !== null
     ? changeRecord.structuredEdit as Record<string, unknown>
     : null;
-  let rawText = pickString(record.newText) ?? pickString(structuredEdit?.newText);
+  let rawText = typeof record.newText === 'string'
+    ? record.newText
+    : typeof structuredEdit?.newText === 'string' ? structuredEdit.newText : undefined;
   let changeCount: number | null = changes === null ? null : changes.length;
 
   // mutate_param_fields: edits: [{ table, rowId, fieldId, value }]
@@ -306,6 +353,7 @@ export interface AgentTaskState {
   approvalDecisions: AgentApprovalDecisionView[];
   historyItems: AgentConversationItem[];
   lastRolloutPath: string | null;
+  viewTruncated?: boolean;
 }
 
 export const INITIAL_AGENT_TASK_STATE: AgentTaskState = Object.freeze({
@@ -336,6 +384,48 @@ export const INITIAL_AGENT_TASK_STATE: AgentTaskState = Object.freeze({
 
 /** 已回答审批的保留条数;超出丢弃最早的。完整记录在会话文件里。 */
 export const AGENT_APPROVAL_DECISION_LIMIT = 20;
+const AGENT_VIEW_TEXT_CHAR_LIMIT = 32_768;
+const AGENT_VIEW_TEXT_NOTICE = '较早的内容已收起，可从会话记录查看\n';
+// Only privately owned immutable view records can reuse byte-size evidence.
+// Caller-owned records may still mutate and must be measured on every admission.
+const viewItemBytes = new WeakMap<object,number>();
+const ownedViewItems = new WeakSet<object>();
+function ownViewItem<T>(item:T):T {
+  if(item===null||typeof item!=='object'||ownedViewItems.has(item))return item;
+  const copy=Array.isArray(item)?item.map(value=>ownViewItem(value))
+    : Object.fromEntries(Object.entries(item).map(([key,value])=>[key,ownViewItem(value)]));
+  Object.freeze(copy);ownedViewItems.add(copy);
+  return copy as T;
+}
+function viewBytes(item:unknown):number {
+  if(item!==null&&typeof item==='object'){
+    const cached=ownedViewItems.has(item)?viewItemBytes.get(item):undefined;if(cached!==undefined)return cached;
+    // A UTF-16 code unit needs at most three UTF-8 bytes (a surrogate pair
+    // needs four for two). This conservative bound avoids allocating a second
+    // full byte buffer solely to enforce a view-window limit.
+    const bytes=JSON.stringify(item).length*3;
+    if(ownedViewItems.has(item))viewItemBytes.set(item,bytes);return bytes;
+  }
+  return JSON.stringify(item).length*3;
+}
+function boundedViewText(text:string):string {
+  return text.length<=AGENT_VIEW_TEXT_CHAR_LIMIT ? text
+    : `${AGENT_VIEW_TEXT_NOTICE}${text.slice(-AGENT_VIEW_TEXT_CHAR_LIMIT)}`;
+}
+function boundedViewItems<T>(items:readonly T[],maxBytes:number,maxItems:number):{items:T[];truncated:boolean} {
+  let bytes=2;
+  const kept:T[]=[];
+  for(let index=items.length-1;index>=0;index--){
+    const item=items[index]!;
+    const size=viewBytes(item)+1;
+    if(kept.length>=maxItems||bytes+size>maxBytes)break;
+    const owned=ownViewItem(item);
+    if(owned!==null&&typeof owned==='object')viewItemBytes.set(owned,size-1);
+    kept.push(owned);bytes+=size;
+  }
+  kept.reverse();
+  return {items:kept,truncated:kept.length!==items.length};
+}
 
 /** 提取已完成轮次的时间线条目集合，用于归档进历史记录。 */
 export function extractCompletedTurnItems(
@@ -379,6 +469,7 @@ export function startAgentTask(
       lastRolloutPath = previousState.rolloutFileName;
     }
   }
+  const boundedHistory=boundedViewItems(historyItems,2_097_152,1024);
 
   return {
     ...INITIAL_AGENT_TASK_STATE,
@@ -386,7 +477,8 @@ export function startAgentTask(
     phase: 'accepted',
     startedAt: now,
     currentStepStartedAt: now,
-    historyItems,
+    historyItems:boundedHistory.items,
+    viewTruncated:previousState?.viewTruncated===true||boundedHistory.truncated,
     lastRolloutPath: previousState?.rolloutFileName ?? lastRolloutPath
   };
 }
@@ -428,19 +520,23 @@ export function reduceAgentTaskEvent(
         currentStepStartedAt: Date.now()
       };
     case 'agent-message-delta': {
-      const narrations = appendNarration(state.narrations, event.step, event.text);
-      return { ...state, deltaChars: state.deltaChars + event.text.length, narrations, retry: null };
+      const next=appendNarration(state.narrations,event.step,event.text);
+      const bounded=boundedViewItems(next,524_288,128);
+      return { ...state, deltaChars: state.deltaChars + event.text.length, narrations:bounded.items, retry: null,
+        viewTruncated:state.viewTruncated===true||bounded.truncated||next.some(item=>item.text.startsWith(AGENT_VIEW_TEXT_NOTICE)) };
     }
     case 'agent-thinking-delta': {
       const step = typeof event.step === 'number' && event.step > 0 ? event.step : (state.step > 0 ? state.step : 1);
       const existing = (state.thinkings ?? []).find((t) => t.step === step);
       const thinkings = existing !== undefined
-        ? state.thinkings.map((t) => (t.step === step ? { ...t, text: t.text + event.text } : t))
-        : [...(state.thinkings ?? []), { step, text: event.text }];
+        ? state.thinkings.map((t) => (t.step === step ? { ...t, text: boundedViewText(t.text + event.text) } : t))
+        : [...(state.thinkings ?? []), { step, text: boundedViewText(event.text) }];
+      const bounded=boundedViewItems(thinkings,524_288,128);
       return {
         ...state,
-        thinkings,
-        thinkingText: (state.thinkingText ?? '') + event.text,
+        thinkings:bounded.items,
+        thinkingText: boundedViewText((state.thinkingText ?? '') + event.text),
+        viewTruncated:state.viewTruncated===true||bounded.truncated||thinkings.some(item=>item.text.startsWith(AGENT_VIEW_TEXT_NOTICE)),
         retry: null
       };
     }
@@ -448,18 +544,19 @@ export function reduceAgentTaskEvent(
       return {
         ...state,
         retry: null,
+        viewTruncated:state.viewTruncated===true||state.toolCalls.length>=256||((event.argumentsJson?.length??0)>16_384),
         toolCalls: [
           ...state.toolCalls,
           {
             callId: event.callId,
             name: event.name,
             step: event.step,
-            status: 'running',
+            status: 'running' as const,
             ...(typeof event.argumentsJson === 'string'
-              ? { argumentsJson: event.argumentsJson }
+              ? { argumentsJson: event.argumentsJson.length>16_384 ? `${AGENT_VIEW_TEXT_NOTICE}${event.argumentsJson.slice(-16_384)}` : event.argumentsJson }
               : {})
           }
-        ]
+        ].slice(-256)
       };
     case 'approval-requested':
       // 去重:同一 callId 重复到达时不入队两次(推送通道不保证只送一次)。
@@ -710,9 +807,9 @@ function appendNarration(
 ): AgentNarrationView[] {
   const last = narrations[narrations.length - 1];
   if (last !== undefined && last.step === step) {
-    return [...narrations.slice(0, -1), { step, text: last.text + text }];
+    return [...narrations.slice(0, -1), { step, text: boundedViewText(last.text + text) }];
   }
-  return [...narrations, { step, text }];
+  return [...narrations, { step, text:boundedViewText(text) }];
 }
 
 /** 把毫秒格式化成 `12s` / `1m 12s` / `1h 3m`。 */
@@ -865,6 +962,7 @@ export function buildAgentConversationItems(
   const items: AgentConversationItem[] = [];
 
   // 先注入历史轮次的所有条目
+  if(task.viewTruncated)items.push({kind:'notice',text:AGENT_VIEW_TEXT_NOTICE.trimEnd()});
   if (task.historyItems && task.historyItems.length > 0) {
     items.push(...task.historyItems);
   }

@@ -1,8 +1,7 @@
 /**
  * Production host-composition fixture for the EMEVD native proof boundary.
  *
- * This deliberately uses the real AgentToolBridge and desktop task-record
- * gateway.  Only the native read/write handlers are controlled fixtures: no
+ * This deliberately uses the real AgentToolBridge.  Only the native read/write handlers are controlled fixtures: no
  * game file, Mod resource, Bridge process, or production proof/projection
  * implementation is replaced.  The fixture therefore exercises the same
  * ToolRegistry gate, final bounded envelope, host target attachment, and
@@ -10,7 +9,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,10 +18,9 @@ import {
   createNativeReadProofStore,
   ToolRegistry
 } from '../packages/core/dist/index.js';
-import { createAgentTaskRecordGateway } from '../apps/desktop/src/main/agentTaskRecord.ts';
 
-const MAX_RESULT_BYTES = 8_192;
-const MAX_RESULT_CHARS = 8_192;
+const MAX_RESULT_BYTES = 65_536;
+const MAX_RESULT_CHARS = 65_536;
 const NONCANONICAL_WARNING_CODE = 'EMEVD_NONCANONICAL_SOURCE_INSPECT_ONLY';
 const fixtureRoot = await mkdtemp(join(tmpdir(), 'soulforge-emevd-proof-gate-'));
 const liveHarnesses = [];
@@ -142,7 +140,7 @@ function modeReadData(harness, sourceUri, eventId, input) {
       state: 'completed',
       data: completeReadData(harness, sourceUri, eventId, {
         total: 1,
-        darkScript: `$Event(${eventId}, Restart, function() {\n  ${'X'.repeat(12_000)}\n});`
+        darkScript: `$Event(${eventId}, Restart, function() {\n  ${'X'.repeat(70_000)}\n});`
       })
     };
   }
@@ -191,59 +189,6 @@ function modeReadData(harness, sourceUri, eventId, input) {
 
 function registerFixtureTools(harness, files) {
   const registry = new ToolRegistry();
-
-  registry.register({
-    name: 'update_agent_task_record',
-    description: 'controlled host task-record update fixture',
-    permission: 'analyze',
-    permissionLevel: 'analyze',
-    inputSchema: {},
-    run: async (input, context) => {
-      if (!context.taskRecord) return errorResult({ code: 'TASK_RECORD_UNAVAILABLE', message: 'fixture task record missing' });
-      try {
-        const snapshot = await context.taskRecord.update(input);
-        return {
-          ok: true,
-          state: 'completed',
-          data: {
-            entryCount: snapshot.entries.length,
-            statuses: snapshot.entries.map((entry) => ({ entryId: entry.entryId, status: entry.status }))
-          }
-        };
-      } catch (error) {
-        return errorResult(error);
-      }
-    }
-  });
-
-  registry.register({
-    name: 'search_events',
-    description: 'controlled structured search_events ticket fixture',
-    permission: 'read',
-    permissionLevel: 'read',
-    inputSchema: { query: 'string' },
-    run: async (input, context) => {
-      const query = typeof input.query === 'string' ? input.query : '';
-      const ticket = context.taskRecord
-        ? await context.taskRecord.recordSearch({
-            toolName: 'search_events',
-            query,
-            result: harness.state.searchResults
-          })
-        : undefined;
-      return {
-        ok: true,
-        state: 'completed',
-        data: {
-          events: harness.state.searchResults,
-          // This fixture remains an explicit historical task-record
-          // cross-check.  The production registry no longer exposes a ledger;
-          // the automatic proof path below is still the write gate under test.
-          ...(ticket ? { searchId: ticket.searchId } : {})
-        }
-      };
-    }
-  });
 
   registry.register({
     name: 'read_emevd_event',
@@ -332,14 +277,12 @@ function registerFixtureTools(harness, files) {
 
   registry.register({
     name: 'rollback_operation',
-    description: 'controlled rollback action that releases the real task-record mutation count',
+    description: 'controlled rollback action that invalidates native proof',
     permission: 'rollback',
     permissionLevel: 'rollback',
     inputSchema: { opId: 'string', objectName: 'string?' },
     run: async (input, context) => {
-      // Rollback is a host lifecycle boundary.  The automatic receipt is
-      // cleared directly; task-record mutation counts are historical data and
-      // are deliberately not consulted by this production-shaped fixture.
+      // Rollback is a host lifecycle boundary and clears native receipts.
       context.nativeReadProofs?.invalidateAll('controlled rollback');
       return {
         ok: true,
@@ -362,7 +305,6 @@ function createHarness(sessionId, sourceUris = ['file://event/fixture.emevd.dcx'
     writeFailuresRemaining: 0,
     nativeDiagnostics: []
   };
-  const gateway = createAgentTaskRecordGateway(fixtureRoot, sessionId);
   const workspaceIndex = {
     workspaceId: `workspace://emevd-proof/${sessionId}`,
     getFiles: () => files
@@ -373,18 +315,14 @@ function createHarness(sessionId, sourceUris = ['file://event/fixture.emevd.dcx'
   };
   const context = {
     workspaceIndex,
-    taskRecord: gateway,
-    requireTaskRecord: true,
     mode: 'fullPermission',
     modeCeiling: 'fullPermission',
     session,
-    // Production writes are gated by the host-owned proof store, not the
-    // model-authored task-record fields.  Keep the old gateway only for the
-    // historical cross-checks that are explicitly local to this fixture.
+    // Only the automatic native proof store can authorize a write.
     nativeReadProofs: createNativeReadProofStore(),
     proofPrincipal: `emevd-proof/${sessionId}`
   };
-  const harness = { files, state, gateway, context };
+  const harness = { files, state, context };
   const registry = registerFixtureTools(harness, files);
   harness.bridge = createAgentToolBridge({ registry, context });
   liveHarnesses.push(harness);
@@ -413,46 +351,12 @@ function assertSuccess(result, label) {
 
 function assertDenied(result, code, label) {
   assert.equal(result.response.ok, false, `${label}: expected denial`);
-  const acceptedCodes = code === 'TASK_RECORD_NATIVE_PROOF_REQUIRED'
+  const acceptedCodes = code === 'NATIVE_PROOF_REQUIRED'
     ? new Set(['NATIVE_READ_REQUIRED', 'NATIVE_READ_STALE', 'NATIVE_READ_COVERAGE_INCOMPLETE'])
     : new Set([code]);
   assert.ok(acceptedCodes.has(result.response.code),
     `${label}: unexpected code ${result.response.code}: ${result.response.content}`);
   assert.equal(result.envelope.ok, false, `${label}: denied envelope must be false`);
-}
-
-async function declareTarget(harness, objectName) {
-  const result = await call(harness, 'update_agent_task_record', {
-    objectName,
-    propertyKey: 'target',
-    value: '待执行 EMEVD 事件修改',
-    kind: 'target'
-  });
-  assertSuccess(result, `${objectName} target`);
-}
-
-async function searchTicket(harness, query, events, objectName) {
-  harness.state.searchResults = events.map((event) => (
-    objectName ? { ...event, name: objectName } : event
-  ));
-  const result = await call(harness, 'search_events', { query });
-  const envelope = assertSuccess(result, `${query} search`);
-  const searchId = envelope.data?.record?.searchId;
-  assert.equal(typeof searchId, 'string', `${query} search must return host ticket`);
-  return searchId;
-}
-
-async function addEvidence(harness, objectName, sourceUri, eventId, searchId) {
-  const result = await call(harness, 'update_agent_task_record', {
-    objectName,
-    propertyKey: 'emevd',
-    value: `sourceUri=${sourceUri} eventId=${eventId}`,
-    kind: 'evidence',
-    evidence: [`search_events sourceUri=${sourceUri} eventId=${eventId}`],
-    searchId,
-    mutationBudget: 1
-  });
-  return assertSuccess(result, `${objectName} evidence ${eventId}`);
 }
 
 async function writeInput(harness, sourceUri, eventId, identity, dsl = '$Event(1, Restart, function() {\n});') {
@@ -470,9 +374,6 @@ async function writeInput(harness, sourceUri, eventId, identity, dsl = '$Event(1
 }
 
 async function prepareSingleEvidence(harness, sourceUri, eventId, objectName = `event-${eventId}`) {
-  await declareTarget(harness, objectName);
-  const searchId = await searchTicket(harness, `eventId=${eventId}`, [{ sourceUri, eventId }], objectName);
-  await addEvidence(harness, objectName, sourceUri, eventId, searchId);
   return { objectName, identity: identityFor(harness, sourceUri, eventId) };
 }
 
@@ -528,9 +429,9 @@ async function runNoncanonicalInspectOnlyCase() {
   assert.equal(diagnostics[0]?.message, '当前 file 未直接命中工作区索引的 canonical sourceUri/sourcePath/relativePath/absolutePath；本次 native read 仅供检查，不能生成写回凭据。请使用 search_events 返回的完整 sourceUri 重新读取。');
   assert.equal(diagnostics.length, 32, 'complete projection keeps its bounded diagnostic cap');
   const basenameWrite = await writeInput(harness, basename, eventId, prepared.identity);
-  assertDenied(basenameWrite, 'TASK_RECORD_NATIVE_PROOF_REQUIRED', 'basename read must remain inspect-only');
+  assertDenied(basenameWrite, 'NATIVE_PROOF_REQUIRED', 'basename read must remain inspect-only');
   const canonicalWriteBeforeReread = await writeInput(harness, sourceUri, eventId, prepared.identity);
-  assertDenied(canonicalWriteBeforeReread, 'TASK_RECORD_NATIVE_PROOF_REQUIRED',
+  assertDenied(canonicalWriteBeforeReread, 'NATIVE_PROOF_REQUIRED',
     'canonical write must not reuse a noncanonical read');
   assert.equal(harness.state.writeCalls.length, 0, 'noncanonical flow must not enter the writer');
 
@@ -594,7 +495,7 @@ async function runNoProofCase(label, mode, readInput, expectedReadOk, eventId = 
     assert.equal(read.envelope.ok, false, `${label} final failure must be false`);
   }
   const write = await writeInput(harness, sourceUri, 301, prepared.identity);
-  assertDenied(write, 'TASK_RECORD_NATIVE_PROOF_REQUIRED', `${label} write without complete proof`);
+  assertDenied(write, 'NATIVE_PROOF_REQUIRED', `${label} write without complete proof`);
   assert.equal(harness.state.writeCalls.length, 0, `${label} fixture writer must not run`);
 }
 
@@ -602,16 +503,10 @@ async function runSameIdCrossFileCase() {
   const sourceA = 'file://event/cross-a.emevd.dcx';
   const sourceB = 'file://event/cross-b.emevd.dcx';
   const harness = createHarness('same-id-cross-file', [sourceA, sourceB]);
-  await declareTarget(harness, 'same-id-cross-file');
-  const ticketA = await searchTicket(harness, 'eventId=700 sourceUri=file://event/cross-a.emevd.dcx', [{ sourceUri: sourceA, eventId: 700 }], 'same-id-cross-file');
-  await addEvidence(harness, 'same-id-cross-file', sourceA, 700, ticketA);
-  const ticketB = await searchTicket(harness, 'eventId=700 sourceUri=file://event/cross-b.emevd.dcx', [{ sourceUri: sourceB, eventId: 700 }], 'same-id-cross-file');
-  await addEvidence(harness, 'same-id-cross-file', sourceB, 700, ticketB);
-
   const readA = await call(harness, 'read_emevd_event', { file: sourceA, eventId: 700 });
   assertSuccess(readA, 'same ID file A read');
   const writeB = await writeInput(harness, sourceB, 700, identityFor(harness, sourceB, 700));
-  assertDenied(writeB, 'TASK_RECORD_NATIVE_PROOF_REQUIRED', 'same eventId in another file must not reuse proof');
+  assertDenied(writeB, 'NATIVE_PROOF_REQUIRED', 'same eventId in another file must not reuse proof');
   assert.equal(harness.state.writeCalls.length, 0);
 }
 
@@ -675,7 +570,7 @@ async function runRollbackProofClearCase() {
   assertSuccess(rollback, 'rollback action');
 
   const oldReceipt = await writeInput(harness, sourceUri, 709, identity);
-  assertDenied(oldReceipt, 'TASK_RECORD_NATIVE_PROOF_REQUIRED', 'rollback must clear the old native receipt');
+  assertDenied(oldReceipt, 'NATIVE_PROOF_REQUIRED', 'rollback must clear the old native receipt');
   assert.equal(harness.state.writeCalls.length, 1, 'old rollback credential must not enter writer');
   assertSuccess(await call(harness, 'read_emevd_event', { file: sourceUri, eventId: 709 }), 'rollback fresh read');
   assertSuccess(await writeInput(harness, sourceUri, 709, identity), 'rollback fresh write');
@@ -685,12 +580,6 @@ async function runRollbackProofClearCase() {
 async function runFinalizeFreshReadCase() {
   const sourceUri = 'file://event/finalize-fresh-read.emevd.dcx';
   const harness = createHarness('finalize-fresh-read', [sourceUri]);
-  const objectName = 'finalize-fresh-read';
-  await declareTarget(harness, objectName);
-  const firstTicket = await searchTicket(harness, 'first-finalize-ticket', [{ sourceUri, eventId: 702 }], objectName);
-  await addEvidence(harness, objectName, sourceUri, 702, firstTicket);
-  const secondTicket = await searchTicket(harness, 'second-finalize-ticket', [{ sourceUri, eventId: 702 }], objectName);
-  await addEvidence(harness, objectName, sourceUri, 702, secondTicket);
   const identity = identityFor(harness, sourceUri, 702);
 
   assertSuccess(await call(harness, 'read_emevd_event', { file: sourceUri, eventId: 702 }), 'finalize baseline read');
@@ -698,7 +587,7 @@ async function runFinalizeFreshReadCase() {
   assert.equal(harness.state.writeCalls.length, 1);
 
   const noFreshRead = await writeInput(harness, sourceUri, 702, identity);
-  assertDenied(noFreshRead, 'TASK_RECORD_NATIVE_PROOF_REQUIRED', 'finalize must clear all old native receipts');
+  assertDenied(noFreshRead, 'NATIVE_PROOF_REQUIRED', 'finalize must clear all old native receipts');
   assert.equal(harness.state.writeCalls.length, 1);
 
   assertSuccess(await call(harness, 'read_emevd_event', { file: sourceUri, eventId: 702 }), 'fresh reread after finalize');
@@ -709,14 +598,6 @@ async function runFinalizeFreshReadCase() {
 async function runSameFileVersionInvalidationCase() {
   const sourceUri = 'file://event/version-invalidation.emevd.dcx';
   const harness = createHarness('same-file-version-invalidation', [sourceUri]);
-  const objectName = 'same-file-version-invalidation';
-  await declareTarget(harness, objectName);
-  const ticket = await searchTicket(harness, 'version-events', [
-    { sourceUri, eventId: 703 },
-    { sourceUri, eventId: 704 }
-  ], objectName);
-  await addEvidence(harness, objectName, sourceUri, 703, ticket);
-  await addEvidence(harness, objectName, sourceUri, 704, ticket);
   harness.state.identities.set(eventKey(sourceUri, 703), {
     sourceHash: 'version-v1-event1', outerFileHash: 'version-outer-v1', sourceRevision: 1
   });
@@ -731,65 +612,20 @@ async function runSameFileVersionInvalidationCase() {
   // when a later read happened to use a different event identity.
   harness.context.nativeReadProofs.invalidateSource(sourceUri, 3);
   const staleEvent1 = await writeInput(harness, sourceUri, 703, firstIdentity);
-  assertDenied(staleEvent1, 'TASK_RECORD_NATIVE_PROOF_REQUIRED', 'new same-file identity must clear event1 v1 proof');
+  assertDenied(staleEvent1, 'NATIVE_PROOF_REQUIRED', 'new same-file identity must clear event1 v1 proof');
   assert.equal(harness.state.writeCalls.length, 0);
 }
 
-async function runAmbiguousAndWrongDomainCases() {
-  const sourceA = 'file://event/ambiguous-a.emevd.dcx';
-  const sourceB = 'file://event/ambiguous-b.emevd.dcx';
-  const harness = createHarness('ambiguous-tickets', [sourceA, sourceB]);
-  await declareTarget(harness, 'ambiguous-tickets');
-  const ambiguousTicket = await searchTicket(harness, 'same event in two files', [
-    { sourceUri: sourceA, eventId: 705 },
-    { sourceUri: sourceB, eventId: 705 }
-  ]);
-  const ambiguousEvidence = await call(harness, 'update_agent_task_record', {
-    objectName: 'ambiguous-tickets',
-    propertyKey: 'emevd',
-    value: 'eventId=705',
-    kind: 'evidence',
-    evidence: ['eventId=705'],
-    searchId: ambiguousTicket,
-    mutationBudget: 1
-  });
-  assertDenied(ambiguousEvidence, 'TASK_RECORD_EMEVD_TARGET_AMBIGUOUS', 'same event ticket across files must require sourceUri');
-
-  const wrongDomain = createHarness('wrong-domain-ticket', [sourceA]);
-  await declareTarget(wrongDomain, 'wrong-domain-ticket');
-  const wrongTicket = await wrongDomain.gateway.recordSearch({
-    toolName: 'search_msb_parts',
-    query: 'eventId=706',
-    result: { events: [{ sourceUri: sourceA, eventId: 706 }] }
-  });
-  const wrongEvidence = await call(wrongDomain, 'update_agent_task_record', {
-    objectName: 'wrong-domain-ticket',
-    propertyKey: 'emevd',
-    value: `sourceUri=${sourceA} eventId=706`,
-    kind: 'evidence',
-    evidence: [`sourceUri=${sourceA} eventId=706`],
-    searchId: wrongTicket.searchId,
-    mutationBudget: 1
-  });
-  assertDenied(wrongEvidence, 'TASK_RECORD_EMEVD_SEARCH_DOMAIN_REQUIRED', 'MSB ticket must not authorize EMEVD evidence');
-}
-
-async function runPersistedVerifiedForgeryCase() {
-  const sourceUri = 'file://event/persisted-verified.emevd.dcx';
-  const sessionId = 'persisted-verified-forgery';
-  const initial = createHarness(sessionId, [sourceUri]);
-  const prepared = await prepareSingleEvidence(initial, sourceUri, 707, sessionId);
-  const snapshot = await initial.gateway.read();
-  const original = await readFile(snapshot.path, 'utf8');
-  assert.match(original, /- kind: evidence\r?\n  - status: candidate/u);
-  await writeFile(snapshot.path, original.replace(/(- kind: evidence\r?\n  - status: )candidate/u, '$1verified'), 'utf8');
-
-  const reloaded = createHarness(sessionId, [sourceUri]);
-  const reloadedSnapshot = await reloaded.gateway.read();
-  assert.equal(reloadedSnapshot.entries.find((entry) => entry.kind === 'evidence')?.status, 'verified');
-  const forgedWrite = await writeInput(reloaded, sourceUri, 707, prepared.identity);
-  assertDenied(forgedWrite, 'TASK_RECORD_NATIVE_PROOF_REQUIRED', 'persisted verified label must not mint host receipt');
-  assert.equal(reloaded.state.writeCalls.length, 0);
+async function runModelAuthoredForgeryCase() {
+  const sourceUri = 'file://event/forged-proof.emevd.dcx';
+  const harness = createHarness('model-authored-forgery',[sourceUri]);
+  const identity = identityFor(harness,sourceUri,707);
+  // Model-authored labels or a copied search id do not mint native receipts.
+  const forged = await call(harness,'apply_emevd_dsl',{file:sourceUri,eventId:707,
+    dsl:'$Event(707, Restart, function() {});',mode:'dark-script',scope:'event',...identity,
+    darkScriptComplete:true,searchId:'forged-search-id',status:'verified',mutationBudget:1});
+  assertDenied(forged,'NATIVE_PROOF_REQUIRED','model-authored labels must not mint host proof');
+  assert.equal(harness.state.writeCalls.length,0);
 }
 
 try {
@@ -811,8 +647,7 @@ try {
   await runFinalizeFreshReadCase();
   await runSameFileVersionInvalidationCase();
   await runRollbackProofClearCase();
-  await runAmbiguousAndWrongDomainCases();
-  await runPersistedVerifiedForgeryCase();
+  await runModelAuthoredForgeryCase();
 
   console.log(JSON.stringify({
     ok: true,
@@ -829,15 +664,11 @@ try {
       'finalize-clears-receipt-and-fresh-read-restores',
       'same-file-new-version-clears-old-event-receipt',
       'rollback-action-clears-proof-and-fresh-read-restores',
-      'ambiguous-multifile-ticket-and-wrong-domain-ticket-denied',
-      'persisted-verified-forgery-denied',
+      'model-authored-proof-label-and-search-id-forgery-denied',
       'bounded-tool-content-and-host-receipt'
     ],
     completeFinalBytes: [...completeFinalBytes].sort((left, right) => left.eventId - right.eventId)
   }, null, 2));
 } finally {
-  for (const harness of liveHarnesses) {
-    await harness.gateway.read().catch(() => undefined);
-  }
   await rm(fixtureRoot, { recursive: true, force: true });
 }

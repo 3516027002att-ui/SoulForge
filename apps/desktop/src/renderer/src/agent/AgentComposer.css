@@ -1,0 +1,136 @@
+
+/* 上下文选择 + 资源引用选择（§12.10）。极矮视口下允许被 grid 压缩（辅助信息），
+   超高时内部滚动，不把 conversation 挤塌、不溢出面板。 */
+.agent-composer-context {
+  grid-area: context;
+  min-height: 0; overflow-y: auto; min-width: 0;
+}
+
+.agent__composer {
+  /* S32：一块圆角输入卡（对照 Codex VS Code 扩展 012748）——不再是贴在面板
+     顶部的平条。participant 条并入底部工具行，输入区在上。 */
+  grid-area: composer; min-width: 0;
+  margin: 8px; border: 1px solid var(--line); border-radius: 12px;
+  padding: 8px 10px 8px; display: flex; flex-direction: column; gap: 7px;
+  background: var(--forge-2);
+  /* §12.6：整个 Composer 不超过 40vh；超出由中间层滚动承接。 */
+  max-height: var(--agent-composer-max-height); overflow: hidden;
+}
+.agent-mutter {
+  display: flex; align-items: center; gap: 7px; min-height: 18px;
+  padding: 0 2px; color: var(--ink-3); font-size: 10.5px; line-height: 1.45;
+  opacity: 0; transform: translateY(2px);
+  transition: opacity 140ms var(--ease-standard), transform 140ms var(--ease-standard);
+}
+.agent-mutter.is-visible { opacity: 1; transform: translateY(0); }
+.agent-mutter__mark { flex: none; color: var(--ember-text); font-size: 11px; }
+.agent-mutter__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.agent-plan-switch-banner {
+  padding: 8px 10px;
+  background: var(--forge-1);
+  border: 1px solid var(--ember);
+  border-radius: var(--radius-m);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-shadow: var(--shadow-s, 0 1px 3px rgba(0,0,0,0.2));
+}
+.agent-plan-switch-banner__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.agent-plan-switch-banner__title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ember-text);
+}
+.agent-plan-switch-banner__badge {
+  font-size: 10px;
+  color: var(--ink-2);
+  background: var(--forge-2);
+  padding: 1px 6px;
+  border-radius: var(--radius-s);
+}
+.agent-plan-switch-banner__desc {
+  font-size: 11px;
+  color: var(--ink-1);
+  line-height: 1.4;
+}
+.agent-plan-switch-banner__actions {
+  display: flex;
+  gap: 8px;
+}
+.agent-plan-switch-banner__btn {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: var(--radius-s);
+  cursor: pointer;
+  border: 1px solid var(--line-strong);
+  background: var(--forge-2);
+  color: var(--ink-0);
+  transition: background var(--dur-micro) var(--ease-standard), border-color var(--dur-micro) var(--ease-standard);
+}
+.agent-plan-switch-banner__btn:hover {
+  background: var(--control-hover-bg);
+  border-color: var(--ember);
+  color: var(--ember-text);
+}
+.agent-plan-switch-banner__btn--bypass:hover {
+  border-color: #22c55e;
+  color: #4ade80;
+}
+
+.agent-composer__participant { display: flex; align-items: center; gap: 7px; row-gap: 2px; min-height: 24px; flex-wrap: wrap; }
+/* 三层 Composer 的中间层：context chips + prompt editor，超限时内部滚动。 */
+.agent-composer__body {
+  display: flex; flex-direction: column; gap: 6px;
+  min-height: 0; overflow-y: auto;
+}
+
+.agent-mode-select { position: relative; }
+.agent-mode-trigger { display: inline-flex; align-items: center; gap: 5px; padding: 2px 5px; color: var(--ink-2); font-size: 11px; border-radius: var(--radius-s); }
+.agent-mode-trigger:hover { color: var(--ink-0); background: var(--control-hover-bg); }
+/* S9：菜单已 createPortal 到 document.body。top/left 由组件 inline 提供。 */
+.agent-mode-menu { position: fixed; z-index: 50; min-width: 190px; padding: 4px; border: 1px solid var(--line-strong); background: var(--forge-3); box-shadow: var(--shadow-float); }
+.agent-mode-menu button { display: flex; flex-direction: column; align-items: flex-start; width: 100%; gap: 1px; padding: 6px 8px; text-align: left; border-radius: var(--radius-s); }
+.agent-mode-menu button:hover, .agent-mode-menu button[aria-selected="true"] { background: var(--ember-soft); }
+.agent-mode-menu strong { font-size: 11px; }
+.agent-mode-menu span { color: var(--ink-3); font-size: 10px; }
+.composer-context { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.composer-context:empty { display: none; }
+.ctx-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10.5px; font-family: var(--font-mono); color: var(--ember-text);
+  background: var(--ember-soft); padding: 2px 8px; border-radius: var(--radius-s);
+  max-width: 100%; overflow: hidden;
+}
+/* 1-D：省略号必须落在内部 label 上——inline-flex 容器的 text-overflow 不生效，
+   超长 chip 在任何宽度下都会溢出而不是显示省略号。 */
+.ctx-chip__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctx-chip__remove {
+  flex: none; width: 16px; height: 16px; display: grid; place-items: center;
+  color: var(--ink-2); border-radius: var(--radius-s); font-size: 12px; line-height: 1;
+}
+.ctx-chip__remove:hover { color: var(--ink-0); background: var(--control-hover-bg); }
+.agent__composer textarea {
+  width: 100%; resize: none; padding: 8px 12px; font-size: 12.5px; line-height: 1.55;
+  background: var(--forge-1); border: 1px solid var(--line);
+  /* §12.6：正文最小 72px；自动增长由 AgentPromptEditor 的 grow 逻辑钉住 40vh。 */
+  min-height: 72px;
+}
+.agent-composer__toolbar { display: flex; align-items: center; gap: 5px; row-gap: 4px; min-height: 26px; flex-wrap: wrap; } /* S8:窄列时工具钮换行,不许裁掉 */
+.composer-tool-btn { width: 24px; height: 24px; display: grid; place-items: center; color: var(--ink-2); border-radius: var(--radius-s); }
+.composer-tool-btn:hover:not(:disabled) { color: var(--ink-0); background: var(--control-hover-bg); }
+.composer-tool-btn:disabled { opacity: .4; cursor: default; }
+
+
+
+.composer-model-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-spacer { flex: 1; }
+
+.composer-hint { font-size: 10.5px; color: var(--ink-3); }

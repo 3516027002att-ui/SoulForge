@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * read_tae_events 的索引 URI 解析 smoke。
  *
@@ -10,7 +11,8 @@
  * registry 时结构化跳过，不把本机没有语料误报成成功。
  */
 import assert from 'node:assert/strict';
-import { copyFile, mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
+import { requireIndexedSearchResult } from './staleValidationAssertions.js';
+import { copyFile, mkdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import type { IndexedFile, ResourceKind } from '@soulforge/shared';
@@ -183,12 +185,9 @@ async function run(): Promise<'skipped' | 'passed'> {
       kinds: ['chr'] satisfies ResourceKind[]
     });
     assert.equal(search.ok, true, JSON.stringify(search));
-    const searchItems = search.data?.items ?? [];
-    const searchItem = searchItems
-      .map((item) => item && typeof item === 'object' ? item as Record<string, unknown> : undefined)
-      .find((item) => item?.item && typeof item.item === 'object')?.item as Record<string, unknown> | undefined;
-    assert.equal(searchItem?.sourceUri, sourceUri, `search_resources 未返回预期 sourceUri：${JSON.stringify(search)}`);
-    assert.equal(searchItem?.resourceKind, 'chr');
+    const searchItem = requireIndexedSearchResult(search, sourceUri);
+    assert.equal(searchItem.sourceUri, sourceUri);
+
 
     // Feed the exact search result back through the model-facing adapter. This
     // is the production search -> sourceUri -> native read loop.  Select one

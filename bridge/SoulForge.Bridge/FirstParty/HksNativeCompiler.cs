@@ -3,15 +3,17 @@ using System.Runtime.InteropServices;
 internal static class HksNativeCompiler
 {
     private const string LibraryName = "SoulForge.Hksc.Native.dll";
+    private static string LibraryFileName => OperatingSystem.IsLinux()
+        ? "libSoulForge.Hksc.Native.so" : LibraryName;
 
-    public static bool IsAvailable => File.Exists(Path.Combine(AppContext.BaseDirectory, LibraryName));
+    public static bool IsAvailable => File.Exists(Path.Combine(AppContext.BaseDirectory, LibraryFileName));
 
     static HksNativeCompiler()
     {
         NativeLibrary.SetDllImportResolver(typeof(HksNativeCompiler).Assembly, (name, _, _) =>
         {
             if (!string.Equals(name, LibraryName, StringComparison.OrdinalIgnoreCase)) return IntPtr.Zero;
-            var path = Path.Combine(AppContext.BaseDirectory, LibraryName);
+            var path = Path.Combine(AppContext.BaseDirectory, LibraryFileName);
             return File.Exists(path) ? NativeLibrary.Load(path) : IntPtr.Zero;
         });
     }

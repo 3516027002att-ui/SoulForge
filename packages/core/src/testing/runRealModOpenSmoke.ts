@@ -1,4 +1,3 @@
-import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ResourceFormatKind, ResourceKind } from '@soulforge/shared';
 import { disposeBridgeDaemonPool } from '../bridge/runBridge.js';
@@ -15,6 +14,9 @@ interface PreviewCounts {
 
 async function main(): Promise<void> {
   const workspaceRoot = resolve(process.argv[2] ?? '../../mods');
+  const { missingDirectory, verificationSkipReason } = await import(new URL('../../../../scripts/verification-inputs.mjs', import.meta.url).href);
+  const inputReason = verificationSkipReason([missingDirectory(workspaceRoot,
+    {kind:'private-game-input',logicalResource:'real Mod workspace'})]);
 
   // 语料缺失时结构化跳过，而不是让 scanWorkspace 抛 ENOENT。
   //
@@ -22,8 +24,9 @@ async function main(): Promise<void> {
   // 它既没有跳过分支、又不在任何 tier —— 于是「无法执行」和「无人调度」两个问题
   // 互相掩盖：登记进 native 层后必须能诚实跳过，否则会把缺语料伪装成失败。
   // 跳过标记用单行 status:'skipped'，由 verify 的五态判定识别，绝不冒充通过。
-  if (!existsSync(workspaceRoot)) {
+  if (inputReason) {
     console.log(JSON.stringify({
+      ...JSON.parse(inputReason),
       ok: null,
       status: 'skipped',
       smoke: 'real-mod-open',

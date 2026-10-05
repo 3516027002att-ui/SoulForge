@@ -656,6 +656,8 @@ function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | 
     animations.push({
       animId,
       code,
+      ...(asNumber(anim.eventCount) === null ? {} : { eventCount: asNumber(anim.eventCount)! }),
+      eventsComplete: asNumber(anim.eventCount) === events.length,
       ...(identity ?? {}),
       ...(motionAnimId === null ? {} : { motionAnimId }),
       ...(asString(anim.hkxName) ? { hkxName: asString(anim.hkxName) } : {}),
@@ -685,6 +687,7 @@ function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | 
       chrId,
       sourceUri,
       ...exportProvenance,
+      readerSchemaRevision: asNumber(record.identityProjectionVersion) ?? 0,
       ...(taeEntryCount !== null ? { taeEntryCount } : {}),
       ...(taeEntries.length > 0 ? { taeEntries } : {}),
       animations

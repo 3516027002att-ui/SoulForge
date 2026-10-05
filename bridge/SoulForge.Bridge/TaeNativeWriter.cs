@@ -58,34 +58,20 @@ internal static class TaeNativeWriter
 
         var layout = TaeLayout.Read(source);
         var timeSlotMap = BuildGlobalTimeSlotMap(layout);
+        var templates = ResolveInsertionTemplates(mutations, layout, source);
 
         // 1. 全量静态前置校验：跨动画共享时间槽与参数连续性检查 (SF-11 §2.6.2)
-        ValidateMutations(mutations, layout, timeSlotMap, source);
+        ValidateMutations(mutations, layout, timeSlotMap, source, templates);
 
         // 2. 构建区间写入计划 (SF-11 §2.6.3)
         var plan = new ByteRangeWritePlan(source);
-        var appliedSummaries = BuildAndApplyPlan(mutations, layout, plan, source);
+        var appliedSummaries = BuildAndApplyPlan(mutations, layout, plan, source, templates);
 
         // 3. 单次分配最终输出 (O(B+A))
         var rebuilt = plan.Apply();
 
-        // 4. 原子安全写入暂存区
-        var directory = Path.GetDirectoryName(outputPath) ?? throw new InvalidDataException("outputPath 没有父目录。");
-        Directory.CreateDirectory(directory);
-        var temporary = Path.Combine(directory, $".soulforge-tae-{Guid.NewGuid():N}.tmp");
-        try
-        {
-            await File.WriteAllBytesAsync(temporary, rebuilt, cancellationToken);
-            cancellationToken.ThrowIfCancellationRequested();
-            File.Move(temporary, outputPath, overwrite: true);
-        }
-        finally
-        {
-            if (File.Exists(temporary)) File.Delete(temporary);
-        }
-
         // 5. 重读验证：语义一致性 + 动画数 + 事件数
-        var reread = TaeNativeDocument.ReadFile(outputPath);
+        var reread = TaeNativeDocument.Read(rebuilt);
         var roundTrip = reread.VerifyRoundTrip();
         if (!roundTrip.SemanticIdentical)
             throw new InvalidDataException("重读后 TAE 语义往返不一致。");
@@ -103,7 +89,22 @@ internal static class TaeNativeWriter
         plan.VerifyStreamingUntouched(reread.SourceBytes);
 
         // 7. 语义命中与兄弟事件零污染核对 (Sibling verify)
-        VerifyMutationResults(mutations, appliedSummaries, layout, reread, source);
+        VerifyMutationResults(mutations, appliedSummaries, layout, reread, source, templates);
+
+        // 4. 原子安全写入暂存区
+        var directory = Path.GetDirectoryName(outputPath) ?? throw new InvalidDataException("outputPath 没有父目录。");
+        Directory.CreateDirectory(directory);
+        var temporary = Path.Combine(directory, $".soulforge-tae-{Guid.NewGuid():N}.tmp");
+        try
+        {
+            await File.WriteAllBytesAsync(temporary, rebuilt, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            File.Move(temporary, outputPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
 
         return new
         {
@@ -153,7 +154,7 @@ internal static class TaeNativeWriter
         List<TaeMutation> mutations,
         TaeLayout layout,
         Dictionary<int, List<TimeSlotUser>> timeSlotMap,
-        byte[] source)
+        byte[] source, Dictionary<TaeMutation, TemplateSpec> templates)
     {
         foreach (var mutation in mutations)
         {
@@ -207,7 +208,8 @@ internal static class TaeNativeWriter
             else if (mutation.Kind == "insert-event")
             {
                 ValidateTimes(mutation.StartTime!.Value, mutation.EndTime!.Value);
-                var template = ResolveEvent(anim, mutation.TemplateEventIndex!.Value);
+                var templateSpec = templates[mutation];
+                var template = templateSpec.Event;
 
                 // 事件参数体连续性检查
                 for (var i = 0; i < anim.Events.Count - 1; i++)
@@ -225,8 +227,8 @@ internal static class TaeNativeWriter
                             new { mutation = mutation.Kind, reason = "event-param-layout-not-contiguous" });
                     }
                 }
-                var last = anim.Events[^1];
-                if (last.ParamDataAbs != 0
+                var last = anim.Events.LastOrDefault();
+                if (last is not null && last.ParamDataAbs != 0
                     && (last.ParamDataAbs < last.EventDataAbs + EventDataHeaderSize || last.ParamDataAbs > anim.EventGroupTableAbs))
                 {
                     throw new TaeWriteBlockedException(
@@ -237,7 +239,7 @@ internal static class TaeNativeWriter
                         new { mutation = mutation.Kind, reason = "last-event-param-layout-unknown" });
                 }
 
-                var templateSpan = GetTemplateSpan(anim, template);
+                var templateSpan = templateSpec.Parameters.Length;
                 if (templateSpan < 0)
                 {
                     throw new TaeWriteBlockedException(
@@ -258,6 +260,60 @@ internal static class TaeNativeWriter
                 _ = ResolveFieldWrite(mutation, layout, anim, source);
             }
         }
+    }
+
+    private sealed record TemplateSpec(byte[] Source, TaeLayout.EventInfo Event, byte[] Parameters);
+
+    private static Dictionary<TaeMutation, TemplateSpec> ResolveInsertionTemplates(
+        List<TaeMutation> mutations, TaeLayout layout, byte[] source)
+    {
+        var result = new Dictionary<TaeMutation, TemplateSpec>();
+        var documents = new Dictionary<string, (byte[] Source, TaeLayout Layout, string Encoded)>();
+        foreach (var mutation in mutations.Where(m => m.Kind == "insert-event"))
+        {
+            var templateSource = source; var templateLayout = layout;
+            if (mutation.TemplateDocumentBase64 is { } encoded)
+            {
+                if (encoded.Length > (MaxSourceBytes + 2) / 3 * 4)
+                    throw new TaeWriteBlockedException("TAE 模板超过安全大小。", "TAE_TEMPLATE_INVALID");
+                var hash = mutation.ExpectedTemplateDocumentHash
+                    ?? throw new TaeWriteBlockedException("外部 TAE 模板需要内容哈希。", "TAE_TEMPLATE_HASH_REQUIRED");
+                if (!documents.TryGetValue(hash, out var cached) || cached.Encoded != encoded)
+                {
+                    byte[] bytes;
+                    try { bytes = Convert.FromBase64String(encoded); }
+                    catch (FormatException) { throw new TaeWriteBlockedException("TAE 模板编码无效。", "TAE_TEMPLATE_INVALID"); }
+                    var doc = TaeNativeDocument.Read(bytes);
+                    if (!doc.SourceHash.Equals(hash, StringComparison.OrdinalIgnoreCase))
+                        throw new TaeWriteBlockedException("TAE 模板内容哈希不匹配。", "TAE_TEMPLATE_HASH_MISMATCH");
+                    cached = (bytes, TaeLayout.Read(bytes), encoded); documents[hash] = cached;
+                }
+                templateSource = cached.Source; templateLayout = cached.Layout;
+            }
+            if (templateLayout.SchemaBankId != layout.SchemaBankId)
+                throw new TaeWriteBlockedException("模板和目标 TAE schema bank 不一致。", "TAE_TEMPLATE_BANK_MISMATCH");
+            var anim = templateLayout.FindAnim(mutation.TemplateAnimId ?? mutation.AnimId)
+                ?? throw new TaeWriteBlockedException("TAE 模板动作不存在。", "TAE_TEMPLATE_NOT_FOUND");
+            var ev = ResolveEvent(anim, mutation.TemplateEventIndex!.Value);
+            var length = GetParameterSpan(anim, ev, templateSource.Length);
+            var parameters = length > 0 ? templateSource.AsSpan(ev.ParamDataAbs, length).ToArray() : Array.Empty<byte>();
+            if (mutation.FieldOverrides is { } fields)
+            {
+                if (fields.ValueKind != JsonValueKind.Array)
+                    throw new TaeWriteBlockedException("fieldOverrides 必须是字段数组。", "TAE_TEMPLATE_FIELDS_INVALID");
+                foreach (var field in fields.EnumerateArray())
+                {
+                    if (!field.TryGetProperty("value", out var value))
+                        throw new TaeWriteBlockedException("模板字段覆盖缺少 value。", "TAE_TEMPLATE_FIELDS_INVALID");
+                    var edit = new TaeMutation("set-event-field", anim.AnimId, ev.Index, null, null, null, null,
+                        OptionalInt32(field, "fieldIndex"), OptionalString(field, "fieldName"), value.Clone(), mutation.SchemaBankId);
+                    var write = ResolveFieldWrite(edit, templateLayout, anim, templateSource);
+                    write.Bytes.CopyTo(parameters, write.Field.Offset);
+                }
+            }
+            result.Add(mutation, new TemplateSpec(templateSource, ev, parameters));
+        }
+        return result;
     }
 
     private static int GetTemplateSpan(TaeLayout.AnimInfo anim, TaeLayout.EventInfo template)
@@ -441,7 +497,7 @@ internal static class TaeNativeWriter
         List<TaeMutation> mutations,
         TaeLayout layout,
         ByteRangeWritePlan plan,
-        byte[] source)
+        byte[] source, Dictionary<TaeMutation, TemplateSpec> templates)
     {
         var summaries = new List<object>(mutations.Count);
 
@@ -509,67 +565,91 @@ internal static class TaeNativeWriter
             var insertSpecs = new List<InsertSpec>(animInserts.Count);
             var currentEventCount = anim.EventCount;
 
-            // 为该动画的每个新增事件分配时间槽、参数体与事件头
-            foreach (var insertMutation in animInserts)
+            // Times precede the contiguous data region. Every event header
+            // precedes its parameter body; the last body ends at the group table.
+            var newTimes = animInserts.Select(m => (Mutation: m,
+                Start: plan.Append(BitConverter.GetBytes(m.StartTime!.Value), $"anim:{animId}:new:start"),
+                End: plan.Append(BitConverter.GetBytes(m.EndTime!.Value), $"anim:{animId}:new:end"))).ToArray();
+            var relocatedHeaders = new List<int>();
+            foreach (var ev in anim.Events)
             {
-                var template = ResolveEvent(anim, insertMutation.TemplateEventIndex!.Value);
-                var templateSpan = GetTemplateSpan(anim, template);
+                var span = GetParameterSpan(anim, ev, source.Length);
+                var prefix = ev.ParamDataAbs == 0 ? EventDataHeaderSize : ev.ParamDataAbs - ev.EventDataAbs;
+                var copy = source.AsSpan(ev.EventDataAbs, checked(prefix + span)).ToArray();
+                // Existing field writes must survive relocation as well as the
+                // retained old region referenced by the immutable baseline.
+                foreach (var interval in plan.Intervals.Values)
+                    if (interval.Offset >= ev.EventDataAbs && interval.Offset + interval.Length <= ev.EventDataAbs + copy.Length)
+                        interval.NewBytes.CopyTo(copy, interval.Offset - ev.EventDataAbs);
+                var headerAbs = plan.CurrentAppendOffset;
+                BinaryPrimitives.WriteInt64LittleEndian(copy.AsSpan(8, 8), ev.ParamDataAbs == 0 ? 0 : headerAbs + prefix);
+                relocatedHeaders.Add(plan.Append(copy, $"anim:{animId}:old_event_{ev.Index}:data"));
+            }
+            foreach (var (insertMutation, startTimeAbs, endTimeAbs) in newTimes)
+            {
+                var templateSpec = templates[insertMutation];
+                var template = templateSpec.Event;
+                var templateSpan = templateSpec.Parameters.Length;
                 var eventTypeId = insertMutation.EventTypeId ?? template.EventTypeId;
-
-                // 2.1 新时间槽
-                var startTimeAbs = plan.Append(BitConverter.GetBytes(insertMutation.StartTime!.Value), $"anim:{animId}:new_event_{currentEventCount}:start");
-                var endTimeAbs = plan.Append(BitConverter.GetBytes(insertMutation.EndTime!.Value), $"anim:{animId}:new_event_{currentEventCount}:end");
-
-                // 2.2 新参数体 (逐字节拷贝模板参数体)
-                var paramDataAbs = 0;
-                if (templateSpan > 0)
-                {
-                    var paramCopy = source.AsSpan(template.ParamDataAbs, templateSpan).ToArray();
-                    paramDataAbs = plan.Append(paramCopy, $"anim:{animId}:new_event_{currentEventCount}:param");
-                }
-
-                // 2.3 新事件数据头 (16 字节)
-                var header = new byte[EventDataHeaderSize];
-                BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(0, 4), eventTypeId);
-                Buffer.BlockCopy(source, template.EventDataAbs + 4, header, 4, 4); // 模板保留 padding
-                BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(8, 8), paramDataAbs);
-                var eventDataAbs = plan.Append(header, $"anim:{animId}:new_event_{currentEventCount}:header", alignment: 8);
-
-                insertSpecs.Add(new InsertSpec(
-                    insertMutation,
-                    currentEventCount,
-                    eventTypeId,
-                    templateSpan,
-                    startTimeAbs,
-                    endTimeAbs,
-                    paramDataAbs,
-                    eventDataAbs));
-
-                currentEventCount++;
+                var data = new byte[EventDataHeaderSize + templateSpan];
+                templateSpec.Source.AsSpan(template.EventDataAbs, EventDataHeaderSize).CopyTo(data);
+                BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(0, 4), eventTypeId);
+                var eventDataAbs = plan.CurrentAppendOffset;
+                var paramDataAbs = templateSpan > 0 ? eventDataAbs + EventDataHeaderSize : 0;
+                BinaryPrimitives.WriteInt64LittleEndian(data.AsSpan(8, 8), paramDataAbs);
+                if (templateSpan > 0) templateSpec.Parameters.CopyTo(data, EventDataHeaderSize);
+                plan.Append(data, $"anim:{animId}:new_event_{currentEventCount}:data");
+                insertSpecs.Add(new InsertSpec(insertMutation, currentEventCount++, eventTypeId, templateSpan,
+                    startTimeAbs, endTimeAbs, paramDataAbs, eventDataAbs));
             }
 
-            // 2.4 一次性构建并追加该动画的最终事件表 (Final eventTable)
-            var oldTableSize = checked((int)(anim.EventCount * EventTableEntrySize));
-            var newTableSize = oldTableSize + insertSpecs.Count * EventTableEntrySize;
-            var finalTable = new byte[newTableSize];
+            var groupTableAbs = plan.CurrentAppendOffset;
+            var groupTable = source.AsSpan(anim.EventGroupTableAbs, checked(anim.EventGroupCount * EventGroupEntrySize)).ToArray();
+            var arrays = new List<byte[]>();
+            var cursor = checked(groupTableAbs + groupTable.Length);
+            for (var g = 0; g < anim.EventGroupCount; g++)
+            {
+                var count = BinaryPrimitives.ReadInt64LittleEndian(groupTable.AsSpan(g * EventGroupEntrySize, 8));
+                var offset = BinaryPrimitives.ReadInt64LittleEndian(groupTable.AsSpan(g * EventGroupEntrySize + 8, 8));
+                if (count < 0 || count > anim.EventCount || offset < 0 || offset > source.Length - count * 4)
+                    throw new TaeWriteBlockedException("TAE 事件组引用数组越界。", "TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE");
+                var array = source.AsSpan(checked((int)offset), checked((int)count * 4)).ToArray();
+                for (var i = 0; i < count; i++)
+                {
+                    var oldOffset = BinaryPrimitives.ReadInt32LittleEndian(array.AsSpan(i * 4, 4));
+                    if (oldOffset < anim.EventTableAbs || (oldOffset - anim.EventTableAbs) % EventTableEntrySize != 0
+                        || (oldOffset - anim.EventTableAbs) / EventTableEntrySize >= anim.EventCount)
+                        throw new TaeWriteBlockedException("TAE 事件组不是已知的事件表引用布局。", "TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE");
+                }
+                BinaryPrimitives.WriteInt64LittleEndian(groupTable.AsSpan(g * EventGroupEntrySize + 8, 8), cursor);
+                arrays.Add(array); cursor = checked(cursor + array.Length);
+            }
+            var newTableAbs = checked((cursor + 7) & ~7);
+            foreach (var array in arrays)
+                for (var i = 0; i < array.Length / 4; i++)
+                {
+                    var oldOffset = BinaryPrimitives.ReadInt32LittleEndian(array.AsSpan(i * 4, 4));
+                    BinaryPrimitives.WriteInt32LittleEndian(array.AsSpan(i * 4, 4), newTableAbs + oldOffset - anim.EventTableAbs);
+                }
+            plan.Append(groupTable, $"anim:{animId}:groups");
+            foreach (var array in arrays) plan.Append(array, $"anim:{animId}:group_event_refs");
 
-            // 拷贝原事件表
+            var oldTableSize = checked(anim.EventCount * EventTableEntrySize);
+            var finalTable = new byte[checked(currentEventCount * EventTableEntrySize)];
             Buffer.BlockCopy(source, anim.EventTableAbs, finalTable, 0, oldTableSize);
-
-            // 写入所有新增事件条目
+            for (var i = 0; i < relocatedHeaders.Count; i++)
+                BinaryPrimitives.WriteInt64LittleEndian(finalTable.AsSpan(i * EventTableEntrySize + 16, 8), relocatedHeaders[i]);
             for (var k = 0; k < insertSpecs.Count; k++)
             {
-                var spec = insertSpecs[k];
-                var entryOffset = oldTableSize + k * EventTableEntrySize;
+                var spec = insertSpecs[k]; var entryOffset = oldTableSize + k * EventTableEntrySize;
                 BinaryPrimitives.WriteInt64LittleEndian(finalTable.AsSpan(entryOffset, 8), spec.StartTimeAbs);
                 BinaryPrimitives.WriteInt64LittleEndian(finalTable.AsSpan(entryOffset + 8, 8), spec.EndTimeAbs);
                 BinaryPrimitives.WriteInt64LittleEndian(finalTable.AsSpan(entryOffset + 16, 8), spec.EventDataAbs);
             }
-
-            var newTableAbs = plan.Append(finalTable, $"anim:{animId}:final_event_table", alignment: 8);
-
-            // 2.5 更新动画条目：指针重定位与事件数 (通过 WriteInterval)
+            if (plan.Append(finalTable, $"anim:{animId}:final_event_table", alignment: 8) != newTableAbs)
+                throw new InvalidDataException("TAE 插入计划偏移不一致。");
             plan.AddOrUpdateInterval(anim.AnimEntryAbs, BitConverter.GetBytes((long)newTableAbs), $"anim:{animId}:entry:table_offset", $"table:{newTableAbs}");
+            plan.AddOrUpdateInterval(anim.AnimEntryAbs + 8, BitConverter.GetBytes((long)groupTableAbs), $"anim:{animId}:entry:group_offset", $"groups:{groupTableAbs}");
             plan.AddOrUpdateInterval(anim.AnimEntryAbs + 0x20, BitConverter.GetBytes(currentEventCount), $"anim:{animId}:entry:event_count", $"count:{currentEventCount}");
 
             foreach (var spec in insertSpecs)
@@ -605,7 +685,7 @@ internal static class TaeNativeWriter
         List<object> summaries,
         TaeLayout layout,
         TaeNativeDocument reread,
-        byte[] source)
+        byte[] source, Dictionary<TaeMutation, TemplateSpec> templates)
     {
         var rereadAnims = reread.Animations.ToDictionary(a => a.AnimId);
 
@@ -649,32 +729,23 @@ internal static class TaeNativeWriter
             }
         }
 
-        // 2. 验证 insert 命中与模板参数一致性
-        foreach (var m in mutations.Where(m => m.Kind == "insert-event"))
+        // Exact appended indices, rather than time matching an existing event.
+        foreach (var group in mutations.Where(m => m.Kind == "insert-event").GroupBy(m => m.AnimId))
         {
-            var animOrig = layout.FindAnim(m.AnimId)!;
-            var animReread = rereadAnims[m.AnimId];
-            var template = animOrig.Events[m.TemplateEventIndex!.Value];
-            var templateSpan = GetTemplateSpan(animOrig, template);
-
-            var newEv = animReread.Events.FirstOrDefault(e =>
-                Math.Abs(e.StartTime - m.StartTime!.Value) < 0.0001f
-                && Math.Abs(e.EndTime - m.EndTime!.Value) < 0.0001f
-                && e.EventTypeId == (m.EventTypeId ?? template.EventTypeId));
-
-            if (newEv == null)
+            var nextIndex = layout.FindAnim(group.Key)!.EventCount;
+            var animReread = rereadAnims[group.Key];
+            foreach (var m in group)
             {
-                throw new InvalidDataException($"重读后未找到新增事件: animId={m.AnimId}, time={m.StartTime}..{m.EndTime}。");
-            }
-
-            // 参数体逐字节核验
-            if (templateSpan > 0)
-            {
-                var newParamOffset = checked((int)newEv.ParameterDataOffset);
-                if (!reread.SourceBytes.AsSpan(newParamOffset, templateSpan).SequenceEqual(source.AsSpan(template.ParamDataAbs, templateSpan)))
-                {
-                    throw new InvalidDataException($"新增事件参数体与模板事件不一致。");
-                }
+                var spec = templates[m];
+                var newEv = animReread.Events[nextIndex++];
+                if (newEv.EventTypeId != spec.Event.EventTypeId
+                    || Math.Abs(newEv.StartTime - m.StartTime!.Value) > 0.0001f
+                    || Math.Abs(newEv.EndTime - m.EndTime!.Value) > 0.0001f)
+                    throw new InvalidDataException("新增 TAE 事件的类型或时间不符合请求。");
+                if (reread.GetParameterLength(animReread, nextIndex - 1) != spec.Parameters.Length
+                    || (spec.Parameters.Length > 0 && !reread.SourceBytes.AsSpan(
+                        checked((int)newEv.ParameterDataOffset), spec.Parameters.Length).SequenceEqual(spec.Parameters)))
+                    throw new InvalidDataException("新增 TAE 事件参数与模板及字段覆盖不一致。");
             }
         }
 
@@ -717,7 +788,13 @@ internal static class TaeNativeWriter
                 var eventTypeId = OptionalInt32(item, "eventTypeId");
                 var startTime = RequiredFloat(item, "startTime");
                 var endTime = RequiredFloat(item, "endTime");
-                return new TaeMutation(kind, animId, null, templateEventIndex, eventTypeId, startTime, endTime, null, null, null, null);
+                return new TaeMutation(kind, animId, null, templateEventIndex, eventTypeId, startTime, endTime, null, null, null, OptionalInt32(item, "schemaBankId"))
+                {
+                    TemplateAnimId = item.TryGetProperty("templateAnimId", out _) ? RequiredInt64(item, "templateAnimId") : null,
+                    TemplateDocumentBase64 = OptionalString(item, "templateDocumentBase64"),
+                    ExpectedTemplateDocumentHash = OptionalString(item, "expectedTemplateDocumentHash"),
+                    FieldOverrides = item.TryGetProperty("fieldOverrides", out var fields) ? fields.Clone() : null
+                };
             }
             case "set-event-field":
             {
@@ -796,7 +873,13 @@ internal static class TaeNativeWriter
         int? FieldIndex,
         string? FieldName,
         JsonElement? FieldValue,
-        int? SchemaBankId);
+        int? SchemaBankId)
+    {
+        public long? TemplateAnimId { get; init; }
+        public string? TemplateDocumentBase64 { get; init; }
+        public string? ExpectedTemplateDocumentHash { get; init; }
+        public JsonElement? FieldOverrides { get; init; }
+    }
 
     private sealed class TaeLayout
     {
@@ -818,6 +901,7 @@ internal static class TaeNativeWriter
             public required int EventTableAbs { get; init; }
             public required int EventGroupTableAbs { get; init; }
             public required int EventCount { get; init; }
+            public required int EventGroupCount { get; init; }
             public required List<EventInfo> Events { get; init; } = new();
         }
 
@@ -848,17 +932,18 @@ internal static class TaeNativeWriter
             var animTableOffset = ReadInt64(source, s1 + 0x08);
             if (animTableEntryCount < 0 || animTableEntryCount > 100_000)
                 throw new InvalidDataException("TAE 动画表条目数越界。");
-            var animTableDataOffset = animTableOffset + 8;
-            if (animTableOffset < 0 || animTableDataOffset + (long)animTableEntryCount * AnimTableEntrySize > source.Length)
+            var animTableDataOffset = animTableOffset;
+            if (animTableOffset < 0 || animTableOffset > source.Length
+                || (long)animTableEntryCount * AnimTableEntrySize > source.Length - animTableOffset)
                 throw new InvalidDataException("TAE 动画表越界。");
 
             var animations = new Dictionary<long, AnimInfo>(animTableEntryCount);
             for (var i = 0; i < animTableEntryCount; i++)
             {
                 var te = checked((int)(animTableDataOffset + (long)i * AnimTableEntrySize));
-                var animEntryOffset = ReadInt64(source, te);
-                var animId = ReadInt64(source, te + 8);
-                if (animEntryOffset < 0 || animEntryOffset + AnimationEntrySize > source.Length)
+                var animId = ReadInt64(source, te);
+                var animEntryOffset = ReadInt64(source, te + 8);
+                if (animEntryOffset < 0 || animEntryOffset > source.Length - AnimationEntrySize)
                     throw new InvalidDataException($"TAE 动画 {animId} 条目偏移越界。");
                 var ae = checked((int)animEntryOffset);
                 var eventTableOffset = ReadInt64(source, ae);
@@ -912,6 +997,7 @@ internal static class TaeNativeWriter
                     EventTableAbs = checked((int)eventTableOffset),
                     EventGroupTableAbs = checked((int)eventGroupTableOffset),
                     EventCount = eventCount,
+                    EventGroupCount = eventGroupCount,
                     Events = events
                 };
             }

@@ -52,6 +52,8 @@ export interface DecodedFieldView {
   size: number;
   bitfield?: { bitOffset: number; bitWidth: number };
   display: string;
+  /** 比较用的精确数值文本；不改变编辑框既有的显示/保存投影。 */
+  comparisonDisplay?: string;
   editable: boolean;
   diagnostic?: string;
 }
@@ -412,7 +414,12 @@ function scalarFieldView(
   if (base.type === 'f32' || base.type === 'f64') {
     display = formatFloat(resolved);
   }
-  return { ...base, display, editable: true };
+  return {
+    ...base,
+    display,
+    comparisonDisplay: Object.is(resolved, -0) ? '-0' : String(resolved),
+    editable: true
+  };
 }
 
 function formatFloat(value: number): string {

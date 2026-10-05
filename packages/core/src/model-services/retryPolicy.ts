@@ -2,7 +2,7 @@
  * Two-tier retry/backoff policy for model-service calls.
  * Design derived from openai/codex (Apache-2.0, Copyright 2025 OpenAI) —
  * codex-client/retry.rs (request-level RetryPolicy) and responses_retry.rs
- * (stream-level retries). See licenses/openai-codex.txt.
+ * (stream-level retries). Design source: https://github.com/openai/codex; attribution: NOTICE.
  *
  * Codex semantics preserved:
  * - exponential backoff 200ms × 2^(attempt-1) with ±10% jitter

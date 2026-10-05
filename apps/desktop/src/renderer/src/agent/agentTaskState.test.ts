@@ -11,6 +11,32 @@
  */
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import * as agentTaskModule from './agentTaskState.js';
+
+it('long multi-turn conversation views keep a bounded recent window without changing completion facts',()=>{
+ let state=agentTaskModule.INITIAL_AGENT_TASK_STATE;
+ for(let index=0;index<100;index++){
+  const sessionId=`retention-${index}`;state=agentTaskModule.startAgentTask(sessionId,index,state,'task');
+  state=agentTaskModule.reduceAgentTaskEvent(state,{sessionId,event:{type:'agent-thinking-delta',step:1,text:`${index}-`+'x'.repeat(100000)}});
+  state=agentTaskModule.reduceAgentTaskEvent(state,{sessionId,event:{type:'session-done',finishReason:'stop',steps:1,rolloutFileName:`${index}.jsonl`}});
+ }
+ assert.ok(new TextEncoder().encode(JSON.stringify(state.historyItems)).byteLength<=2_097_152);
+ assert.ok(state.thinkingText.length<=33000);assert.equal(state.viewTruncated,true);
+ assert.equal(state.phase,'done');assert.equal(state.finishReason,'stop');assert.equal(state.rolloutFileName,'99.jsonl');
+});
+
+it('bounded history owns immutable copies before caching mutable user or nested tool views',()=>{
+ const item:agentTaskModule.AgentConversationItem={kind:'user',text:'short'};
+ const call:agentTaskModule.AgentToolCallView={callId:'call',name:'tool',step:1,status:'ok',argumentsJson:'{}'};
+ const tools:agentTaskModule.AgentConversationItem={kind:'tools',step:1,calls:[call],groupId:'group',live:false,collapsed:true};
+ const first=agentTaskModule.startAgentTask('one',0,{...agentTaskModule.INITIAL_AGENT_TASK_STATE,historyItems:[item,tools]});
+ item.text='x'.repeat(3_000_000);call.argumentsJson='x'.repeat(3_000_000);
+ const second=agentTaskModule.startAgentTask('two',0,first);
+ assert.ok(new TextEncoder().encode(JSON.stringify(second.historyItems)).byteLength<=2_097_152);
+ const ownedTools=second.historyItems.find(entry=>entry.kind==='tools');
+ assert.ok(ownedTools?.kind==='tools');
+ assert.throws(()=>{(ownedTools.calls[0] as any).argumentsJson='x'.repeat(3_000_000);},TypeError);
+});
 import {
   INITIAL_AGENT_TASK_STATE,
   approvalSeverity,
@@ -34,6 +60,32 @@ import {
 } from './agentTaskState.js';
 
 const SESSION = 'session-0001';
+
+it('a later file header remains a header after the previous file hunk was truncated', () => {
+  const lines = classifyDiffLines('diff --git a/a.txt b/a.txt\n--- a.txt\n+++ a.txt\n@@ -1 +1,600 @@\n-old\n+new\ndiff --git a/b.txt b/b.txt\n--- b.txt\n+++ b.txt\n@@ -1 +1 @@\n-before\n+after');
+  assert.equal(lines.find(line => line.text === '--- b.txt')?.kind, 'header');
+  assert.equal(lines.find(line => line.text === '+++ b.txt')?.kind, 'header');
+});
+
+it('shows all multi-file targets and contents when the host cannot produce a diff', () => {
+  const preview = extractApprovalPreview(JSON.stringify({
+    targetPath: 'irrelevant-flat.txt', newText: 'irrelevant flat content',
+    changes: [
+      { targetPath: 'mods/a.txt', structuredEdit: { newText: 'first content' } },
+      { targetPath: 'mods/b.txt', structuredEdit: { newText: 'second content' } },
+      { targetPath: 'mods/c.bin', structuredEdit: { schemaId: 'rawFileReplaceBase64' } }
+    ]
+  }));
+  assert.equal(preview?.changeCount, 3);
+  for (const filename of ['mods/a.txt', 'mods/b.txt', 'mods/c.bin']) {
+    assert.ok(preview?.targetPath?.includes(filename), filename);
+    assert.ok(preview?.newText?.includes(filename), filename);
+  }
+  assert.ok(preview?.newText?.includes('first content'));
+  assert.ok(preview?.newText?.includes('second content'));
+  assert.ok(preview?.newText?.includes('原始参数'));
+  assert.ok(!preview?.newText?.includes('irrelevant flat content'));
+});
 
 /** 按顺序折叠一串事件，模拟推送到达。 */
 function feed(state: AgentTaskState, ...events: AgentTaskEventEnvelope['event'][]): AgentTaskState {
@@ -468,6 +520,41 @@ describe('unified diff 逐行分类', () => {
     assert.equal(lines[0]?.text, '-old');
     assert.equal(lines[1]?.text, '+new');
   });
+
+  it('hunk 内以双重增删前缀开头的内容仍是改动行', () => {
+    const diff = '--- a.txt\n+++ a.txt\n@@ -1,2 +1,2 @@\n---flag\n+++counter\n---- before\n++++ after';
+    const lines = classifyDiffLines(diff);
+    assert.deepEqual(
+      lines.map((line) => line.kind),
+      ['header', 'header', 'hunk', 'remove', 'add', 'remove', 'add']
+    );
+    assert.equal(lines.map((line) => line.text).join('\n'), diff);
+  });
+
+  it('hunk 内看起来像完整文件头的相邻内容不能变成文件头', () => {
+    const lines = classifyDiffLines('--- a.txt\n+++ a.txt\n@@ -1 +1 @@\n--- before.txt\n+++ after.txt');
+    assert.deepEqual(lines.map((line) => line.kind), ['header', 'header', 'hunk', 'remove', 'add']);
+  });
+
+  it('多个文件的文件头在上一 hunk 结束后仍被识别', () => {
+    const lines = classifyDiffLines(
+      '--- a.txt\n+++ a.txt\n@@ -1 +1 @@\n--- before.txt\n+++ after.txt\n'
+      + '--- b.txt\n+++ b.txt\n@@ -0,0 +1,2 @@\n+++counter\n+tail\n'
+      + '--- c.txt\n+++ c.txt\n@@ -1,2 +0,0 @@\n---flag\n-tail'
+    );
+    assert.deepEqual(lines.map((line) => line.kind), [
+      'header', 'header', 'hunk', 'remove', 'add',
+      'header', 'header', 'hunk', 'add', 'add',
+      'header', 'header', 'hunk', 'remove', 'remove'
+    ]);
+  });
+
+  it('没有文件头或 hunk 的紧凑 diff 保留增删前缀语义', () => {
+    assert.deepEqual(
+      classifyDiffLines('---flag\n+++counter\n-old\n+new').map((line) => line.kind),
+      ['remove', 'add', 'remove', 'add']
+    );
+  });
 });
 
 describe('审批请求携带主进程算出的 diff', () => {
@@ -528,6 +615,55 @@ describe('审批预览只从参数里已有的字段提取', () => {
     assert.equal(preview?.targetPath, 'mods/b.txt');
     assert.equal(preview?.newText, 'body');
     assert.equal(preview?.changeCount, 1);
+  });
+
+  it('平铺与嵌套 newText 保留有效空串', () => {
+    assert.equal(extractApprovalPreview(JSON.stringify({ targetPath: 'a', newText: '' }))?.newText, '');
+    assert.equal(extractApprovalPreview(JSON.stringify({
+      changes: [{ targetPath: 'a', structuredEdit: { newText: '' } }]
+    }))?.newText, '');
+  });
+
+  it('内容保留纯空白、换行与原字符，不按标识符过滤', () => {
+    for (const text of [' \t\r\n', '\u00a0\n', '\n  body\t\r\n']) {
+      assert.equal(extractApprovalPreview(JSON.stringify({ targetPath: 'a', newText: text }))?.newText, text);
+      assert.equal(extractApprovalPreview(JSON.stringify({
+        changes: [{ targetPath: 'a', structuredEdit: { newText: text } }]
+      }))?.newText, text);
+    }
+  });
+
+  it('平铺字符串优先于嵌套内容，包括空串', () => {
+    for (const text of ['', ' \t', 'flat\r\n']) {
+      assert.equal(extractApprovalPreview(JSON.stringify({
+        targetPath: 'a', newText: text,
+        changes: [{ targetPath: 'a', structuredEdit: { newText: 'nested' } }]
+      }))?.newText, text);
+    }
+  });
+
+  it('缺失或非字符串平铺内容回退到嵌套字符串', () => {
+    for (const value of [undefined, null, 0, false, {}, []]) {
+      for (const text of ['', 'nested']) {
+        assert.equal(extractApprovalPreview(JSON.stringify({
+          targetPath: 'a', newText: value,
+          changes: [{ targetPath: 'a', structuredEdit: { newText: text } }]
+        }))?.newText, text);
+      }
+    }
+  });
+
+  it('缺失或非字符串内容仍为 null，空标识符仍不可用', () => {
+    for (const value of [undefined, null, 0, false, {}, []]) {
+      assert.equal(extractApprovalPreview(JSON.stringify({
+        targetPath: 'a', newText: value,
+        changes: [{ structuredEdit: { newText: value } }]
+      }))?.newText, null);
+    }
+    const preview = extractApprovalPreview(JSON.stringify({ targetPath: '', targetUri: '', newText: '' }));
+    assert.equal(preview?.newText, '');
+    assert.equal(preview?.targetPath, null);
+    assert.equal(preview?.targetUri, null);
   });
 
   it('超长内容保留全文（问题 5：不截断，由界面展开/折叠看全文）', () => {

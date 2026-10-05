@@ -1,0 +1,102 @@
+{
+  "schema": "agent-provider-experiment-v1",
+  "status": "not_run",
+  "execution": "not_run",
+  "experiment": {
+    "id": "OWNER_SELECTED_ISOLATED_TREATMENT",
+    "change": "ONE_BOUND_TREATMENT",
+    "variants": []
+  },
+  "bindings": {
+    "source": {
+      "commit": null,
+      "diffSha256": null
+    },
+    "implementationSha256": null,
+    "build": {
+      "sha256": null
+    },
+    "baseline": {
+      "id": null,
+      "revision": null,
+      "loopSha256": null,
+      "controlSourceSha256": null,
+      "modelServicesTree": null,
+      "lineage": null,
+      "treatments": []
+    },
+    "provider": {
+      "protocol": null,
+      "baseUrl": null,
+      "model": null,
+      "configurationSha256": null,
+      "pricing": null,
+      "currency": null,
+      "liveAvailability": "unverified"
+    },
+    "sampling": null,
+    "budget": null,
+    "resource": null,
+    "independentOracle": null,
+    "taskDefinitionsSha256": null,
+    "nativeBuild": {
+      "sha256": null,
+      "fileCount": null
+    },
+    "controlHistory": []
+  },
+  "results": [],
+  "resultFields": {
+    "taskVerdict": "unverified",
+    "independentGoal": null,
+    "wrongWrites": "unverified",
+    "falseSuccess": "unverified",
+    "modelClaim": "unverified",
+    "protocolTermination": null,
+    "runtimeMs": null,
+    "usage": {
+      "status": "unverified"
+    },
+    "configuredPriceCost": {
+      "status": "unverified"
+    },
+    "actualCost": {
+      "status": "unverified",
+      "reason": "No provider billing evidence"
+    },
+    "activation": {
+      "diagnosticCount": null,
+      "controlMessageCount": null,
+      "interpretation": "No observed activation is not quality equivalence"
+    },
+    "operations": [],
+    "journal": [],
+    "resourcePreservation": null,
+    "nativeReadback": {
+      "status": "unverified"
+    },
+    "taskEvidence": {
+      "nativeReadObserved": null,
+      "resourceStateOnly": false
+    },
+    "writePolicy": {
+      "status": "unverified",
+      "mutationAllowed": null,
+      "committedOperationIds": [],
+      "settledJournalWrites": []
+    }
+  },
+  "acceptance": {
+    "status": "unverified",
+    "reason": "Real-model experiment has not run; the established native-task, wrong-write and false-success criteria remain unassessed"
+  },
+  "limits": [
+    "One isolated treatment, not attribution of the whole kernel cutover",
+    "One pinned native resource; no game-runtime acceptance",
+    "Reported usage and configured-price estimates do not verify billing",
+    "No credentials are included in this report"
+  ],
+  "networkCalls": 0,
+  "providerRequestAttempts": 0,
+  "credentialAccess": false
+}

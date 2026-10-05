@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * W-REL-F-SCALE-02 release editor bounded-access smoke (validation-unfrozen
  * closure: 真实文档完整有界访问).
@@ -17,7 +18,7 @@
  * fixture environment is injected (`node scripts/with-local-has-game-env.mjs`),
  * otherwise they skip with a structured note (never fake a pass).
  *
- * Real-corpus targets: luabnd (301 entries) → script channel;
+ * Real-corpus targets: hash-pinned luabnd → script channel;
  * menu.msgbnd → bnd4 channel; item.msgbnd child FMG → fmg channel;
  * gameparam.parambnd children → param channel; common.emevd → emevd channel.
  *
@@ -26,10 +27,10 @@
  * ceiling. Electron functional acceptance remains separately gated.
  */
 import { readdirSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { EmevdEventIr } from '@soulforge/shared';
 import { normalizePageWindow } from '../index.js';
 import { readFmgDocumentViaBridge } from '../editing/fmgBridgeCommit.js';
@@ -40,7 +41,7 @@ import { listContainerChildren } from '../containers/containerService.js';
 import { buildSyntheticBnd } from '../containers/bndSynthetic.js';
 import { classifyScriptEntry, sanitizeEntryName } from '../script/scriptContainerEvidence.js';
 import { standardSyntheticEmevd } from './syntheticEmevdBytes.js';
-import { resolveNativeFixture } from './nativeFixtureRegistry.js';
+import { fixedFixtureNumber, materializeFixedNativeFixture, resolveNativeFixture } from './nativeFixtureRegistry.js';
 
 /* ------------------------------------------------------------------ */
 /*  Shared windowing + coverage assertions                            */
@@ -125,7 +126,7 @@ function windowSizes(total: number, pageSize: number): number[] {
 function syntheticWindowingLegs(): Record<string, WindowedObservation> {
   const observations: Record<string, WindowedObservation> = {};
 
-  // script: mirror the real luabnd shape (301 entries) and the panel page size.
+  // script: exercise four bounded pages with a synthetic 301-entry table.
   const scriptEntries = Array.from({ length: 301 }, (_, i) => ({
     index: i,
     name: `ai_${i}.lua`,
@@ -323,7 +324,7 @@ interface RealCorpusResult {
 }
 
 /** script channel: Bridge read-dcx-document full enumeration + classification. */
-async function realScriptChannelLeg(source: string, channelPageSize: number): Promise<RealCorpusResult> {
+async function realScriptChannelLeg(source: string, channelPageSize: number, expectedEntries: number): Promise<RealCorpusResult> {
   const result = await runBridge<{
     nested?: {
       entryCount?: number;
@@ -349,8 +350,8 @@ async function realScriptChannelLeg(source: string, channelPageSize: number): Pr
       size: entry.uncompressedSize ?? 0
     };
   });
-  if (entries.length !== 301) {
-    throw new Error(`真实 luabnd 应含 301 条目，实际 ${entries.length}。`);
+  if (entries.length !== expectedEntries) {
+    throw new Error(`真实 luabnd 应含固定语料登记的 ${expectedEntries} 条目，实际 ${entries.length}。`);
   }
   if (nested.entryCount !== undefined && nested.entryCount !== entries.length) {
     throw new Error(`真实 luabnd entryCount ${nested.entryCount} ≠ 枚举 ${entries.length}。`);
@@ -359,7 +360,7 @@ async function realScriptChannelLeg(source: string, channelPageSize: number): Pr
     entries,
     channelPageSize,
     (entry) => String(entry.index),
-    `真实 script luabnd（301 条目 @${channelPageSize}）`
+    `真实 script luabnd（${expectedEntries} 条目 @${channelPageSize}）`
   );
   return {
     channel: 'script',
@@ -368,7 +369,7 @@ async function realScriptChannelLeg(source: string, channelPageSize: number): Pr
     pageCount,
     pageSizes: windowSizes(entries.length, channelPageSize),
     entriesComplete: true,
-    notes: ['read-dcx-document 全量枚举（301/301），entriesComplete=true；分类全部 lua-bytecode 家族']
+    notes: [`read-dcx-document 全量枚举（${entries.length}/${expectedEntries}），固定语料独立预期匹配，entriesComplete=true`]
   };
 }
 
@@ -598,7 +599,7 @@ async function realParamChannelLeg(
 }
 
 /** emevd channel: production paginated full-document assembly + events walk. */
-async function realEmevdChannelLeg(source: string, staging: string): Promise<RealCorpusResult> {
+async function realEmevdChannelLeg(source: string, staging: string, expected: { eventCount: number; instructionCount: number }): Promise<RealCorpusResult> {
   const registry = createSekiroFixtureEmedf();
   // EVENT-30A: pass the .dcx outer resource directly; Bridge unwraps natively.
   const result = await readFullEmevdDocumentViaBridge({
@@ -613,7 +614,9 @@ async function realEmevdChannelLeg(source: string, staging: string): Promise<Rea
   if (!result.ok || !result.document) {
     throw new Error(`真实 common.emevd 分页组装失败：${JSON.stringify(result.diagnostics)}`);
   }
-  if (result.instructionTotal !== 33_266 || result.pageCount !== 34 || result.document.events.length !== 1730) {
+  if (result.instructionTotal !== expected.instructionCount
+    || result.pageCount !== Math.max(1, Math.ceil(expected.instructionCount / 1000))
+    || result.document.events.length !== expected.eventCount) {
     throw new Error(`真实 common.emevd 组装不符：${JSON.stringify({
       instructionTotal: result.instructionTotal,
       pageCount: result.pageCount,
@@ -621,9 +624,8 @@ async function realEmevdChannelLeg(source: string, staging: string): Promise<Rea
     })}`);
   }
   // Events are paginated by array position (the four-view panel slices the
-  // event list); event IDs are NOT used as the coverage key because the real
-  // corpus legitimately reuses event id 88881000 (1729 unique ids over 1730
-  // events) — a genuine corpus property the panel must tolerate.
+  // event list); event IDs are not the coverage key because native documents
+  // may legitimately reuse them. Array position still covers every event.
   const eventIdCount = new Map<number, number>();
   for (const event of result.document.events) {
     eventIdCount.set(event.eventId, (eventIdCount.get(event.eventId) ?? 0) + 1);
@@ -657,7 +659,7 @@ async function realEmevdChannelLeg(source: string, staging: string): Promise<Rea
 /*  Static drift guards against the desktop main channels             */
 /* ------------------------------------------------------------------ */
 
-function assertIpcSharesWindowHelper(): void {
+async function assertIpcSharesWindowHelper(): Promise<unknown> {
   // Repo root resolved from this module's own location so the smoke works
   // regardless of the caller's cwd (npm -w runs from packages/core, direct
   // `node dist/testing/...` runs from the repo root).
@@ -671,7 +673,11 @@ function assertIpcSharesWindowHelper(): void {
     ...readdirSync(ipcRoot)
       .filter((name) => name.endsWith('.ts') && !name.endsWith('.test.ts'))
       .sort()
-      .map((name) => readFileSync(resolve(ipcRoot, name), 'utf8'))
+      .map((name) => readFileSync(resolve(ipcRoot, name), 'utf8')),
+    ...readdirSync(resolve(root, 'apps/desktop/src/main/services'))
+      .filter((name) => name.endsWith('.ts') && !name.endsWith('.test.ts'))
+      .sort()
+      .map((name) => readFileSync(resolve(root, 'apps/desktop/src/main/services', name), 'utf8'))
   ].join('\n');
   // The desktop main must import the shared window helper (single authority) and
   // must not define a private copy that could drift from this smoke.
@@ -684,14 +690,16 @@ function assertIpcSharesWindowHelper(): void {
   // 一遍子串匹配只会两处漂移：那边改名这边照过，实测已证明过一次。
   // param channel: real-corpus read must pass an explicit empty options object
   // (C# InvalidOperationException guard) and must not throw on payload-less rows.
-  if (!ipc.includes('commandOptions: {}') || !ipc.includes('typeof row.dataBase64 === \'string\'')) {
+  const paramService = readFileSync(resolve(root, 'apps/desktop/src/main/services/paramService.ts'), 'utf8');
+  if (!/commandOptions:\s*loadAll\s*\?\s*\{\s*includeAllPayloads:\s*true\s*\}\s*:\s*\{\s*\}/.test(paramService)
+    || !paramService.includes('typeof row.dataBase64 === \'string\'')) {
     throw new Error('readParamPage 必须显式传空 commandOptions 且对无 payload 行保持安全。');
   }
-  // bnd4 channel: real (non-SFBN) BND containers must fall back to native
-  // full entry-table enumeration so real corpus is not an empty table.
-  for (const token of ['isRealNativeBndContainer', 'enumerateNativeContainerEntries', 'BND_NATIVE_ENUMERATION_COMPLETE']) {
-    if (!ipc.includes(token)) throw new Error(`listContainerChildrenPage 缺少原生枚举 ${token}。`);
-  }
+  // Production behavior, independent of private service helper names.
+  const { assertRawNativeContainerContract } = await import(pathToFileURL(
+    resolve(root, 'scripts/testing/raw-native-container-contract.mjs')
+  ).href);
+  return assertRawNativeContainerContract();
 }
 
 /* ------------------------------------------------------------------ */
@@ -706,7 +714,7 @@ async function main(): Promise<void> {
   const realLegs: RealCorpusResult[] = [];
   try {
     await mkdir(staging, { recursive: true });
-    assertIpcSharesWindowHelper();
+    syntheticChannelLegs.rawNativeRouting = await assertIpcSharesWindowHelper();
     syntheticChannelLegs.bnd4 = await syntheticBnd4ChannelLeg(root);
     syntheticChannelLegs.emevd = await syntheticEmevdChannelLeg(root);
 
@@ -723,13 +731,20 @@ async function main(): Promise<void> {
       const parambnd = await resolveNativeFixture(nativeFixtureArg, 'param-primary', '../../mods/param/gameparam/gameparam.parambnd.dcx');
       const emevd = await resolveNativeFixture(nativeFixtureArg, 'emevd-primary', '../../mods/event/common.emevd.dcx');
 
-      realLegs.push(await realScriptChannelLeg(luabnd, 100));
+      const fixedLuabnd = await materializeFixedNativeFixture('luabnd-primary', root, luabnd);
+      if (fixedLuabnd.status !== 'available') throw new Error(`${fixedLuabnd.code}: ${fixedLuabnd.message}`);
+      realLegs.push(await realScriptChannelLeg(fixedLuabnd.path, 100, fixedFixtureNumber(fixedLuabnd.fixture, 'entryCount')));
       realLegs.push(await realBnd4ChannelLeg(msgbnd, 10));
       realLegs.push(await realFmgChannelLeg(fmgMsgbnd, staging, 100));
       const paramLegs = await realParamChannelLeg(parambnd, staging, 20);
       realLegs.push(paramLegs.payloadLeg);
       realLegs.push(paramLegs.largeLeg);
-      realLegs.push(await realEmevdChannelLeg(emevd, staging));
+      const fixedEmevd = await materializeFixedNativeFixture('emevd-primary', root, emevd);
+      if (fixedEmevd.status !== 'available') throw new Error(`${fixedEmevd.code}: ${fixedEmevd.message}`);
+      realLegs.push(await realEmevdChannelLeg(fixedEmevd.path, staging, {
+        eventCount: fixedFixtureNumber(fixedEmevd.fixture, 'eventCount'),
+        instructionCount: fixedFixtureNumber(fixedEmevd.fixture, 'instructionCount')
+      }));
     } else {
       console.log(JSON.stringify({
         ok: true,
@@ -758,8 +773,8 @@ async function main(): Promise<void> {
       nonClaims: [
         '本 smoke 只验证分页数据流，不提升任何 editor/native authority（cap 仍为 acceptance candidate）。',
         'Electron 面板功能验收仍单独门控，未在此运行。',
-        '真实 PARAM 大文档行字节由 Bridge 的 payload 门槛（rowCount<=32 && rowDataSize<=256）决定，channel 如实报 id/name；字段级编辑需行字节，属 Bridge 侧事项。',
-        '真实 BND 子项 read/replace 链仍为 TS-synthetic-only，枚举开放但读写失败关闭。'
+        '当前 PARAM 合成分页不证明真实字段写入；实际分页 payload 与安全字段写入由各自 Bridge/编辑链路检查验证。',
+        '当前检查证明容器枚举路由与分页，不证明原生子项快照或替换；那些操作保留各自格式能力与 Patch Engine 验证边界。'
       ]
     }, null, 2));
   } finally {

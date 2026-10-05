@@ -10,6 +10,15 @@ import {
 import type { EventExport, ParamExport } from '@soulforge/shared';
 
 describe('semanticFileCache', () => {
+  it('invalidates legacy TAE identity while keeping content-identical current projections', () => {
+    const file = { relativePath: 'chr/c0000.anibnd.dcx', resourceKind: 'chr', sha256: 'same-content', mtimeMs: 1 };
+    const legacy = { tae: [{ chrId: 'c0000', sourceUri: 'file://chr/c0000.anibnd.dcx', outerFileHash: 'same-content', sourceRevision: 1, animations: [] }] };
+    assert.equal(isNativeSemanticBundleCurrent(file as never, legacy), false);
+    const current = { tae: legacy.tae.map((item) => ({ ...item, readerSchemaRevision: 2 })) };
+    assert.equal(isNativeSemanticBundleCurrent(file as never, current), true);
+    assert.equal(isNativeSemanticBundleCurrent({ ...file, sha256: 'new-content' } as never, current), false);
+    assert.equal(isNativeSemanticBundleCurrent({ ...file, relativePath: 'chr/c0000.tae' } as never, current), true);
+  });
   it('extracts and hydrates file-specific symbols round-trip', () => {
     const index = new WorkspaceIndex('test-ws');
 

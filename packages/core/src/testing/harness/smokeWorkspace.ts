@@ -14,9 +14,25 @@
  *    抽象掉就会诱发「统一报 ok」这种最坏结果。
  *  - 不吞异常。withSmokeWorkspace 原样重抛，只保证清理发生。
  */
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { createOwnedTemporaryDirectory } from '../../../../../scripts/owned-temporary-directory.mjs';
+import { mkdir } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
+
+async function allocateSmokeWorkspace(owner: string, parent?: string): Promise<SmokeWorkspace> {
+  const workspace = await createOwnedTemporaryDirectory(owner, parent === undefined ? undefined : { parent });
+  const root = join(workspace.root, 'workspace');
+  try { await mkdir(root); }
+  catch (error) { await workspace.dispose(); throw error; }
+  // The marker stays outside the fixture root so file discovery and exact
+  // resource-count assertions observe only the fixture's own files.
+  return { root, dispose: () => workspace.dispose() };
+}
+
+/** Existing smoke finally blocks retain their cleanup; allocation gains restart ownership. */
+export async function createSmokeTemporaryDirectory(prefix: string): Promise<string> {
+  const workspace = await allocateSmokeWorkspace(`smoke-${basename(prefix)}`, dirname(prefix));
+  return workspace.root;
+}
 
 /** 临时工作区句柄。root 之外不承诺任何结构，由各 smoke 自行组织。 */
 export interface SmokeWorkspace {
@@ -36,11 +52,9 @@ export async function createSmokeWorkspace(label: string): Promise<SmokeWorkspac
   if (safeLabel.length === 0) {
     throw new Error('SMOKE_WORKSPACE_LABEL_EMPTY: label 至少需要一个文件名安全字符。');
   }
-  const root = await mkdtemp(join(tmpdir(), `soulforge-${safeLabel}-`));
-  return {
-    root,
-    dispose: () => rm(root, { recursive: true, force: true })
-  };
+  // Marked roots belong to this checkout and label. A restart can reclaim a
+  // killed predecessor while other running smokes and unmarked roots stay safe.
+  return allocateSmokeWorkspace(`smoke-${safeLabel}`);
 }
 
 /**

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createOpaqueCursor, parseOpaqueCursor, type NativeEditDomain } from '@soulforge/shared';
+import { cursorIdentity } from '../workspace/cursorIdentity.js';
 
 const DEFAULT_SOURCE_LIMIT = 2400;
 const MAX_SOURCE_LIMIT = 16000;
@@ -28,13 +29,14 @@ export function sourceTextPage(options: SourceTextPageOptions) {
   if (options.cursor !== undefined) {
     if (options.sourceOffset !== undefined) invalid('续读时只传 cursor，不同时指定 sourceOffset。');
     const payload = parseOpaqueCursor(options.cursor);
-    if (payload.sessionId !== 'source-text-v1' || payload.domain !== domain) {
+    if (!['source-text-v1', 'source-text-v2'].includes(payload.sessionId) || payload.domain !== domain) {
       invalid('游标不属于当前正文读取。', 'SOURCE_CURSOR_SCOPE_MISMATCH');
     }
     let scope: { sourceKey?: unknown; limit?: unknown };
     try { scope = JSON.parse(payload.scope) as typeof scope; }
     catch { invalid('正文游标范围无效。'); }
-    if (scope.sourceKey !== sourceKey || !Number.isSafeInteger(scope.limit)) {
+    const expectedSourceKey = payload.sessionId === 'source-text-v2' ? cursorIdentity(sourceKey) : sourceKey;
+    if (scope.sourceKey !== expectedSourceKey || !Number.isSafeInteger(scope.limit)) {
       invalid('游标与当前文件或子项不匹配。', 'SOURCE_CURSOR_SCOPE_MISMATCH');
     }
     if (options.sourceLimit !== undefined && options.sourceLimit !== scope.limit) {
@@ -82,8 +84,8 @@ export function sourceTextPage(options: SourceTextPageOptions) {
     endLine: startLine + sourceText.split('\n').length - 1,
     ...(hasMore ? {
       nextCursor: createOpaqueCursor({
-        sessionId: 'source-text-v1', offset: end, sourceHash: fingerprint, domain,
-        scope: JSON.stringify({ sourceKey, limit })
+        sessionId: 'source-text-v2', offset: end, sourceHash: fingerprint, domain,
+        scope: JSON.stringify({ sourceKey: cursorIdentity(sourceKey), limit })
       })
     } : {})
   };

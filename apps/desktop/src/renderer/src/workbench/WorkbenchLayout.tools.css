@@ -1,0 +1,17 @@
+
+/* ── 工具栏（最右栏：分组按钮）── */
+.wb-tools { display: flex; flex-direction: column; gap: 1px; padding: 4px 6px; }
+.wb-tools__item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 8px; font-size: 12px; text-align: left;
+  color: var(--ink-1); background: var(--control-rest-bg);
+  border: 1px solid transparent; border-radius: var(--radius-s); cursor: pointer;
+}
+.wb-tools__item:hover:not(:disabled) { background: var(--control-hover-bg); color: var(--ink-0); }
+.wb-tools__item:disabled { color: var(--ink-3); cursor: not-allowed; }
+.wb-tools__item:focus-visible { outline: 2px solid var(--ember); outline-offset: -1px; }
+
+/* S20：删掉旧 min-height: 420px 妥协 —— 它只在「panel 无高度参照」时兜底，
+   且极矮视口下会把工作台顶出滚动条（整页滚、三栏连体）。
+   参照已由 .viewer-content .panel { flex:1; min-height:0 } 提供，
+   工作台 height:100% 生效，三栏各自 column-body 独立滚动。 */

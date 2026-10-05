@@ -15,7 +15,12 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { delimiter, dirname, resolve } from 'node:path';
-import { SILENT_ON_SUCCESS } from './tiers.mjs';
+import { existsSync, realpathSync } from 'node:fs';
+import {validCaseEvidence} from './merge-check-reports.mjs';
+import {parseVerificationSkipReason} from '../verification-inputs.mjs';
+// TypeScript's successful checker is intentionally silent. Test entries must
+// still provide execution evidence; there is no per-suite registration table.
+const SILENT_ON_SUCCESS = Object.freeze({typecheck:true});
 
 /**
  * 超时时杀掉整棵进程树，而不只是直接子进程。
@@ -191,6 +196,63 @@ export function detectSkipSignals(stdout, stderr = '') {
   const skippedLegs = [];
   let wholeSkipped = false;
 
+  // Node's TAP and spec reporters use stable terminal counts rather than JSON.
+  // Require a complete summary block so ordinary prose mentioning a skip or
+  // a fixture's quoted '# tests' text cannot masquerade as execution evidence.
+  const nodeSummaries=[];
+  for(const source of [stdout,stderr]){
+    let summary=null;
+    for(const line of (source??'').replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu,'').split(/\r?\n/u)){
+      const match=/^(?:#\s*|ℹ\s+)(tests|pass|fail|cancelled|skipped|todo)\s+(\d+)\s*$/u.exec(line);
+      if(!match)continue;
+      if(match[1]==='tests')summary={tests:Number(match[2])};
+      else if(summary)summary[match[1]]=Number(match[2]);
+      if(summary&&['tests','pass','fail','cancelled','skipped','todo'].every(key=>Number.isSafeInteger(summary[key]))){nodeSummaries.push(summary);summary=null;}
+    }
+  }
+  if(nodeSummaries.length){
+    const executed=nodeSummaries.reduce((sum,item)=>sum+item.pass+item.fail+item.cancelled,0);
+    const skipped=nodeSummaries.reduce((sum,item)=>sum+item.skipped+item.todo,0);
+    if(executed===0){wholeSkipped=true;skippedLegs.push('node-test:no-executed-tests');}
+    else if(skipped>0)skippedLegs.push(`node-test:${skipped}-unverified-tests`);
+  }
+
+  // Playwright's list reporter emits counts rather than JSON. Bind terminal
+  // counts to its announced test total; isolated skip prose is not evidence.
+  const playwrightSummaries = [];
+  let incompletePlaywright = false;
+  for (const source of [stdout, stderr]) {
+    let summary = null;
+    const finishSummary = () => {
+      if (!summary) return;
+      const counted = Object.values(summary.counts).reduce((sum, value) => sum + value, 0);
+      if (!summary.invalid && Number.isSafeInteger(summary.total) && counted === summary.total) playwrightSummaries.push(summary.counts);
+      else incompletePlaywright = true;
+      summary = null;
+    };
+    for (const line of (source ?? '').replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '').split(/\r?\n/u)) {
+      const start = /^Running (\d+) tests? using \d+ workers?(?:, shard \d+ of \d+)?$/u.exec(line);
+      if (start) {
+        finishSummary();
+        summary = {total:Number(start[1]), counts:{}};
+        continue;
+      }
+      const count = /^  (\d+) (passed|skipped|did not run|failed|flaky|interrupted)(?: \([^\r\n]+\))?\s*$/u.exec(line);
+      if (!summary || !count) continue;
+      if (Object.hasOwn(summary.counts, count[2]) || !Number.isSafeInteger(Number(count[1]))) summary.invalid = true;
+      else summary.counts[count[2]] = Number(count[1]);
+    }
+    finishSummary();
+  }
+  if (playwrightSummaries.length || incompletePlaywright) {
+    const executed = playwrightSummaries.reduce((sum, counts) => sum + (counts.passed ?? 0)
+      + (counts.failed ?? 0) + (counts.flaky ?? 0) + (counts.interrupted ?? 0), 0);
+    const skipped = playwrightSummaries.reduce((sum, counts) => sum + (counts.skipped ?? 0) + (counts['did not run'] ?? 0), 0);
+    if (executed === 0) { wholeSkipped = true; skippedLegs.push('playwright:no-executed-tests'); }
+    else if (skipped > 0) skippedLegs.push(`playwright:${skipped}-unverified-tests`);
+    if (incompletePlaywright) skippedLegs.push('playwright:incomplete-summary');
+  }
+
   for (const source of [stdout, stderr]) {
     if (typeof source !== 'string' || source.length === 0) continue;
     for (const candidate of extractTopLevelJsonValues(source)) {
@@ -257,6 +319,44 @@ export function classifyOutcome(exitCode, stdout, stderr = '', scriptName = '') 
   return { outcome: OUTCOME.PASSED, skippedLegs: [] };
 }
 
+export function extractCaseEvidence(stdout,stderr=''){
+  const envelopes=[],diagnostics=[];
+  for(const source of [stdout,stderr])for(const json of extractTopLevelJsonValues(source??'')){
+    let value;try{value=JSON.parse(json);}catch{continue;}
+    if(value?.soulforgeCheckCases)envelopes.push(value.soulforgeCheckCases);
+    else if(value?.status==='skipped'){
+      const reason=parseVerificationSkipReason(JSON.stringify(value));
+      diagnostics.push({id:`diagnostic:${value.smoke??'unknown'}`,type:'test',status:'skipped',reasonCode:reason?.code??'UNKNOWN',missingPrerequisites:reason?.missingPrerequisites??[]});
+    }
+  }
+  if(!envelopes.length&&!diagnostics.length)return undefined;
+  let complete=envelopes.every(validCaseEvidence);
+  const summaries=[];
+  for(const source of [stdout,stderr]){
+    let row;
+    for(const line of (source??'').replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu,'').split(/\r?\n/u)){
+      const match=/^(?:#\s*|ℹ\s+)(tests|pass|fail|cancelled|skipped|todo)\s+(\d+)\s*$/u.exec(line);
+      if(!match)continue;
+      if(match[1]==='tests')row={tests:Number(match[2])};else if(row)row[match[1]]=Number(match[2]);
+      if(row&&['tests','pass','fail','cancelled','skipped','todo'].every(key=>Number.isSafeInteger(row[key]))){summaries.push(row);row=undefined;}
+    }
+  }
+  const node=envelopes.filter(row=>row.runner==='node');
+  if(summaries.length){
+    const sum=(rows,key)=>rows.reduce((n,row)=>n+(row[key]??0),0);
+    complete&&=node.length>0&&sum(summaries,'tests')===sum(node,'total')&&sum(summaries,'pass')===sum(node,'passed')
+      &&sum(summaries,'fail')===sum(node,'failed')&&sum(summaries,'skipped')+sum(summaries,'todo')===sum(node,'skipped')&&sum(summaries,'cancelled')===0;
+  }
+  if(detectSkipSignals(stdout,stderr).skippedLegs.includes('playwright:incomplete-summary'))complete=false;
+  const cases=[...envelopes.flatMap(row=>row.cases??[]),...diagnostics];
+  const leaves=cases.filter(row=>row.type==='test');
+  const count=status=>leaves.filter(row=>row.status===status).length;
+  const result={schemaVersion:1,runner:envelopes[0]?.runner??'diagnostic',complete,total:leaves.length,
+    passed:count('passed'),failed:count('failed'),skipped:count('skipped'),cases};
+  result.complete&&=validCaseEvidence(result);
+  return result;
+}
+
 /**
  * 执行一条 npm script。
  *
@@ -272,23 +372,41 @@ export function classifyOutcome(exitCode, stdout, stderr = '', scriptName = '') 
  * @param {number} options.timeoutMs
  * @param {boolean} [options.injectEnv] 是否经 env wrapper（默认 true）。
  */
-export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, operation, env = {}, args: extraArgs = [] }) {
+export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, operation, env = {}, args: extraArgs = [], collectCaseEvidence=false }) {
   return new Promise((resolvePromise) => {
     const npmArgs = ['run', scriptName, '--silent', ...(extraArgs.length ? ['--', ...extraArgs] : [])];
     // 始终用 process.execPath 执行 JS 入口，不依赖 shell 解析 `npm`：
     // Windows 下 npm 是 .cmd，spawn 不带 shell 时无法直接执行。
-    const npmCli = process.env.npm_execpath?.trim()
-      || resolve(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
-    const directArgs = !operation ? [npmCli, ...npmArgs]
+    const nodeDir = dirname(process.execPath);
+    const npmCandidates = [process.env.npm_execpath?.trim(),
+      resolve(nodeDir,'node_modules/npm/bin/npm-cli.js'),
+      resolve(nodeDir,'../lib/node_modules/npm/bin/npm-cli.js')];
+    for (const directory of (process.env.PATH ?? '').split(delimiter)) {
+      const shim = resolve(directory,process.platform === 'win32' ? 'npm.cmd':'npm');
+      if (existsSync(shim) && process.platform !== 'win32') {
+        try {npmCandidates.push(realpathSync(shim));} catch {}
+      }
+    }
+    const npmCli = npmCandidates.find(path => path && existsSync(path))
+      ?? resolve(nodeDir,'node_modules/npm/bin/npm-cli.js');
+    let directArgs = !operation ? [npmCli, ...npmArgs]
       : operation.command === 'npm' ? [npmCli, ...operation.args]
         : operation.command === 'tsc'
           ? [resolve(repoRoot, 'node_modules/typescript/bin/tsc'), ...operation.args]
           : operation.args;
+    if(collectCaseEvidence&&operation?.command==='node'&&directArgs.includes('--test')&&!directArgs.some(arg=>arg.startsWith('--test-reporter'))){
+      directArgs=[...directArgs];
+      directArgs.splice(directArgs.indexOf('--test')+1,0,'--test-reporter=tap',`--test-reporter=${new URL('./check-case-reporter.mjs',import.meta.url).href}`,'--test-reporter-destination=stdout','--test-reporter-destination=stdout');
+    }
     const args = injectEnv
       ? [resolve(repoRoot, 'scripts/with-local-has-game-env.mjs'), process.execPath, ...directArgs]
       : directArgs;
     const cwd = operation?.cwd ?? repoRoot;
     const childEnv = { ...process.env, ...env, ...operation?.env };
+    // Independent checks must not inherit node:test's private child reporter
+    // channel; that would suppress the summary used as execution evidence.
+    delete childEnv.NODE_TEST_CONTEXT;
+    if(collectCaseEvidence)childEnv.SOULFORGE_CHECK_ROOT=repoRoot;
     // npm normally supplies local binaries on PATH. Expanded node commands may
     // invoke them too, so retain that workspace/root lookup without using a shell.
     const pathKey = Object.keys(childEnv).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
@@ -331,9 +449,13 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, op
 
     child.once('close', (exitCode) => {
       clearTimeout(timer);
-      const { outcome, skippedLegs } = timedOut
+      let { outcome, skippedLegs } = timedOut
         ? { outcome: OUTCOME.FAILED, skippedLegs: [] }
-        : classifyOutcome(exitCode, stdout, stderr, operation?.command === 'tsc' ? 'typecheck' : scriptName);
+        : operation?.validation === false
+          ? { outcome: exitCode === 0 ? OUTCOME.PASSED : OUTCOME.FAILED, skippedLegs: [] }
+          : classifyOutcome(exitCode, stdout, stderr, operation?.command === 'tsc' ? 'typecheck' : scriptName);
+      const caseEvidence=collectCaseEvidence?extractCaseEvidence(stdout,stderr):undefined;
+      if(caseEvidence&&(!validCaseEvidence(caseEvidence)||caseEvidence.failed>0))outcome=OUTCOME.FAILED;
       resolvePromise({
         scriptName,
         outcome,
@@ -341,6 +463,7 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, op
         durationMs: Date.now() - startedAt,
         skippedLegs,
         timedOut,
+        ...(collectCaseEvidence?{caseEvidence}:{}),
         stdout,
         stderr
       });
@@ -351,7 +474,7 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, op
 // Cache only successful operations within this invocation. A build/generator is
 // a barrier. Failed/skipped work is never promoted by reuse, and && still stops
 // the remaining operations of that suite on a nonzero exit or timeout.
-export async function runPlannedSuite({ repoRoot, entry, timeoutMs, cache, injectEnv = true, execute = runSuite }) {
+export async function runPlannedSuite({ repoRoot, entry, timeoutMs, cache, injectEnv = true, execute = runSuite, collectCaseEvidence=false }) {
   const startedAt = Date.now();
   const steps = [];
   const outputs = [];
@@ -361,20 +484,22 @@ export async function runPlannedSuite({ repoRoot, entry, timeoutMs, cache, injec
     const remaining = timeoutMs - (Date.now() - startedAt);
     const result = cached ?? (remaining <= 0
       ? { outcome: OUTCOME.FAILED, exitCode: null, durationMs: 0, skippedLegs: [], timedOut: true, stdout: '', stderr: 'Suite timeout budget exhausted.' }
-      : await execute({ repoRoot, scriptName: entry.scriptName, timeoutMs: remaining, injectEnv, operation }));
+      : await execute({ repoRoot, scriptName: entry.scriptName, timeoutMs: remaining, injectEnv, operation,collectCaseEvidence }));
     if (!cached && result.outcome === OUTCOME.PASSED && operation.kind !== 'barrier') {
       cache.set(operation.key, { ...result, reusedFrom: entry.scriptName });
     }
     steps.push({ key: operation.key, command: operation.command, args: operation.args, cwd: operation.cwd,
       outcome: result.outcome, execution: cached ? 'reused' : 'executed',
-      durationMs: cached ? 0 : result.durationMs, ...(cached ? { reusedFrom: cached.reusedFrom } : {}) });
+      validation: operation.validation ?? (operation.kind !== 'prepare'),
+      durationMs: cached ? 0 : result.durationMs, ...(cached ? { reusedFrom: cached.reusedFrom } : {}),
+      ...(result.caseEvidence?{caseEvidence:result.caseEvidence}:{}) });
     outputs.push(result);
     if (result.exitCode !== 0 || result.timedOut) break;
   }
   const failed = outputs.find((r) => r.outcome === OUTCOME.FAILED);
-  const skipped = outputs.filter((r) => r.outcome === OUTCOME.SKIPPED);
-  const partial = outputs.some((r) => r.outcome === OUTCOME.PARTIAL);
-  const testOutputs = outputs.filter((_, i) => entry.steps[i].kind !== 'prepare');
+  const testOutputs = outputs.filter((_, i) => entry.steps[i].validation ?? (entry.steps[i].kind !== 'prepare'));
+  const skipped = testOutputs.filter((r) => r.outcome === OUTCOME.SKIPPED);
+  const partial = testOutputs.some((r) => r.outcome === OUTCOME.PARTIAL);
   const allSkipped = testOutputs.length > 0 && testOutputs.every((r) => r.outcome === OUTCOME.SKIPPED);
   return {
     scriptName: entry.scriptName,
@@ -382,7 +507,7 @@ export async function runPlannedSuite({ repoRoot, entry, timeoutMs, cache, injec
       : skipped.length || partial ? OUTCOME.PARTIAL : OUTCOME.PASSED,
     exitCode: failed ? failed.exitCode : 0,
     durationMs: Date.now() - startedAt,
-    skippedLegs: outputs.flatMap((r, i) => r.outcome === OUTCOME.SKIPPED || r.outcome === OUTCOME.PARTIAL
+    skippedLegs: outputs.flatMap((r, i) => steps[i].validation && (r.outcome === OUTCOME.SKIPPED || r.outcome === OUTCOME.PARTIAL)
       ? [`${steps[i].key}:${r.skippedLegs.join(',') || r.outcome}`] : []),
     ...(failed?.timedOut ? { timedOut: true } : {}),
     ...(failed?.spawnError ? { spawnError: failed.spawnError } : {}),

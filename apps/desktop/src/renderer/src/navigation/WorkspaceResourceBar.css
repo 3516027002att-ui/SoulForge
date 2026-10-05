@@ -1,0 +1,39 @@
+
+/* ═══════════ 顶部资源目录栏（titlebar 下方、shell 上方） ═══════════
+   单行紧凑标签，窄窗口水平滚动不换行；当前项细下划线。
+   四态遵循低存在感控件语言。 */
+.resource-bar {
+  flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 0 12px; height: 34px;
+  background: var(--forge-1); border-bottom: 1px solid var(--line);
+  position: relative; z-index: 35;
+}
+.resource-bar__tabs {
+  flex: 1; min-width: 0; display: flex; align-items: stretch; gap: 2px;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+}
+.resource-bar__tabs::-webkit-scrollbar { display: none; }
+.resource-tab {
+  flex: none; display: inline-flex; align-items: center; gap: 6px;
+  padding: 0 10px; height: 28px; align-self: center;
+  font-size: 12px; color: var(--ink-2); border-radius: var(--radius-s);
+  background: var(--control-rest-bg); position: relative;
+  transition: background var(--dur-micro), color var(--dur-micro), box-shadow var(--dur-micro);
+}
+.resource-tab:hover { background: var(--control-hover-bg); color: var(--ink-1); box-shadow: var(--control-hover-shadow); }
+.resource-tab:active { background: var(--control-active-bg); box-shadow: var(--control-active-shadow); }
+.resource-tab.is-selected { color: var(--ember-text); }
+.resource-tab.is-selected::after {
+  content: ""; position: absolute; left: 8px; right: 8px; bottom: -3px; height: 2px;
+  background: var(--ember); border-radius: 1px;
+}
+.resource-tab__label { white-space: nowrap; }
+.resource-tab__count {
+  font-family: var(--font-mono); font-size: 10px; color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+.resource-bar__unknown {
+  flex: none; font-family: var(--font-mono); font-size: 10.5px;
+  color: var(--warn); background: var(--warn-soft);
+  padding: 2px 8px; border-radius: 999px; white-space: nowrap;
+}

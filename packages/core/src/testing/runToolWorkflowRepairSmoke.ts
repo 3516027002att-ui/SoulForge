@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import { createAgentToolBridge, MAX_BOUNDED_TOOL_RESULT_BYTES } from '../ai/agentToolBridge.js';
 import { ToolRegistry } from '../ai/toolRegistry.js';
 import { metadataPage } from '../ai/metadataPage.js';
+import { assertCursorPrivacy } from './harness/assertCursorPrivacy.js';
 
 const items = Array.from({ length: 15 }, (_, i) => ({ fieldId: `field${i}`, description: '字段'.repeat(20) }));
-const options = { items, scope: { workspace: 'a', table: 'NpcParam' }, sourceHash: 'a', domain: 'param' as const, limit: 12 };
+const options = { items, scope: { workspace: 'file:///C:/Users/Alice/private-mod-workspace', container: 'C:/Users/Alice/private-mod-workspace/fixture.parambnd', table: 'NpcParam' }, sourceHash: 'a', domain: 'param' as const, limit: 12 };
 let page = metadataPage(options);
+assert.equal(assertCursorPrivacy(page, ['private-mod-workspace', '/Users/Alice', 'fixture.parambnd']), 1);
 const delivered = [...page.items];
 while (page.nextCursor) { page = metadataPage({ ...options, cursor: page.nextCursor }); delivered.push(...page.items); }
 assert.deepEqual(delivered, items);

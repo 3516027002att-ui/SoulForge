@@ -85,7 +85,6 @@ export interface AgentToolBridge {
   ) => Promise<{ ok: boolean; content: string; code?: string }>;
 }
 
-const PARALLEL_SAFE_LEVELS = new Set(['read', 'analyze']);
 const DISCOVERY_TOOLS = new Set([
   'search_resources',
   'search_param_rows',
@@ -115,7 +114,7 @@ const NATIVE_READ_TOOLS = new Set([
   'query_map_objects',
   'inspect_map_object'
 ]);
-const PAGED_METADATA_TOOLS = new Set(['analyze_luabnd_script', 'analyze_tae_structure', 'search_param_fields']);
+const PAGED_METADATA_TOOLS = new Set(['analyze_luabnd_script', 'analyze_tae_structure', 'search_param_fields', 'search_tae_events', 'read_tae_events']);
 const DISCOVERY_QUERY_TOOLS = new Set([
   'search_resources',
   'search_param_rows',
@@ -143,6 +142,7 @@ const MUTATION_TOOLS = new Set([
   'apply_emevd_dsl',
   'mutate_tae_event_times',
   'mutate_tae_event_fields',
+  'insert_tae_events',
   'mutate_msb_part_transform',
   'mutate_luabnd_script',
   'batch_transform_map_objects',
@@ -177,7 +177,7 @@ const BOUNDED_DISCOVERY_TOOLS = new Set([
 ]);
 const SUMMARY_ARRAY_LIMIT = 16;
 const SUMMARY_STRING_LIMIT = 320;
-const RESULT_ENVELOPE_DESCRIPTION =
+export const AGENT_TOOL_RESULT_INSTRUCTIONS =
   '返回固定结果 envelope：state、data、pagination、truncated、identifiers、evidence；pagination.truncated 仅表示逻辑结果有后页，pagination.deliveryTruncated 表示传输摘要省略了细节而非存在游标；按 nextActions/nextReadPlan 恢复细节。state=committed 表示事务已落盘，verification_failed 表示已落盘但原生复读失败，不能按普通失败重试；大型结果只在 data.summary 中摘要，不能按原始 typed response 解读。evidence 只表示确定性来源状态，不是模型置信度分数。evidence.claimDefaults 是各条 claims 共用的完整字段（identity 按属性合并），单条字段覆盖默认值；省略的 key/resourceKey 可由完整 identity 无损重建。';
 
 export type AgentEvidenceStatus = 'not_applicable' | 'candidate' | 'native-verified' | 'insufficient_evidence';
@@ -3009,8 +3009,8 @@ function boundedToolContent(
     return boundedFailureContent({
       code: 'RESULT_METADATA_WINDOW_TOO_LARGE',
       message: '元数据窗口超过输出预算；用相同查询、相同 cursor 和更小 limit 重读当前页。',
-      details: { retry: { ...(input ?? {}), [name === 'analyze_tae_structure' ? 'pageSize' : 'limit']:
-        Math.max(1, Math.floor(Number(name === 'analyze_tae_structure' ? input?.pageSize ?? 32 : input?.limit ?? 6) / 2)) } }
+      details: { retry: { ...(input ?? {}), [name === 'analyze_tae_structure' || name === 'read_tae_events' ? 'pageSize' : 'limit']:
+        Math.max(1, Math.floor(Number(name === 'analyze_tae_structure' || name === 'read_tae_events' ? input?.pageSize ?? 32 : input?.limit ?? 6) / 2)) } }
     });
   }
   if (name === 'resolve_entity' && data && typeof data === 'object' && !Array.isArray(data)) {
@@ -3265,12 +3265,12 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
     // Every successful result is normalized by boundedToolContent, not only
     // discovery results.  The model must therefore receive the envelope
     // contract for switch_mode, proposals, and mutations as well.
-    description: `${descriptor.description} ${RESULT_ENVELOPE_DESCRIPTION}`,
+    description: descriptor.description,
     parametersJsonSchema: toolInputShapeToJsonSchema(descriptor.inputSchema),
     // Carried through so the loop's approval gate can group by severity from
     // the registry's own declaration instead of guessing from the name.
     permissionLevel: descriptor.permissionLevel ?? 'read',
-    supportsParallel: PARALLEL_SAFE_LEVELS.has(descriptor.permissionLevel ?? 'read')
+    supportsParallel: descriptor.supportsParallel === true
   }));
 
   const executeTool = async (
@@ -3669,6 +3669,7 @@ function recordAutomaticNativeReadProof(input: {
             ? { taeEntryId: record.taeEntryId } : {}),
           ...(typeof record.taeEntryName === 'string' ? { taeEntryName: record.taeEntryName } : {}),
           ...(typeof record.taeGroup === 'string' ? { taeGroup: record.taeGroup } : {}),
+          ...(typeof record.eventTypeId === 'number' ? { eventTypeId: record.eventTypeId } : {}),
           ...(typeof record.startFrame === 'number' ? { startFrame: record.startFrame } : {}),
           ...(typeof record.endFrame === 'number' ? { endFrame: record.endFrame } : {}),
           ...(Array.isArray(record.fields)

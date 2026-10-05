@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, lstatSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const EXPECTED_POLICY_INPUTS = [
@@ -103,10 +103,34 @@ const EXPECTED_EXTRA_RESOURCES = [
     to: 'bridge/SoulForge.Hksc.Native.dll',
     filter: ['SoulForge.Hksc.Native.dll']
   },
+  {
+    from: '../../bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/runtime-notices',
+    to: 'bridge/runtime-notices',
+    filter: ['LICENSE.txt', 'THIRD-PARTY-NOTICES.txt', 'runtime-notices.json']
+  },
   { from: '../../LICENSE', to: 'LICENSE', filter: ['LICENSE'] },
   { from: '../../NOTICE', to: 'NOTICE', filter: ['NOTICE'] },
   { from: '../../licenses', to: 'licenses', filter: ['**/*'] }
 ];
+const EXPECTED_COMMON_RESOURCES = EXPECTED_EXTRA_RESOURCES.filter((item) => !item.to.startsWith('bridge/'));
+const EXPECTED_WINDOWS_RESOURCES = EXPECTED_EXTRA_RESOURCES.filter((item) => item.to.startsWith('bridge/'));
+const EXPECTED_LINUX_RESOURCES = [{
+  from: '../../bridge/SoulForge.Bridge/bin/Release/net10.0/linux-x64/publish/SoulForge.Bridge',
+  to: 'bridge/SoulForge.Bridge', filter: ['SoulForge.Bridge']
+}, {
+  from: '../../bridge/SoulForge.Bridge/bin/Release/net10.0/linux-x64/publish/libSoulForge.Hksc.Native.so',
+  to: 'bridge/libSoulForge.Hksc.Native.so', filter: ['libSoulForge.Hksc.Native.so']
+}, {
+  from: '../../bridge/SoulForge.Bridge/bin/Release/net10.0/linux-x64/publish/runtime-notices',
+  to: 'bridge/runtime-notices',
+  filter: ['LICENSE.txt', 'THIRD-PARTY-NOTICES.txt', 'runtime-notices.json']
+}];
+
+function runtimeResourcesMatch(config) {
+  return sameExtraResources(config?.extraResources, EXPECTED_COMMON_RESOURCES)
+    && sameExtraResources(config?.win?.extraResources, EXPECTED_WINDOWS_RESOURCES)
+    && sameExtraResources(config?.linux?.extraResources, EXPECTED_LINUX_RESOURCES);
+}
 
 // Development-only surfaces that must never appear inside app.asar. Each entry
 // is a shipped-artifact path predicate, checked by auditPackageTree so that the
@@ -159,6 +183,8 @@ const EXPECTED_TOP_LEVEL_CONFIG_FIELDS = [
   'files',
   'extraResources',
   'win',
+  'linux',
+  'npmRebuild',
   'nsis',
   'asar',
   'compression'
@@ -213,7 +239,7 @@ export function validatePortableBuilderConfig(config, releasePolicy) {
       name: 'package-inputs-closed',
       ok: sameStringArray(filePatterns, EXPECTED_FILE_PATTERNS)
         && !hasOwn(config, 'extraFiles')
-        && sameExtraResources(config?.extraResources, EXPECTED_EXTRA_RESOURCES)
+        && runtimeResourcesMatch(config)
     },
     {
       name: 'output-directory-approved',
@@ -247,7 +273,15 @@ export function validatePortableBuilderConfig(config, releasePolicy) {
     },
     {
       name: 'includes-approved-runtime-resources',
-      ok: sameExtraResources(config?.extraResources, EXPECTED_EXTRA_RESOURCES)
+      ok: runtimeResourcesMatch(config)
+    },
+    {
+      name: 'linux-native-runtime',
+      ok: config?.linux?.executableName === 'soulforge'
+        && config?.linux?.target?.length === 1
+        && config.linux.target[0].target === 'dir'
+        && sameStringSet(config.linux.target[0].arch ?? [], ['x64'])
+        && config.npmRebuild === false
     },
     { name: 'excludes-native-build-cache', ok: filePatterns.includes('!.native/**/*') },
     {
@@ -279,15 +313,30 @@ export function validatePortableBuilderConfig(config, releasePolicy) {
  * requiring generated Bridge output, while a real packaging run can fail
  * closed before invoking electron-builder.
  */
-export function validatePortableBuilderResourceSources(config, configDirectory) {
-  const resources = Array.isArray(config?.extraResources) ? config.extraResources : [];
+export function validatePortableBuilderResourceSources(config, configDirectory, { platform = process.platform } = {}) {
+  const target = platform === 'linux' ? config?.linux : config?.win;
+  const resources = [...(Array.isArray(config?.extraResources) ? config.extraResources : []),
+    ...(Array.isArray(target?.extraResources) ? target.extraResources : [])];
   return resources.map((resource, index) => {
     const source = typeof resource?.from === 'string'
       ? resolve(configDirectory, resource.from)
       : null;
+    let available = source !== null && existsSync(source);
+    if (available && resource?.to?.startsWith('bridge/')) {
+      const metadata = lstatSync(source);
+      if (resource.to === 'bridge/runtime-notices') {
+        available = metadata.isDirectory() && !metadata.isSymbolicLink()
+          && ['LICENSE.txt', 'THIRD-PARTY-NOTICES.txt', 'runtime-notices.json'].every(name => {
+            const file = resolve(source, name);
+            if (!existsSync(file)) return false;
+            const entry = lstatSync(file);
+            return entry.isFile() && !entry.isSymbolicLink();
+          });
+      } else available = metadata.isFile() && !metadata.isSymbolicLink();
+    }
     return {
       name: `resource-source-${index + 1}`,
-      ok: source !== null && existsSync(source),
+      ok: available,
       source: resource?.from ?? null,
       resolvedSource: source
     };
@@ -356,9 +405,16 @@ function isPortableConfigSchemaClosed(config) {
     && hasExactKeys(config.directories, ['output', 'buildResources'])
     && Array.isArray(config.extraResources)
     && config.extraResources.every((item) => hasExactKeys(item, ['from', 'to', 'filter']))
-    && hasExactKeys(config.win, ['target', 'artifactName'])
+    && hasExactKeys(config.win, ['target', 'artifactName', 'extraResources'])
+    && Array.isArray(config.win.extraResources)
+    && config.win.extraResources.every((item) => hasExactKeys(item, ['from', 'to', 'filter']))
     && Array.isArray(config.win.target)
     && config.win.target.every((item) => hasExactKeys(item, ['target', 'arch']))
+    && hasExactKeys(config.linux, ['target', 'category', 'executableName', 'extraResources'])
+    && Array.isArray(config.linux.extraResources)
+    && config.linux.extraResources.every((item) => hasExactKeys(item, ['from', 'to', 'filter']))
+    && Array.isArray(config.linux.target)
+    && config.linux.target.every((item) => hasExactKeys(item, ['target', 'arch']))
     && hasExactKeys(config.nsis, [
       'oneClick',
       'allowToChangeInstallationDirectory',

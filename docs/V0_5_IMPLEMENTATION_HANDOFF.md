@@ -1,6 +1,7 @@
 # SoulForge V0.5 实施交接书
 
-> - 文档性质：唯一实施规范、技术线路图与工程交接。
+> - 文档性质：历史技术线路图与工程交接；当前工程入口为 [AGENTS.md](../AGENTS.md)、[ARCHITECTURE.md](../ARCHITECTURE.md) 与 [DECISIONS.md](DECISIONS.md)。
+> - 本文的 gov、治理 JSON、seal/freshness、冻结范围和 tier 登记流程已退役。下文命令与状态表是历史记录，不提供当前执行或写入授权；不要求通读全文或重封存才能开展有明确边界的任务。
 > - 目标读者：接手 SoulForge 的开发 Agent / 工程师。
 > - 当前基准日期：2026-07-20。
 > - 代码能力基线：`7bd354d`；该提交包含本文现有能力声明所依据的代码与历史证据。
@@ -1254,14 +1255,11 @@ npm run test:handoff-integrity
 npm run test:handoff-integrity:fixtures
 npm run test:handoff-projection
 npm run test:orphan-smoke-gate
-npm run test:probe-residual-gate
 npm run test:release-scope
 npm run test:release-scope-fixtures
 npm run test:release-scope-proposal
 npm run test:required-validation
 npm run test:seal-cli
-npm run test:smoke-temp-cleanup
-npm run test:stale-tfm-gate
 npm run test:v06-deferral-index
 npm run test:v06-deferral-index-fixtures
 npm run test:verify-entrypoint

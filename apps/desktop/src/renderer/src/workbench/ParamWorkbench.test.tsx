@@ -47,6 +47,13 @@ function render(containerLabel = 'gameparam.parambnd.dcx'): string {
 }
 
 describe('ParamWorkbench 初始结构（挂载即有的骨架）', () => {
+  it('字段比较入口默认收起，不在未选行时伪造前值', () => {
+    const html = render();
+    assert.match(html, /<summary[^>]*>与载入版本比较<\/summary>/);
+    assert.doesNotMatch(html, /<details[^>]*\bopen(?:=|\s|>)/);
+    assert.doesNotMatch(html, /class="loaded-comparison__line/);
+  });
+
   it('工作台有可访问名', () => {
     const html = render();
     assert.match(html, /aria-label="PARAM 工作台"/);
@@ -161,14 +168,12 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
     join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'workbench', 'ParamWorkbench.tsx'),
     'utf8'
   ));
-  const paramIpcSource = stripComments(readFileSync(
-    join(repoRoot, 'apps', 'desktop', 'src', 'main', 'ipc', 'param.ts'),
-    'utf8'
-  ));
-  const assetIpcSource = stripComments(readFileSync(
-    join(repoRoot, 'apps', 'desktop', 'src', 'main', 'ipc', 'assets.ts'),
-    'utf8'
-  ));
+  const paramIpcSource = stripComments(['paramService.ts', 'paramSessionService.ts'].map(name => readFileSync(
+    join(repoRoot, 'apps', 'desktop', 'src', 'main', 'services', name), 'utf8'
+  )).join('\n'));
+  const assetIpcSource = stripComments(['assetReadService.ts', 'assetMutationService.ts'].map(name => readFileSync(
+    join(repoRoot, 'apps', 'desktop', 'src', 'main', 'services', name), 'utf8'
+  )).join('\n'));
   const preloadSource = stripComments(readFileSync(
     join(repoRoot, 'apps', 'desktop', 'src', 'preload', 'index.ts'),
     'utf8'
@@ -399,8 +404,14 @@ describe('PARAM payload 请求代际与物理身份', () => {
  * 一次（作为第一个参数），用它定位即可。
  */
 function sliceHandler(source: string, channel: string): string {
+  const operation = channel.slice(channel.lastIndexOf('.') + 1);
+  const serviceStart = source.indexOf(`const ${operation} = async`);
+  if (serviceStart >= 0) {
+    const nextOperation = source.indexOf('\n  const ', serviceStart + 1);
+    return source.slice(serviceStart, nextOperation < 0 ? undefined : nextOperation);
+  }
   const start = source.indexOf(`'${channel}'`);
-    assert.ok(start >= 0, `IPC 模块中找不到 handler: ${channel}`);
+  assert.ok(start >= 0, `IPC/service 中找不到 operation: ${channel}`);
   return source.slice(start);
 }
 
@@ -449,18 +460,22 @@ describe('S29 能打开就能写（grok §1-9/§1-10）', () => {
     join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'workbench', 'ParamWorkbench.tsx'),
     'utf8'
   ));
-  const appSource = stripComments(readFileSync(
-    join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'App.tsx'),
-    'utf8'
-  ));
+  const appShellSource = readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'App.tsx'), 'utf8'
+  );
+  const paramViewSource = /from '\.\/app\/ParamEditorView\.js'/.test(appShellSource)
+    ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'ParamEditorView.tsx'), 'utf8')
+    : appShellSource;
+  const appSource = stripComments(/from '\.\/app\/useParamMutationController\.js'/.test(appShellSource)
+    ? readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'app', 'useParamMutationController.ts'), 'utf8')
+    : appShellSource);
   const ipcSource = stripComments(readFileSync(
     join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc.ts'),
     'utf8'
   ));
-  const paramIpcSource = stripComments(readFileSync(
-    join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc', 'param.ts'),
-    'utf8'
-  ));
+  const paramIpcSource = stripComments(['paramService.ts', 'paramSessionService.ts'].map(name => readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'services', name), 'utf8'
+  )).join('\n'));
 
   it('bool 与 1bit 字段渲染为打勾（checkbox），不再用数字框', () => {
     // 判定唯一来源是共享 helper paramCheckboxField.ts（bool 整字段或 1bit 位域）。
@@ -481,6 +496,11 @@ describe('S29 能打开就能写（grok §1-9/§1-10）', () => {
 
   it('renderer 不再拿「缺少容器或条目哈希」拒绝写入', () => {
     assert.ok(!appSource.includes('缺少容器或条目哈希'), '哈希拒写文案已删除');
+    if (/from '\.\/app\/useParamMutationController\.js'/.test(appShellSource)) {
+      assert.match(paramViewSource, /onApplyFieldMutation=\{applyContainerParamFieldMutation\}/);
+      assert.match(paramViewSource, /onApplyRowNameMutation=\{applyContainerParamRowNameMutation\}/);
+      assert.match(paramViewSource, /onApplyRowMutation=\{applyContainerParamRowMutation\}/);
+    }
   });
 
   it('main 侧缺哈希写时现算（sha256FileNow 兜底，不挡写入）', () => {

@@ -7,12 +7,21 @@
  * constraint 18: THREE.Object3D / renderer objects / React state are never the
  * authority. The semantic scenes are plain typed data owned by the caller.
  *
- * Backends: WebGPU-first with WebGL2 fallback. `rendererBackend` may be injected
+ * Backends: WebGL2 default until WebGPU native-material parity is verified.
+ * `rendererBackend` may be injected
  * for deterministic verification; `rendererFactory` is a headless test seam that
  * replaces GPU-backed renderer construction entirely.
  */
 
+import { attachFlverNativeVertexDiagnostics, type FlverSceneNativeVertexDiagnostics } from './flverNativeVertexDiagnostics.js';
+import type { createWebGpuDiffuseMaterial } from './nativeDiffuseBlend.js';
+import { createSceneEnvironment } from './sceneEnvironment.js';
+import { SceneResourceRegistry } from './sceneResourceRegistry.js';
+import { SceneCameraController } from './sceneCameraController.js';
+import { SceneRenderLoop } from './sceneRenderLoop.js';
 import type { SceneDrawList } from './sceneManifestBrowser.js';
+import { resolveRendererBackend, type RendererBackend } from './webgpuDetect.js';
+export { resolveRendererBackend, type RendererBackend } from './webgpuDetect.js';
 import {
   type AuthoritativeAnimationClip,
   sampleAuthoritativePose
@@ -36,8 +45,6 @@ import type {
 } from 'three';
 
 type ThreeModule = typeof import('three');
-
-export type RendererBackend = 'webgpu' | 'webgl2';
 
 export type TransformMode = 'translate' | 'rotate' | 'scale';
 
@@ -156,7 +163,7 @@ export interface FlverSceneDiffuseBlend {
   multiplyBlendMaskByAlbedo2Alpha: boolean;
 }
 
-export interface FlverSceneMesh {
+export interface FlverSceneMesh extends FlverSceneNativeVertexDiagnostics {
   id: string;
   label: string;
   position: [number, number, number];
@@ -495,6 +502,7 @@ interface MountInput {
 }
 
 interface SceneCore {
+  createDiffuseBlendMaterial: typeof createWebGpuDiffuseMaterial | null;
   three: ThreeModule;
   scene: Scene;
   camera: PerspectiveCamera;
@@ -544,17 +552,6 @@ interface InstanceBatch {
 }
 
 const HIGHLIGHT_COLOR = 0x4fa8ff;
-
-/**
- * Deterministic backend resolution: explicit override wins; otherwise WebGPU
- * when the adapter is available, WebGL2 as the compatible fallback.
- */
-export function resolveRendererBackend(
-  override: RendererBackend | undefined,
-  gpuAvailable: boolean
-): RendererBackend {
-  return override ?? (gpuAvailable ? 'webgpu' : 'webgl2');
-}
 
 /**
  * Derive a useful initial camera frame without changing the authoritative draw
@@ -704,7 +701,7 @@ export async function mountThreeProxyScene(
         core.root.remove(previous);
         core.meshes.delete(id);
       }
-      core.addMesh(id, createFlverMesh(core.three, core.track, mesh));
+      core.addMesh(id, createFlverMesh(core.three, core.track, mesh, null, undefined, core.rendererBackend, false, undefined, core.createDiffuseBlendMaterial));
       emitRenderAudit('mesh-ready');
     },
     updateModelGeometry: (modelName, geometryData, preparedHints) => {
@@ -738,7 +735,7 @@ export async function mountThreeProxyScene(
 }
 
 /**
- * Mount a WebGPU-first scene that projects real FLVER mesh geometry.
+ * Mount a renderer-selected scene that projects real FLVER mesh geometry.
  * The semantic scene is plain typed data (vertex/index buffers, transforms),
  * never THREE objects — the projection layer owns all renderer objects and
  * releases them on dispose.
@@ -1122,7 +1119,8 @@ export async function mountFlverScene(input: {
           textureCache,
           core.rendererBackend,
           true,
-          core.root.matrixWorld
+          core.root.matrixWorld,
+          core.createDiffuseBlendMaterial
         ));
       }
       const markerRuntime = [...activeSkeletons.values()]
@@ -1244,46 +1242,17 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
       : await createRealRenderer(three, canvas, rendererBackend);
   }
   renderer.setPixelRatio(Math.min(typeof window !== 'undefined' && window.devicePixelRatio ? window.devicePixelRatio : 1, 2));
+  const createDiffuseBlendMaterial = rendererBackend === 'webgpu'
+    ? (await import('./nativeDiffuseBlend.js')).createWebGpuDiffuseMaterial
+    : null;
 
-  const scene = new three.Scene();
-  scene.background = new three.Color(0x151922);
-  const camera = new three.PerspectiveCamera(55, 1, 0.1, 50_000);
+  const { scene, camera, root, markerGroup, highlightGroup, guides } = createSceneEnvironment(three, input);
   input.cameraAudit?.(camera);
-  const root = new three.Group();
-  // Match the native FLVER coordinate projection used by DSAnimStudio only
-  // for the FLVER projection. Map/proxy scenes remain in their existing scene
-  // coordinate system and must not inherit this handedness conversion.
-  if (input.nativeFlverCoordinateSpace) root.scale.set(1, 1, -1);
-  scene.add(root);
-  // Real FLVER albedo previews have no environment map. A low ambient-only
-  // setup makes valid dark cloth/stone textures read as an untextured black
-  // silhouette, especially in the narrow action preview. Keep a neutral
-  // hemisphere/fill rig in the projection layer so both map and character
-  // previews remain readable without changing the authoritative asset data.
-  scene.add(new three.AmbientLight(0xffffff, 0.72));
-  const hemisphere = new three.HemisphereLight(0xcfe2ff, 0x493d35, 0.62);
-  hemisphere.position.set(0, 100, 0);
-  scene.add(hemisphere);
-  const key = new three.DirectionalLight(0xffffff, 0.95);
-  key.position.set(40, 80, 20);
-  scene.add(key);
-  const fill = new three.DirectionalLight(0xaecbff, 0.28);
-  fill.position.set(-40, 25, -30);
-  scene.add(fill);
-
-  const grid = input.showSceneGuides === false
-    ? null
-    : new three.GridHelper(200, 20, 0x3a4150, 0x2a303c);
-  const axes = input.showSceneGuides === false
-    ? null
-    : new three.AxesHelper(10);
-  if (grid) scene.add(grid);
-  if (axes) scene.add(axes);
-
-  const markerGroup = new three.Group();
-  scene.add(markerGroup);
-  const highlightGroup = new three.Group();
-  scene.add(highlightGroup);
+  const resourceRegistry = new SceneResourceRegistry();
+  for (const guide of guides) {
+    resourceRegistry.trackStatic(guide.geometry);
+    for (const material of Array.isArray(guide.material) ? guide.material : [guide.material]) resourceRegistry.trackStatic(material);
+  }
 
   const meshes = new Map<string, Object3D>();
   // placement -> all chunks identity: one placement has bindings for every uploaded chunk
@@ -1298,27 +1267,14 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   const placementWorldBounds = new Map<string, import('three').Box3>();
   const placementCells = new Map<string, string[]>();
   const renderStates = new Map<string, ProxySceneRenderState>();
-  const resources: Array<{ dispose(): void }> = [];
-  const staticResources: Array<{ dispose(): void }> = [];
-  if (grid) staticResources.push(grid.geometry);
-  if (axes) staticResources.push(axes.geometry);
+  const resources = resourceRegistry.resources;
   const highlightMaterials = new Set<{ dispose(): void }>();
-  const track: ResourceTracker = (resource) => {
-    resources.push(resource);
-    return resource;
-  };
-
+  const track: ResourceTracker = (resource) => resourceRegistry.track(resource);
   let selectedId: string | null = null;
-  let raf = 0;
   let disposed = false;
-  // Rendering a 100k-vertex character at the browser refresh rate while it is
-  // static can consume a full renderer core on software/WebGL fallback. Keep
-  // the animation/input poll alive, but submit a frame only after a semantic,
-  // camera, resize, or selection change explicitly requests one.
-  let renderRequested = true;
-  const requestRender = (): void => {
-    renderRequested = true;
-  };
+  let renderLoop: SceneRenderLoop | null = null;
+  const requestRender = (): void => renderLoop?.requestRender();
+  const cameraControl = new SceneCameraController(three, camera, requestRender);
 
   type TransformPointer = { x: number; y: number; button: number };
   type UniversalTransformControl = {
@@ -1383,9 +1339,6 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   };
 
   // ---- 关卡编辑器 Free-Look Fly Camera Controller (原地转头 + 自由漫游) ----
-  let yaw = 0;
-  let pitch = -0.25; // 略微俯视
-  let baseFlySpeed = 15;
   let isRightMouseDown = false;
   let isMiddleMouseDown = false;
   type CameraGestureKind = 'right-look' | 'middle-pan';
@@ -1397,18 +1350,6 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   }
   let activeCameraGesture: ActiveCameraGesture | null = null;
   let activeTransformPointerId: number | null = null;
-
-  const updateCameraOrientation = (): void => {
-    const cosPitch = Math.cos(pitch);
-    const sinPitch = Math.sin(pitch);
-    const cosYaw = Math.cos(yaw);
-    const sinYaw = Math.sin(yaw);
-    const forward = new three.Vector3(sinYaw * cosPitch, sinPitch, -cosYaw * cosPitch).normalize();
-    camera.lookAt(camera.position.clone().add(forward));
-    camera.updateMatrixWorld(true);
-    requestRender();
-  };
-  updateCameraOrientation();
 
   let suppressSelectionUntil = 0;
 
@@ -1423,13 +1364,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
 
   const clearHighlightObjects = (): void => {
     for (const object of highlightGroup.children.slice()) highlightGroup.remove(object);
-    for (let index = resources.length - 1; index >= 0; index--) {
-      const resource = resources[index];
-      if (resource && highlightMaterials.has(resource)) {
-        resources.splice(index, 1);
-        resource.dispose();
-      }
-    }
+    resourceRegistry.releaseWhere((resource) => highlightMaterials.has(resource));
     highlightMaterials.clear();
   };
 
@@ -1456,7 +1391,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
       depthTest: false
     });
     highlightMaterials.add(overlayMaterial);
-    resources.push(overlayMaterial);
+    track(overlayMaterial);
     const overlay = new three.Mesh(geometry, overlayMaterial);
     source.updateMatrixWorld(true);
     source.matrixWorld.decompose(overlay.position, overlay.quaternion, overlay.scale);
@@ -1703,6 +1638,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     // diagnostic proxy tint that was attached while the model was loading.
     batch.mesh.instanceColor = null;
     for (const id of batch.ids) {
+      renderStates.set(id, 'mesh');
       const binding = instanceBindings.get(id);
       if (binding) {
         updateBindingBounds(binding);
@@ -1778,8 +1714,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     pickables.clear();
     renderStates.clear();
     for (const object of markerGroup.children.slice()) markerGroup.remove(object);
-    for (const resource of resources) resource.dispose();
-    resources.length = 0;
+    resourceRegistry.clearContent();
   };
 
   let lastBounds: FlverSceneBounds | null = null;
@@ -1787,43 +1722,9 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
 
   const frameToBounds = (bounds: FlverSceneBounds, options: SceneFrameOptions = {}): void => {
     const effectiveOptions = Object.keys(options).length > 0 ? options : lastFrameOptions;
-    const [cx, cy, cz] = bounds.center;
-    const span = Math.max(
-      bounds.max[0] - bounds.min[0],
-      bounds.max[1] - bounds.min[1],
-      bounds.max[2] - bounds.min[2],
-      effectiveOptions.minSpan ?? 15
-    );
     lastBounds = bounds;
     lastFrameOptions = effectiveOptions;
-    // 动态校准基准移动速度，超大地图与局部模型均能自适应
-    baseFlySpeed = Math.max(10, Math.min(span * 0.12, 120));
-
-    // 计算合理视距：俯视主要建筑群
-    const dist = Math.max(
-      span * (effectiveOptions.distanceScale ?? 1.0),
-      effectiveOptions.minDistance ?? 16
-    );
-    if (effectiveOptions.azimuth !== undefined || effectiveOptions.elevation !== undefined) {
-      const azimuth = effectiveOptions.azimuth ?? Math.PI / 4;
-      const elevation = effectiveOptions.elevation ?? Math.atan(0.75 / Math.sqrt(2));
-      const horizontalDistance = Math.cos(elevation) * dist;
-      camera.position.set(
-        cx + Math.sin(azimuth) * horizontalDistance,
-        cy + Math.sin(elevation) * dist,
-        cz + Math.cos(azimuth) * horizontalDistance
-      );
-    } else {
-      // 地图代理维持原有的右前上方宽松视角。
-      camera.position.set(cx + dist, cy + dist * 0.75, cz + dist);
-    }
-    camera.lookAt(cx, cy, cz);
-    camera.updateMatrixWorld(true);
-
-    // 从新相机方向反算 yaw 与 pitch，保证后续鼠标右键原地转头连续无跳变
-    const dir = new three.Vector3(cx - camera.position.x, cy - camera.position.y, cz - camera.position.z).normalize();
-    pitch = Math.asin(Math.max(-0.999, Math.min(0.999, dir.y)));
-    yaw = Math.atan2(dir.x, -dir.z);
+    cameraControl.frame(bounds, effectiveOptions);
   };
 
   // 挂载 Universal Transform Gizmo。Three.js 的 TransformControls 本身一次
@@ -1944,7 +1845,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
             binding.mesh.computeBoundingSphere();
             binding.mesh.frustumCulled = true;
           }
-          if (itemId && renderStates.get(itemId) === 'mesh') {
+          if (bindings.length === 0 && itemId && renderStates.get(itemId) === 'mesh') {
             const target = meshes.get(itemId);
             if (target) updateObjectBounds(itemId, target);
           }
@@ -2125,19 +2026,9 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
       if (delta.moved) gesture.moved = true;
       if (delta.x !== 0 || delta.y !== 0) {
         if (gesture.kind === 'right-look') {
-          const sensitivity = 0.0028;
-          yaw -= delta.x * sensitivity;
-          pitch = Math.max(-1.55, Math.min(1.55, pitch - delta.y * sensitivity));
-          updateCameraOrientation();
+          cameraControl.look(delta.x, delta.y);
         } else {
-          const panSpeed = baseFlySpeed * 0.0018;
-          const forward = new three.Vector3();
-          camera.getWorldDirection(forward);
-          const right = new three.Vector3().crossVectors(forward, new three.Vector3(0, 1, 0)).normalize();
-          const up = new three.Vector3().crossVectors(right, forward).normalize();
-          camera.position.addScaledVector(right, -delta.x * panSpeed);
-          camera.position.addScaledVector(up, delta.y * panSpeed);
-          requestRender();
+          cameraControl.pan(delta.x, delta.y);
         }
       }
       event.preventDefault();
@@ -2211,18 +2102,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   const onWheel = (event: WheelEvent): void => {
     if (transformDragging) return;
     event.preventDefault();
-    if (event.ctrlKey || event.altKey) {
-      // 调节漫游速度
-      const factor = event.deltaY < 0 ? 1.2 : 0.83;
-      baseFlySpeed = Math.max(1, Math.min(baseFlySpeed * factor, 500));
-    } else {
-      // 滚轮前后微移
-      const forward = new three.Vector3();
-      camera.getWorldDirection(forward);
-      const step = (event.deltaY < 0 ? 1 : -1) * (baseFlySpeed * 0.15);
-      camera.position.addScaledVector(forward, step);
-      requestRender();
-    }
+    cameraControl.wheel(event.deltaY, event.ctrlKey || event.altKey);
   };
 
   canvas.addEventListener('contextmenu', onContextMenu);
@@ -2231,12 +2111,6 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
 
   // WASD 连续漫游
   const pressed = new Set<string>();
-  const reusableForward = new three.Vector3();
-  const reusableRight = new three.Vector3();
-  const reusableUp = new three.Vector3(0, 1, 0);
-  const reusableDir = new three.Vector3();
-  const reusableWorldUp = new three.Vector3(0, 1, 0);
-
   const isTypingTarget = (target: EventTarget | null): boolean =>
     target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || (target instanceof HTMLElement && target.isContentEditable);
 
@@ -2454,52 +2328,26 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   }
   setSize();
 
-  let lastTick = typeof performance !== 'undefined' ? performance.now() : Date.now();
-  const minRenderIntervalMs = 1000 / 30;
-  let lastRenderAt = Number.NEGATIVE_INFINITY;
-  const tick = (now?: number): void => {
-    if (disposed) return;
-    const current = typeof now === 'number' ? now : (typeof performance !== 'undefined' ? performance.now() : Date.now());
-    let delta = (current - lastTick) / 1000;
-    lastTick = current;
-    if (delta > 0.1) delta = 0.1;
-    if (delta < 0) delta = 0;
-
-    if (pressed.size > 0) {
-      let speed = baseFlySpeed * (pressed.has('shift') ? 3.5 : 1.0);
-      camera.getWorldDirection(reusableForward);
-      reusableRight.crossVectors(reusableForward, reusableWorldUp).normalize();
-      reusableDir.set(0, 0, 0);
-
-      if (pressed.has('w')) reusableDir.add(reusableForward);
-      if (pressed.has('s')) reusableDir.sub(reusableForward);
-      if (pressed.has('a')) reusableDir.sub(reusableRight);
-      if (pressed.has('d')) reusableDir.add(reusableRight);
-      if (pressed.has('q') || pressed.has('c')) reusableDir.sub(reusableUp);
-      if (pressed.has('e') || pressed.has('space')) reusableDir.add(reusableUp);
-
-      if (reusableDir.lengthSq() > 0) {
-        reusableDir.normalize().multiplyScalar(speed * delta);
-        camera.position.add(reusableDir);
-        requestRender();
-      }
-    }
-    // The scene is static most of the time, but the old loop rendered at the
-    // browser's refresh rate even when neither the camera nor the scene had
-    // changed. Keep input/animation polling responsive while capping the
-    // expensive WebGL submission to 30 FPS.
-    if (renderRequested && current - lastRenderAt >= minRenderIntervalMs) {
+  renderLoop = new SceneRenderLoop({
+    update: (delta) => cameraControl.move(pressed, delta),
+    render: () => {
       renderer.render(scene, camera);
-      lastRenderAt = current;
-      renderRequested = false;
+      // A submitted frame is evidence of GPU submission, not display-present latency.
+      try {
+        if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+          const submittedAtUnixMs = performance.timeOrigin + performance.now();
+          if (Number.isFinite(submittedAtUnixMs)) {
+            window.dispatchEvent(new CustomEvent('sf-scene-frame-submitted', { detail: { canvas, submittedAtUnixMs } }));
+          }
+        }
+      } catch { /* Observation must not change a successful render or frame cadence. */ }
     }
-    raf = requestAnimationFrame(tick as FrameRequestCallback);
-  };
-  tick(lastTick);
+  });
+  renderLoop.start();
 
   const disposeAll = (): void => {
     disposed = true;
-    cancelAnimationFrame(raf);
+    renderLoop?.dispose();
     finishCameraGesture(false);
     cancelTransformGesture();
     canvas.removeEventListener('contextmenu', onContextMenu);
@@ -2525,12 +2373,13 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     for (const control of transformControls) control.dispose();
     transformControls = [];
     clearContent();
-    for (const resource of staticResources) resource.dispose();
+    resourceRegistry.dispose();
     renderer.dispose();
     canvas.remove();
   };
 
   return {
+    createDiffuseBlendMaterial,
     three,
     scene,
     camera,
@@ -2689,10 +2538,12 @@ function createFlverMesh(
   textureCache?: Map<string, import('three').Texture>,
   rendererBackend: RendererBackend = 'webgl2',
   nativeFlverCoordinateSpace = false,
-  nativeRootMatrix?: import('three').Matrix4
+  nativeRootMatrix?: import('three').Matrix4,
+  createDiffuseBlendMaterial: typeof createWebGpuDiffuseMaterial | null = null
 ): Object3D {
   const geometry = track(new three.BufferGeometry());
   geometry.setAttribute('position', new three.BufferAttribute(item.positions, 3));
+  attachFlverNativeVertexDiagnostics(three, geometry, item, item.vertexCount, item.label);
   const uvSets = item.uvSets ?? (item.uvs ? [item.uvs] : undefined);
   if (uvSets) {
     for (const [index, uvSet] of uvSets.entries()) {
@@ -2788,6 +2639,13 @@ function createFlverMesh(
   // policy rather than an instruction to discard lighting. Keep cut-out
   // surfaces lit and attach alphaTest; only projected decals use Basic as a
   // deliberate projection fallback.
+  const canDiffuseBlend = !isProjectedDecal && albedo2Texture && item.diffuseBlend
+    && uvSets?.[item.diffuseBlend.albedo2UvIndex]
+    && (!blendMaskTexture || uvSets?.[item.diffuseBlend.blendMaskUvIndex]);
+  const createStandardMaterial = (parameters: import('three').MeshStandardMaterialParameters): Material =>
+    rendererBackend === 'webgpu' && canDiffuseBlend && createDiffuseBlendMaterial
+      ? createDiffuseBlendMaterial(parameters, albedo2Texture!, blendMaskTexture, item.diffuseBlend!)
+      : new three.MeshStandardMaterial(parameters);
   const material = track(isProjectedDecal
     ? new three.MeshBasicMaterial({
       color: displayTexture ? 0xffffff : new three.Color(0xb0b8c4),
@@ -2810,7 +2668,7 @@ function createFlverMesh(
       side: cullSide,
       vertexColors: Boolean(item.vertexColors)
     })
-    : new three.MeshStandardMaterial({
+    : createStandardMaterial({
       color: texture ? 0xffffff : new three.Color(0xb0b8c4),
       roughness: 0.5,
       metalness: 0.1,
@@ -2843,8 +2701,8 @@ function createFlverMesh(
   // This is the small, source-mapped part of the native Character_AMSN
   // shader that the preview can reproduce: primary albedo on UV0, secondary
   // albedo on the declared UV set, and the native Multiply operation. It is
-  // installed only for the WebGL2 projection path; WebGPU keeps the verified
-  // primary surface rather than silently applying a different approximation.
+  // WebGL2 uses shader injection; WebGPU uses the equivalent node material.
+  // Default backend remains WebGL2 until real-image/performance parity passes.
   if (rendererBackend === 'webgl2'
     && !isProjectedDecal
     && albedo2Texture

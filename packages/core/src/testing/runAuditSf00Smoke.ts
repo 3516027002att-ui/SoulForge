@@ -2,7 +2,7 @@
  * SF-00 专项审计与冒烟测试 (runAuditSf00Smoke.ts)
  *
  * 依据：《SoulForge 全域审查与演进研究报告》与执行施工图 tasks/SF-00.md。
- * 验证全局身份、版本、数值、统一错误协议及验证结果包装器 (checkVerifySummary)。
+ * 验证全局身份、版本、数值、统一错误协议。结果执行/未执行事实由当前 check runner 的实际进程测试验证。
  */
 
 import { strict as assert } from 'node:assert';
@@ -21,8 +21,6 @@ import {
   type SnapshotVersion,
   type AuditConfirmationReceipt
 } from '@soulforge/shared';
-// @ts-expect-error No type definitions for mjs helper
-import { checkVerifySummary } from '../../../../scripts/audit-execution/check-verify-summary.mjs';
 
 function parseArgs(): { layer: string | undefined } {
   const args = process.argv.slice(2);
@@ -134,50 +132,11 @@ function runUnitTests(): void {
   }
   assert.equal(isAuditExecutionErrorCode('UNKNOWN_ARBITRARY_CODE'), false);
 
-  // 8. checkVerifySummary 结果包装器契约验证
-  const validSummary = {
-    mode: 'run',
-    ok: true,
-    requireExecuted: true,
-    results: [
-      {
-        scriptName: 'test:audit-sf-00-unit',
-        outcome: 'passed',
-        exitCode: 0,
-        treatedAsFailure: false,
-        timedOut: false,
-        spawnError: false,
-        skippedLegs: []
-      }
-    ],
-    executedAndPassed: ['test:audit-sf-00-unit'],
-    skippedEntirely: [],
-    partiallySkipped: [],
-    failed: [],
-    notAttemptedDueToBail: [],
-    counts: { passed: 1 }
-  };
-  const summaryCheck = checkVerifySummary(validSummary, ['test:audit-sf-00-unit']);
-  assert.equal(summaryCheck.ok, true, 'Valid summary must pass validation');
-
-  // 负例验证：缺失必要 suite
-  const missingSuiteSummary = { ...validSummary, results: [] };
-  const failCheck1 = checkVerifySummary(missingSuiteSummary, ['test:audit-sf-00-unit']);
-  assert.equal(failCheck1.ok, false);
-
-  // 负例验证：退出码非零
-  const nonzeroSummary = {
-    ...validSummary,
-    results: [{ ...validSummary.results[0], exitCode: 1 }]
-  };
-  const failCheck2 = checkVerifySummary(nonzeroSummary, ['test:audit-sf-00-unit']);
-  assert.equal(failCheck2.ok, false);
-
   console.log(JSON.stringify({
     ok: true,
     taskId: 'SF-00',
     layer: 'unit',
-    message: 'SF-00 unit audit passed (identity contracts, stableJson, error codes, checkVerifySummary)',
+    message: 'SF-00 unit audit passed (identity contracts, stableJson, error codes)',
     contractsVerified: [
       'stableJson',
       'ResourceIdentity',
@@ -185,8 +144,7 @@ function runUnitTests(): void {
       'ClaimIdentity',
       'SnapshotVersion',
       'ConfirmationReceipt',
-      'AUDIT_EXECUTION_ERROR_CODES',
-      'checkVerifySummary'
+      'AUDIT_EXECUTION_ERROR_CODES'
     ]
   }, null, 2));
 }

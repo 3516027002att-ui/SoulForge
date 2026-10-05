@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * Production smoke: a DarkScript3-format EMEDF JSON imported through the
  * external adapter drives the full DSL typed-mutation write chain
@@ -16,7 +17,7 @@
  * - Synthetic failure: wrong expectedDocumentHash fails closed, target untouched.
  * - Real corpus (env-gated): the imported registry drives an event-level id/rest
  *   mutation plus a 2000:0 InitializeEvent eventId typed mutation on the real
- *   registered common.emevd (33,266 instructions); re-read verifies both.
+ *   registered common.emevd (hash-bound instruction and event counts); re-read verifies both.
  * - Real EMEDF file (SOULFORGE_EMEDF_PATH / arg 3): same real-corpus chain with
  *   the real file's imported registry; absent → structured skip recorded.
  *
@@ -29,7 +30,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { decompressDfltDcx } from '../util/dcxDflt.js';
@@ -58,7 +59,7 @@ import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { createWorkspaceTransaction } from '../transactions/workspaceTransaction.js';
 import { createScaffoldValidators } from '../validators/index.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
-import { resolveNativeFixture } from './nativeFixtureRegistry.js';
+import { materializeFixedNativeFixture, fixedFixtureNumber, type FixedNativeFixture } from './nativeFixtureRegistry.js';
 import {
   createSyntheticImportedEmedf,
   importedRegistrySyntheticEmevd,
@@ -419,6 +420,7 @@ async function importedSyntheticFailureChain(root: string): Promise<number> {
 async function importedRealCorpusChain(
   root: string,
   sourceDcx: string,
+  fixture: FixedNativeFixture,
   registry: EmedfRegistry,
   registryLabel: string
 ): Promise<void> {
@@ -439,15 +441,17 @@ async function importedRealCorpusChain(
     allowedRoots: [overlayRoot, stagingRoot],
     resourceUri: 'file://event/common.emevd',
     registry,
+    attachIdentity: true,
     documentInstanceId: `emevd-imported-${registryLabel}`,
     pageSize: 2048,
     timeoutMs: 120_000
   });
   if (!full.ok || !full.document) throw new Error(`full document read failed: ${JSON.stringify(full.diagnostics)}`);
-  if (full.instructionTotal !== 33_266) throw new Error(`unexpected instruction total ${full.instructionTotal}`);
+  if (full.instructionTotal !== fixedFixtureNumber(fixture,'instructionCount')) throw new Error(`unexpected instruction total ${full.instructionTotal}`);
   if (full.sourceHash !== sourceHash) throw new Error(`source hash mismatch ${full.sourceHash} vs ${sourceHash}`);
 
   const document = full.document;
+  if(document.events.length!==fixedFixtureNumber(fixture,'eventCount')||flatInstructions(document).length!==fixedFixtureNumber(fixture,'instructionCount'))throw new Error('Independent pinned full document counts differ.');
 
   // Event-level target (required case).
   const targetEvent = document.events.find((e) => e.eventId !== 0 && e.instructions.length > 0)
@@ -519,6 +523,8 @@ instruction ${formatEmevdAnchor('instruction', init.instruction.anchor)} {
     allowedRoots: [overlayRoot, stagingRoot],
     resourceUri: 'file://event/common.emevd',
     registry,
+    cachePolicy: 'bypass',
+    attachIdentity: true,
     documentInstanceId: `emevd-imported-${registryLabel}-after`,
     pageSize: 2048,
     timeoutMs: 120_000
@@ -570,35 +576,33 @@ async function main(): Promise<void> {
   const emedfPathArg = process.env.SOULFORGE_EMEDF_PATH?.trim()
     || process.argv[3]?.trim()
     || (await searchRealEmedf());
-  const nativeEnvAvailable = Boolean(
-    (process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY?.trim() && process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim())
-    || nativeFixtureArg
-  );
   let syntheticPassed = 0;
   let realCorpusLegs = 0;
   let realEmedfLegs = 0;
   const skipReasons: string[] = [];
   try {
+  const fixed=await materializeFixedNativeFixture('emevd-primary',root,nativeFixtureArg);
+  const nativeEnvAvailable=fixed.status==='available';
     syntheticPassed += await importedSyntheticSuccessChain(root);
     syntheticPassed += await importedSyntheticRollbackChain(root);
     syntheticPassed += await importedSyntheticFailureChain(root);
 
-    if (nativeEnvAvailable) {
-      const sourceDcx = await resolveNativeFixture(nativeFixtureArg, 'emevd-primary', '../../mods/event/common.emevd.dcx');
+    if (fixed.status==='available') {
+      const sourceDcx = fixed.path;
       // Deterministic imported-registry leg: our synthetic DS3 JSON drives the
       // production write chain on the real registered common.emevd.
-      await importedRealCorpusChain(root, sourceDcx, createSyntheticImportedEmedf(), 'synthetic-imported');
+      await importedRealCorpusChain(root, sourceDcx, fixed.fixture, createSyntheticImportedEmedf(), 'synthetic-imported');
       realCorpusLegs += 1;
       if (emedfPathArg) {
         const realImport = importDs3EmedfFile(emedfPathArg);
         if (!realImport.ok) throw new Error(`real EMEDF import failed: ${realImport.message}`);
-        await importedRealCorpusChain(root, sourceDcx, realImport.registry, 'real-emedf');
+        await importedRealCorpusChain(root, sourceDcx, fixed.fixture, realImport.registry, 'real-emedf');
         realEmedfLegs += 1;
       } else {
         skipReasons.push('SOULFORGE_EMEDF_PATH 未设置且未提供 arg 3：真实 DarkScript3 EMEDF 文件缺失，真实导入 registry 的真实 corpus typed-mutation leg 结构化跳过（fail-closed）。');
       }
     } else {
-      skipReasons.push('SOULFORGE_NATIVE_FIXTURE_REGISTRY/SOULFORGE_NATIVE_FIXTURE_ROOT 未设置：真实 common.emevd corpus leg 跳过。');
+      skipReasons.push(fixed.status==='unavailable'?`${fixed.code}: ${fixed.message}`:'Pinned corpus unavailable.');
     }
 
     console.log(JSON.stringify({
@@ -607,6 +611,7 @@ async function main(): Promise<void> {
       syntheticCases: syntheticPassed,
       realCorpusLegs,
       realEmedfLegs,
+      corpusInput: fixed.status==='available'?{status:'available',version:fixed.version,sha256:fixed.fixture.sha256}:fixed,
       skips: skipReasons,
       assertions: {
         synthetic: 'imported registry → DSL typed plan → Bridge batch → PatchIR transaction → re-read byte-consistent；事件级 + 指令级 typed mutation；vararg 尾部逐字节保留；未知指令保持 opaque',
