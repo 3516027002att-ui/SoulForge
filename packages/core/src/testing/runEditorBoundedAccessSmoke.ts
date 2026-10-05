@@ -323,6 +323,18 @@ interface RealCorpusResult {
   notes: string[];
 }
 
+interface UnavailableRealCorpusResult {
+  channel: string;
+  sourceRole: string;
+  label?: string;
+  status: 'skipped';
+  availability: 'unavailable';
+  code: string;
+  message: string;
+}
+
+type RealCorpusLeg = RealCorpusResult | UnavailableRealCorpusResult;
+
 /** script channel: Bridge read-dcx-document full enumeration + classification. */
 async function realScriptChannelLeg(
   source: string,
@@ -747,7 +759,7 @@ async function main(): Promise<void> {
   const staging = join(root, 'staging');
   const syntheticObservations = syntheticWindowingLegs();
   const syntheticChannelLegs: Record<string, unknown> = {};
-  const realLegs: RealCorpusResult[] = [];
+  const realLegs: RealCorpusLeg[] = [];
   try {
     await mkdir(staging, { recursive: true });
     assertIpcSharesWindowHelper();
@@ -755,60 +767,77 @@ async function main(): Promise<void> {
     syntheticChannelLegs.emevd = await syntheticEmevdChannelLeg(root);
 
     const nativeFixtureArg = process.argv[2]?.trim() || undefined;
-    const nativeEnvAvailable = Boolean(
-      (process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY?.trim() && process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim())
-      || nativeFixtureArg
-    );
+    const fixtureRegistry = process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY?.trim();
+    const configuredFixtureRoot = process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim();
+    const gameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+    const fixtureRoot = configuredFixtureRoot || gameRoot;
+    const nativeEnvironmentConfigured = Boolean(nativeFixtureArg || fixtureRegistry || configuredFixtureRoot || gameRoot);
+    const recordUnavailableNativeLeg = (channel: string, sourceRole: string, code: string, message: string, label?: string): void => {
+      realLegs.push({ channel, sourceRole, ...(label ? { label } : {}), status: 'skipped', availability: 'unavailable', code, message });
+    };
+    const recordAllNativeLegsUnavailable = (code: string, message: string): void => {
+      recordUnavailableNativeLeg('script', 'luabnd-primary', code, message);
+      recordUnavailableNativeLeg('bnd4', 'bnd4-primary', code, message);
+      recordUnavailableNativeLeg('fmg', 'fmg-primary', code, message);
+      recordUnavailableNativeLeg('param', 'param-primary', code, message, 'ActionGuideParam payload');
+      recordUnavailableNativeLeg('param', 'param-primary', code, message, 'ActionButtonParam rows');
+      recordUnavailableNativeLeg('emevd', 'emevd-primary', code, message);
+    };
 
-    if (nativeEnvAvailable) {
-      const registeredLuabnd = await resolveNativeFixture(nativeFixtureArg, 'luabnd-primary', '../../mods/script/aicommon.luabnd.dcx');
-      const fixtureRoot = process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
-        || process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
-      if (!fixtureRoot) {
-        throw new Error('FIXED_CORPUS_ROOT_MISSING: luabnd 的 registry 输入与版本化期望必须绑定到同一 root。');
-      }
+    if (!nativeEnvironmentConfigured) {
+      recordAllNativeLegsUnavailable(
+        'NATIVE_FIXTURE_ENV_MISSING',
+        '真实 corpus 未配置；仅执行了本次报告中的 synthetic legs。'
+      );
+    } else if (!fixtureRoot) {
+      recordAllNativeLegsUnavailable(
+        'FIXED_CORPUS_ROOT_MISSING',
+        '已提供 native fixture 参数，但没有可绑定版本化期望的 corpus root。'
+      );
+    } else {
+      // Check pinned bytes before the registry resolver. A missing or drifted
+      // fixed input is unavailable, not a registry hash/parser failure. When
+      // pinned bytes are available, registry identity/path errors remain hard
+      // failures below.
       const pinnedLuabnd = await materializeFixedNativeFixture('luabnd-primary', root, undefined, { fixtureRoot });
       if (pinnedLuabnd.status !== 'available') {
-        throw new Error(`真实 luabnd 固定语料不可用：${pinnedLuabnd.code}: ${pinnedLuabnd.message}`);
+        recordUnavailableNativeLeg('script', 'luabnd-primary', pinnedLuabnd.code, pinnedLuabnd.message);
+      } else {
+        const registeredLuabnd = await resolveNativeFixture(nativeFixtureArg, 'luabnd-primary', '../../mods/script/aicommon.luabnd.dcx');
+        const [registeredPath, expectedPath] = await Promise.all([
+          realpath(registeredLuabnd),
+          realpath(resolve(fixtureRoot, pinnedLuabnd.fixture.relativePath))
+        ]);
+        if (registeredPath !== expectedPath) {
+          throw new Error(`NATIVE_FIXTURE_EXPECTATION_PATH_MISMATCH: luabnd registry input must match pinned relativePath ${pinnedLuabnd.fixture.relativePath}.`);
+        }
+        const expectedLuabndEntryCount = fixedFixtureNumber(pinnedLuabnd.fixture, 'entryCount');
+        realLegs.push(await realScriptChannelLeg(pinnedLuabnd.path, 100, expectedLuabndEntryCount, pinnedLuabnd.version));
       }
-      const [registeredPath, expectedPath] = await Promise.all([
-        realpath(registeredLuabnd),
-        realpath(resolve(fixtureRoot, pinnedLuabnd.fixture.relativePath))
-      ]);
-      if (registeredPath !== expectedPath) {
-        throw new Error(`NATIVE_FIXTURE_EXPECTATION_PATH_MISMATCH: luabnd registry input must match pinned relativePath ${pinnedLuabnd.fixture.relativePath}.`);
-      }
-      const expectedLuabndEntryCount = fixedFixtureNumber(pinnedLuabnd.fixture, 'entryCount');
-      const luabnd = pinnedLuabnd.path;
+
       const msgbnd = await resolveNativeFixture(nativeFixtureArg, 'bnd4-primary', '../../mods/msg/zhocn/menu.msgbnd.dcx');
       const fmgMsgbnd = await resolveNativeFixture(nativeFixtureArg, 'fmg-primary', '../../mods/msg/zhocn/item.msgbnd.dcx');
       const parambnd = await resolveNativeFixture(nativeFixtureArg, 'param-primary', '../../mods/param/gameparam/gameparam.parambnd.dcx');
-      const registeredEmevd = await resolveNativeFixture(nativeFixtureArg, 'emevd-primary', '../../mods/event/common.emevd.dcx');
-      const pinnedEmevd = await materializeFixedNativeFixture('emevd-primary', root, undefined, { fixtureRoot });
-      if (pinnedEmevd.status !== 'available') {
-        throw new Error(`真实 EMEVD 固定语料不可用：${pinnedEmevd.code}: ${pinnedEmevd.message}`);
-      }
-      const [registeredEmevdPath, expectedEmevdPath] = await Promise.all([
-        realpath(registeredEmevd),
-        realpath(resolve(fixtureRoot, pinnedEmevd.fixture.relativePath))
-      ]);
-      if (registeredEmevdPath !== expectedEmevdPath) {
-        throw new Error(`NATIVE_FIXTURE_EXPECTATION_PATH_MISMATCH: EMEVD registry input must match pinned relativePath ${pinnedEmevd.fixture.relativePath}.`);
-      }
-      const emevd = pinnedEmevd.path;
-
-      realLegs.push(await realScriptChannelLeg(luabnd, 100, expectedLuabndEntryCount, pinnedLuabnd.version));
       realLegs.push(await realBnd4ChannelLeg(msgbnd, 10));
       realLegs.push(await realFmgChannelLeg(fmgMsgbnd, staging, 100));
       const paramLegs = await realParamChannelLeg(parambnd, staging, 20);
       realLegs.push(paramLegs.payloadLeg);
       realLegs.push(paramLegs.largeLeg);
-      realLegs.push(await realEmevdChannelLeg(emevd, staging, pinnedEmevd.fixture, pinnedEmevd.version));
-    } else {
-      console.log(JSON.stringify({
-        ok: true,
-        message: '真实 corpus 变体跳过：SOULFORGE_NATIVE_FIXTURE_REGISTRY/SOULFORGE_NATIVE_FIXTURE_ROOT 未设置；通过 node scripts/with-local-has-game-env.mjs 运行可注入本机 corpus 环境。'
-      }));
+
+      const pinnedEmevd = await materializeFixedNativeFixture('emevd-primary', root, undefined, { fixtureRoot });
+      if (pinnedEmevd.status !== 'available') {
+        recordUnavailableNativeLeg('emevd', 'emevd-primary', pinnedEmevd.code, pinnedEmevd.message);
+      } else {
+        const registeredEmevd = await resolveNativeFixture(nativeFixtureArg, 'emevd-primary', '../../mods/event/common.emevd.dcx');
+        const [registeredEmevdPath, expectedEmevdPath] = await Promise.all([
+          realpath(registeredEmevd),
+          realpath(resolve(fixtureRoot, pinnedEmevd.fixture.relativePath))
+        ]);
+        if (registeredEmevdPath !== expectedEmevdPath) {
+          throw new Error(`NATIVE_FIXTURE_EXPECTATION_PATH_MISMATCH: EMEVD registry input must match pinned relativePath ${pinnedEmevd.fixture.relativePath}.`);
+        }
+        realLegs.push(await realEmevdChannelLeg(pinnedEmevd.path, staging, pinnedEmevd.fixture, pinnedEmevd.version));
+      }
     }
 
     console.log(JSON.stringify({
