@@ -48,6 +48,9 @@ try {
   await seed('scripts/bridge-build-output-ownership.mjs', '// Bridge output ownership\n');
   await seed('scripts/subprocess-control.mjs', '// controlled compiler lifecycle\n');
   await seed('scripts/owned-process.mjs', '// gated owned process\n');
+  await seed('scripts/owned-process-linux-guardian.mjs', '// Linux guardian adapter\n');
+  await seed('scripts/owned-process-linux-guardian.c', '// Linux guardian source\n');
+  await seed('scripts/build-owned-process-guardian.mjs', '// Linux guardian bootstrap\n');
   await seed('scripts/owned-windows-job.ps1', '# first-party Windows owned job\n');
   await seed('scripts/owned-windows-job-status.ps1', '# atomic Windows job receipt\n');
   await seed('bridge/native/hksc/compiler.c', '// native compiler source\n');
@@ -72,7 +75,7 @@ try {
   const written = await writeBridgeProductionBuildReceipt(root);
   assert.equal(written.manifestPath, join(root, BRIDGE_PRODUCTION_BUILD_RECEIPT));
   const fresh = await assertBridgeProductionBuildFresh(root);
-  assert.equal(fresh.current.source.fileCount, 14);
+  assert.equal(fresh.current.source.fileCount, 17);
   assert.equal(fresh.current.executable.sha256, written.receipt.executable.sha256);
 
   await seed('bridge/SoulForge.Bridge/bin/ignored-source.cs', 'ignored changed\n');
@@ -101,6 +104,12 @@ try {
     await writeBridgeProductionBuildReceipt(root);
     await expectStale(`${helper} changes invalidate compiler lifecycle inputs`, async () => {
       await seed(`scripts/${helper}.mjs`, '// changed compiler lifecycle\n');
+    });
+  }
+  for (const input of ['scripts/owned-process-linux-guardian.mjs', 'scripts/owned-process-linux-guardian.c', 'scripts/build-owned-process-guardian.mjs']) {
+    await writeBridgeProductionBuildReceipt(root);
+    await expectStale(`${input} changes invalidate Linux Guardian runtime inputs`, async () => {
+      await seed(input, '// changed Linux Guardian input\n');
     });
   }
   await writeBridgeProductionBuildReceipt(root);
@@ -153,7 +162,7 @@ try {
 
   console.log(JSON.stringify({
     ok: true,
-    checks: 17,
+    checks: 20,
     message: 'Bridge production receipt fixtures passed'
   }));
 } finally {

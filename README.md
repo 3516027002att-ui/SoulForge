@@ -54,6 +54,8 @@ node scripts/check.mjs --suite typecheck,test:agent-tool-envelope
 node scripts/check.mjs --suite file:scripts/check.fixture.mjs --require-executed
 ```
 
+Linux x64 上执行依赖 owned-process 的测试前，先显式运行一次 `npm run prepare:owned-process-guardian`；更新 helper 源码/协议或编译器后也需重新 prepare。该步骤只适用于 Linux x64 与 GCC/Clang 兼容 C11 编译器及 Linux 5.3+（或兼容回移内核），不在 `prebuild`/`pretest` 中隐式编译；helper 缺失或不匹配会在目标命令启动前失败，按诊断显式重建。失败的 `.local-validation/owned-process-guardian/attempts/` 目录保留供检查，不要在相关进程未确认停止前删除。
+
 `--suite` 保留给定顺序；测试文件按约定自动发现，无须登记。旧 `verify.mjs` 转发到同一条 `check` 执行路径，旧 `--slice` 计划已退役，任务以 GitHub Issues 为准。单项调试仍可直接用 `npm run <名称>`。
 
 同一计划按工作目录、命令参数和显式环境复用已通过的操作，共享重复的 TypeScript 编译；JSON 报告的 `steps.execution` 区分执行与复用。构建、npm 生命周期和无法安全展开的 shell 命令会清除复用结果。复用不跨运行保存，也不用于把 skip/partial 改成 passed。需要全部实际通过时用 `--require-executed`；混合层级可用 `--require-tier governance,unit` 或 `--require-suite test:renderer-e2e` 指定严格范围。

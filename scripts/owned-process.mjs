@@ -1,8 +1,10 @@
 import { fork } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { constants as osConstants } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { runProcess } from './subprocess-control.mjs';
+import { runLinuxGuardianProcess } from './owned-process-linux-guardian.mjs';
 import { ownedTemporaryDirectoryObserver, prepareOwnedWindowsJob, recordOwnedProcess } from './owned-temporary-directory.mjs';
 
 const helperPath = fileURLToPath(import.meta.url);
@@ -14,12 +16,6 @@ function isCompleteProcessResult(value) {
     && typeof value.cancelled === 'boolean' && typeof value.timedOut === 'boolean'
     && (value.signal === null || typeof value.signal === 'string')
     && (value.terminationReason === null || typeof value.terminationReason === 'string');
-}
-
-function isNormalProcessResult(value) {
-  return isCompleteProcessResult(value) && value.signal === null
-    && value.cancelled === false && value.timedOut === false
-    && (value.terminationReason === null || value.terminationReason === 'spawn-error');
 }
 
 /** Persist a waiting supervisor before it can start work in an owned directory. */
@@ -64,8 +60,24 @@ export async function runOwnedProcess({ owner, signal, onStdout, onStderr, ...op
       // complete normal receipt and observing the supervisor close normally.
       // Cancellation/timer state is sampled here so a late receipt cannot
       // erase uncertainty after the parent has already interrupted the run.
+      if (process.platform === 'linux' && result && finalResult.treeStopped !== true && finalResult.code === 0) {
+        finalResult = { ...finalResult, code: 1, terminationReason: 'tree-unproven',
+          outputError: finalResult.outputError ?? 'OWNED_PROCESS_TREE_UNPROVEN' };
+      }
+      if (process.platform === 'linux' && result && supervisorClosedNormally
+        && !isCompleteLinuxTreeResult(finalResult)) {
+        finalResult = { ...finalResult, code: finalResult.code || 1, treeStopped: false,
+          terminationReason: 'tree-unproven', outputError: 'OWNED_PROCESS_TREE_UNPROVEN' };
+      }
+      // A descendant leak is an operation failure, but ECHILD proves the tree
+      // is stopped and permits safe disposal. Parent cancellation/timeout and
+      // every missing/invalid proof remain uncertain.
+      const linuxTreeStopped = process.platform === 'linux' && completeResult
+        && supervisorClosedNormally && isCompleteLinuxTreeResult(finalResult)
+        && finalResult.treeStopped === true && finalResult.cancelled === false && finalResult.timedOut === false
+        && finalResult.terminationReason !== 'cancelled' && finalResult.terminationReason !== 'timeout';
       if (process.platform === 'linux' && ticket && reason === null && signal?.aborted !== true
-        && isNormalProcessResult(finalResult) && supervisorClosedNormally) {
+        && linuxTreeStopped) {
         try {
           for (const item of [ticket].flat()) recordOwnedProcess(item, supervisor.pid, { finished: true });
         }
@@ -98,6 +110,50 @@ export async function runOwnedProcess({ owner, signal, onStdout, onStderr, ...op
   } finally {
     clearTimeout(timer); signal?.removeEventListener('abort', onAbort);
   }
+}
+
+function isCompleteLinuxTreeResult(value) {
+  if (!isCompleteProcessResult(value) || typeof value.treeStopped !== 'boolean'
+    || typeof value.descendantsObserved !== 'boolean'
+    || value.code < 0 || value.code > 255
+    || (value.childExitCode !== null && (!Number.isSafeInteger(value.childExitCode)
+      || value.childExitCode < 0 || value.childExitCode > 255))) return false;
+
+  const { code, signal, childExitCode, treeStopped, descendantsObserved, terminationReason, cancelled, timedOut } = value;
+  const knownReasons = [null, 'cancelled', 'timeout', 'spawn-error', 'descendant-leak',
+    'guardian-capability-unavailable', 'guardian-child-state-unavailable', 'tree-unproven', 'guardian-unavailable'];
+  if (!knownReasons.includes(terminationReason)) return false;
+  if ((cancelled && (timedOut || terminationReason !== 'cancelled'))
+    || (timedOut && terminationReason !== 'timeout')
+    || (terminationReason === 'cancelled' && !cancelled)
+    || (terminationReason === 'timeout' && !timedOut)) return false;
+
+  if (signal !== null && !/^SIG[A-Z0-9]+$/.test(signal)) return false;
+  if (descendantsObserved && !['descendant-leak', 'timeout', 'cancelled'].includes(terminationReason)) return false;
+  if (terminationReason === 'descendant-leak' && !descendantsObserved) return false;
+
+  if (treeStopped) {
+    if (['guardian-capability-unavailable', 'guardian-child-state-unavailable', 'tree-unproven', 'guardian-unavailable'].includes(terminationReason)) return false;
+    if (signal === null ? childExitCode === null : childExitCode !== null) return false;
+    if (signal !== null) {
+      const signalNumber = osConstants.signals[signal];
+      if (signalNumber !== undefined && code !== 128 + signalNumber) return false;
+      if (signalNumber === undefined && (signal !== 'SIGUNKNOWN' || code < 129 || code > 192)) return false;
+    } else if (code !== childExitCode
+      && !(code === 1 && childExitCode === 0 && ['descendant-leak', 'timeout', 'cancelled'].includes(terminationReason))) {
+      return false;
+    }
+    if (code === 0) return signal === null && childExitCode === 0 && !descendantsObserved
+      && (terminationReason === null && !cancelled && !timedOut
+        || terminationReason === 'timeout' && timedOut
+        || terminationReason === 'cancelled' && cancelled);
+    if (terminationReason === 'spawn-error') return signal === null && childExitCode !== null;
+    if (terminationReason === 'timeout' || terminationReason === 'cancelled') return code !== 0;
+    if (terminationReason === 'descendant-leak') return code !== 0 && descendantsObserved;
+    return terminationReason === null;
+  }
+
+  return code !== 0 && terminationReason !== null;
 }
 
 if (process.argv[1] === helperPath && process.argv[2] === '--worker') {
@@ -134,11 +190,14 @@ if (process.argv[1] === helperPath && process.argv[2] === '--worker') {
           stdinData: JSON.stringify({ ...message.options, commandLine, id, supervisorPid: process.pid,
             observer: ownedTemporaryDirectoryObserver(), tickets }) };
       }
-      const result = await runProcess({ ...options, signal: cancellation.signal,
-        detached: false, terminationGroup: process.platform !== 'win32' ? process.pid : undefined,
+      const guardedOptions = { ...options, signal: cancellation.signal,
         onSpawn: child => { for (const ticket of [message.ticket].flat()) recordOwnedProcess(ticket, child.pid); },
         onStdout: chunk => { if (process.connected) process.stdout.write(chunk); },
-        onStderr: chunk => { if (process.connected) process.stderr.write(chunk); } });
+        onStderr: chunk => { if (process.connected) process.stderr.write(chunk); } };
+      const result = process.platform === 'linux'
+        ? await runLinuxGuardianProcess(guardedOptions)
+        : await runProcess({ ...guardedOptions, detached: false,
+          terminationGroup: process.platform !== 'win32' ? process.pid : undefined });
       // Windows has no POSIX group observer. A killed/uncertain tree remains
       // marked rather than being inferred dead from its former cmd PID.
       if (process.platform === 'win32' && (result.terminationReason === 'spawn-error' || result.treeTerminated)) {

@@ -31,6 +31,7 @@ function environmentValue(env, name) {
 }
 
 const childSchema = 'soulforge.test-temporary-child.v1';
+const childCompletionSchema = 'soulforge.test-temporary-child-completion.v1';
 const closedName = '.soulforge-test-children-closed.json';
 
 async function readReceipt(path) {
@@ -44,6 +45,21 @@ async function readTestOwner(root, token) {
   const record = JSON.parse(await readFile(join(root, '.soulforge-temporary-owner.json'), 'utf8'));
   if (record.owner !== 'test-operation' || !token || record.token !== token) throw new Error('OWNED_TEST_INHERITED_OWNER_INVALID');
   return { handle, record };
+}
+
+async function requireTestOwner(root, token) {
+  try { return await readTestOwner(root, token); }
+  catch (error) {
+    if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
+    try { await lstat(root); }
+    catch (missing) {
+      if (missing.code === 'ENOENT' || missing.code === 'ENOTDIR') {
+        throw new Error(`OWNED_TEST_OWNER_ROOT_MISSING_UNPROVEN: ${root}`);
+      }
+      throw missing;
+    }
+    throw new Error(`OWNED_TEMP_OWNERSHIP_CHANGED: ${root}`);
+  }
 }
 
 async function assertChildAdmissionOpen(parent) {
@@ -68,18 +84,59 @@ async function registerChildIntent(parent) {
   return { parent, base, receipt };
 }
 
+async function assertChildCompletion(path, expected) {
+  let completion;
+  try { completion = await readReceipt(path); }
+  catch (error) {
+    throw new Error(`OWNED_TEST_CHILD_ROOT_MISSING_UNPROVEN: ${expected.root}: completion unavailable (${error.message})`);
+  }
+  if (completion.schema !== childCompletionSchema || completion.state !== 'disposed'
+    || completion.id !== expected.id || completion.parentToken !== expected.parentToken
+    || completion.childToken !== expected.childToken || completion.root !== expected.root) {
+    throw new Error(`OWNED_TEST_CHILD_ROOT_MISSING_UNPROVEN: ${expected.root}: completion binding invalid`);
+  }
+}
+
+async function hasChildCompletion(path) {
+  try { await readReceipt(path); return true; }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+}
+
+async function publishChildCompletion(owner, record, relationship) {
+  const { parent, base, receipt } = relationship;
+  let parentOwner;
+  try { parentOwner = await readTestOwner(parent.root, parent.token); }
+  catch (error) { throw new Error(`OWNED_TEST_CHILD_COMPLETION_UNPROVEN: parent owner unavailable (${error.message})`); }
+  if (parentOwner.record.scope !== record.scope || parentOwner.record.observer !== record.observer) {
+    throw new Error('OWNED_TEST_CHILD_COMPLETION_UNPROVEN: parent owner binding changed');
+  }
+
+  let pending, child;
+  try {
+    [pending, child] = await Promise.all([
+      readReceipt(`${base}.pending.json`),
+      readReceipt(`${base}.json`)
+    ]);
+  } catch (error) {
+    throw new Error(`OWNED_TEST_CHILD_COMPLETION_UNPROVEN: parent ledger unavailable (${error.message})`);
+  }
+  if (pending.schema !== childSchema || pending.id !== receipt.id || pending.parentToken !== parent.token
+    || child.schema !== childSchema || child.id !== receipt.id || child.parentToken !== parent.token
+    || child.root !== owner.root || child.token !== record.token) {
+    throw new Error('OWNED_TEST_CHILD_COMPLETION_UNPROVEN: parent ledger binding changed');
+  }
+  try { await lstat(owner.root); throw new Error(`OWNED_TEST_CHILD_COMPLETION_UNPROVEN: child root still exists (${owner.root})`); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+
+  const completion = { schema: childCompletionSchema, state: 'disposed', id: receipt.id,
+    parentToken: parent.token, childToken: record.token, root: owner.root };
+  await writeFile(`${base}.completed.json`, JSON.stringify(completion), { flag: 'wx', mode: 0o600 });
+}
+
 async function disposeTestTree(owner, record, seen = new Set()) {
   if (seen.has(owner.root)) throw new Error('OWNED_TEST_CHILD_CYCLE');
   seen.add(owner.root);
-  try { await readTestOwner(owner.root, record.token); }
-  catch (error) {
-    if (error.code === 'ENOENT') {
-      try { await lstat(owner.root); }
-      catch (missing) { if (missing.code === 'ENOENT') { await owner.dispose(); return; } throw missing; }
-      throw new Error(`OWNED_TEMP_OWNERSHIP_CHANGED: ${owner.root}`);
-    }
-    throw error;
-  }
+  await requireTestOwner(owner.root, record.token);
   try {
     const closed = { schema: childSchema, parentToken: record.token };
     try { await writeFile(join(owner.root, closedName), JSON.stringify(closed), { flag: 'wx', mode: 0o600 }); }
@@ -104,6 +161,21 @@ async function disposeTestTree(owner, record, seen = new Set()) {
       || dirname(child.root) !== dirname(owner.root)
       || ![`sf-owned-${record.scope}-test-operation-`, `sft-${record.scope}-`].some(prefix => basename(child.root).startsWith(prefix))
         || typeof child.token !== 'string' || !child.token) throw new Error('OWNED_TEST_CHILD_RECEIPT_INVALID');
+      const completedPath = join(owner.root, `.soulforge-test-child.${pending.id}.completed.json`);
+      let childRootPresent = true;
+      try { await lstat(child.root); }
+      catch (error) {
+        if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
+        childRootPresent = false;
+      }
+      if (!childRootPresent) {
+        await assertChildCompletion(completedPath, { id: pending.id, parentToken: record.token,
+          childToken: child.token, root: child.root });
+        continue;
+      }
+      if (await hasChildCompletion(completedPath)) {
+        throw new Error(`OWNED_TEST_CHILD_COMPLETION_CONTRADICTED: root still exists (${child.root})`);
+      }
       try {
         ownedChild = await readTestOwner(child.root, child.token);
         if (ownedChild.record.scope !== record.scope || ownedChild.record.observer !== record.observer) throw new Error('OWNED_TEST_CHILD_RECEIPT_INVALID');
@@ -133,13 +205,12 @@ async function disposeTestTree(owner, record, seen = new Set()) {
             throw new Error(`${error.message}; OWNED_TEST_TREE_PROPAGATION_FAILED: ${propagationError.message}`);
           }
         }
-        // A normally completed nested wrapper may already have disposed itself.
-        if (error.code === 'ENOENT') {
-          try { await lstat(child.root); } catch (missing) { if (missing.code === 'ENOENT') continue; }
-        }
         throw error;
       }
     }
+    // Revalidate immediately before the generic idempotent disposer. It must
+    // not convert a vanished owner root into a successful test-tree proof.
+    await requireTestOwner(owner.root, record.token);
     await owner.dispose();
   } catch (error) {
     // This node's identity was verified before visiting its children. Keep
@@ -204,11 +275,12 @@ async function delegatedNpmEnvironment(args, cwd, env) {
 
 const cancelledResult = () => ({ code: null, signal: null, stdout: '', stderr: '', stdoutTruncated: false,
   stderrTruncated: false, timedOut: false, cancelled: true, terminationReason: 'cancelled' });
+const childExitCodeForResult = result => Object.hasOwn(result, 'childExitCode') ? result.childExitCode : result.code;
 
 /** Keep original cwd/argv/output; only descendants' temporary paths are redirected. */
 export async function runOwnedTestOperation({ command, args = [], cwd = process.cwd(), env = process.env, timeoutMs, signal, onStdout, onStderr }) {
   if (signal?.aborted) return cancelledResult();
-  let owner, record, relationship, result;
+  let owner, record, relationship, result, ownerDisposed = false;
   try {
     const allocation = await temporaryParent(env);
     if (allocation.inherited) relationship = await registerChildIntent(allocation.inherited);
@@ -236,10 +308,10 @@ export async function runOwnedTestOperation({ command, args = [], cwd = process.
         // requires complete output, including a skip before a very long tail.
         outputLimitBytes: Number.MAX_SAFE_INTEGER, onStdout, onStderr });
       if (result.stdoutTruncated || result.stderrTruncated) {
-        result = { ...result, childExitCode: result.code, code: 1, outputError: 'OWNED_TEST_OUTPUT_TRUNCATED' };
+        result = { ...result, childExitCode: childExitCodeForResult(result), code: 1, outputError: 'OWNED_TEST_OUTPUT_TRUNCATED' };
       }
       if (result.terminationReason === 'supervisor-exit') {
-        result = { ...result, childExitCode: result.code, code: result.code || 1, outputError: 'OWNED_TEST_RESULT_UNAVAILABLE' };
+        result = { ...result, childExitCode: childExitCodeForResult(result), code: result.code || 1, outputError: 'OWNED_TEST_RESULT_UNAVAILABLE' };
       }
     }
   } catch (error) {
@@ -256,11 +328,30 @@ export async function runOwnedTestOperation({ command, args = [], cwd = process.
         // dispose checks the persisted process group / Windows Job receipt.
         // A zero exit code alone never authorizes deleting a surviving tree.
         if (record) await disposeTestTree(owner, record);
-        else await owner.dispose();
+        else {
+          try { await lstat(owner.root); }
+          catch (error) {
+            if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+              throw new Error(`OWNED_TEST_OWNER_ROOT_MISSING_UNPROVEN: ${owner.root}`);
+            }
+            throw error;
+          }
+          await owner.dispose();
+        }
+        ownerDisposed = true;
+        if (relationship) {
+          if (!record) throw new Error('OWNED_TEST_CHILD_COMPLETION_UNPROVEN: child owner receipt unavailable');
+          await publishChildCompletion(owner, record, relationship);
+        }
         result.temporaryOwnership = { root: owner.root, state: 'cleaned' };
       } catch (error) {
-        result = { ...result, childExitCode: result.code, code: result.code || 1,
-          temporaryOwnership: { root: owner.root, state: 'retained', error: error.message },
+        let state = 'cleaned';
+        if (!ownerDisposed) {
+          try { await lstat(owner.root); state = 'retained'; }
+          catch { state = 'unproven'; }
+        }
+        result = { ...result, childExitCode: childExitCodeForResult(result), code: result.code || 1,
+          temporaryOwnership: { root: owner.root, state, error: error.message },
           cleanupError: error.message, stderr: `${result.stderr ?? ''}\nOWNED_TEST_CLEANUP_FAILED: ${error.message}\n` };
       }
     }

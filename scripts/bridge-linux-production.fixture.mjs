@@ -85,6 +85,9 @@ test('Linux publish receipts bind native apphost and selected publish inputs', a
     await seed('scripts/bridge-build-output-ownership.mjs', '// Bridge output ownership');
     await seed('scripts/subprocess-control.mjs', '// controlled compiler lifecycle');
     await seed('scripts/owned-process.mjs', '// gated owned process');
+    await seed('scripts/owned-process-linux-guardian.mjs', '// Linux guardian adapter');
+    await seed('scripts/owned-process-linux-guardian.c', '// Linux guardian source');
+    await seed('scripts/build-owned-process-guardian.mjs', '// Linux guardian bootstrap');
     await seed('scripts/owned-windows-job.ps1', '# first-party Windows owned job');
     await seed('scripts/owned-windows-job-status.ps1', '# atomic Windows job receipt');
     await seed('bridge/native/hksc/compiler.c', '// native source');

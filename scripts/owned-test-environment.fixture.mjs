@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { attachOwnedTemporaryDirectory, createOwnedTemporaryDirectory, ownedTemporaryDirectoryIsIdle, recordOwnedProcess } from './owned-temporary-directory.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runSuite, runPlannedSuite, OUTCOME } from './verify/runner.mjs';
@@ -78,6 +78,78 @@ async function retireStoppedFixtureOwner(root, expectedToken) {
   // generated root/token were captured before cancellation. Product evidence
   // remains latched; this does not authorize a production sweep.
   await rm(root, { recursive: true, force: true });
+}
+
+async function runNestedCompletionFixture({ root, env, mutation = 'none' }) {
+  const child = join(root, `nested-completion-${mutation}.mjs`);
+  const environmentModule = new URL('./owned-test-environment.mjs', import.meta.url).href;
+  let mutationSource = '';
+  if (mutation === 'recreate-root') mutationSource = `const recreatedRootPath=childReceipt.root;
+      await mkdir(recreatedRootPath);await writeFile(join(recreatedRootPath,'completion-root-fixture-sentinel'),'owned-by-this-fixture');`;
+  else if (mutation === 'missing') mutationSource = `try{await unlink(completionPath);}catch(error){if(error.code!=='ENOENT')throw error;}`;
+  else if (mutation === 'partial') mutationSource = `await writeFile(completionPath,'{');`;
+  else if (['id', 'parentToken', 'childToken', 'root', 'state'].includes(mutation)) {
+    // If the baseline producer has no record, create a deliberately invalid
+    // test-only receipt so each binding negative independently exercises the reader.
+    const replacement = mutation === 'state' ? 'unknown' : 'not-the-recorded-value';
+    mutationSource = `completion??={schema:'soulforge.test-temporary-child-completion.v1',state:'disposed',
+      id:pending.id,parentToken:pending.parentToken,childToken:childReceipt.token,root:childReceipt.root};
+      completion[${JSON.stringify(mutation)}]=${JSON.stringify(replacement)};
+      await writeFile(completionPath,JSON.stringify(completion));`;
+  }
+  await writeFile(child, `import {existsSync} from 'node:fs';
+    import {mkdir,readFile,readdir,unlink,writeFile} from 'node:fs/promises';
+    import {join} from 'node:path';
+    import {runOwnedTestOperation} from ${JSON.stringify(environmentModule)};
+    const nested=await runOwnedTestOperation({command:process.execPath,args:['-e','process.exit(0)'],
+      cwd:process.cwd(),env:process.env,timeoutMs:15000});
+    if(nested.code!==0||nested.cleanupError||nested.temporaryOwnership?.state!=='cleaned')
+      throw new Error('nested owned operation did not finish cleanly: '+JSON.stringify(nested));
+    const parentRoot=process.env.SOULFORGE_TEST_TEMP_OWNER_ROOT;
+    const parentOwner=JSON.parse(await readFile(join(parentRoot,'.soulforge-temporary-owner.json'),'utf8'));
+    const pendingName=(await readdir(parentRoot)).find(name=>/^\\.soulforge-test-child\\.[a-f0-9-]{36}\\.pending\\.json$/.test(name));
+    if(!pendingName)throw new Error('parent child ledger missing');
+    const base=join(parentRoot,pendingName.slice(0,-'.pending.json'.length));
+    const pending=JSON.parse(await readFile(base+'.pending.json','utf8'));
+    const childReceipt=JSON.parse(await readFile(base+'.json','utf8'));
+    const completionPath=base+'.completed.json';
+    let completion;
+    try{completion=JSON.parse(await readFile(completionPath,'utf8'));}catch(error){if(error.code!=='ENOENT')throw error;}
+    ${mutationSource}
+    const evidence={parentRoot,parentToken:parentOwner.token,parentRootExistsAtPublication:existsSync(parentRoot),pending,childReceipt,completion,
+      recreatedRootPath:typeof recreatedRootPath==='undefined'?undefined:recreatedRootPath,
+      childRootExists:existsSync(childReceipt.root),nestedState:nested.temporaryOwnership.state};
+    process.stdout.write('OWNED_TEST_CHILD_COMPLETION:'+Buffer.from(JSON.stringify(evidence)).toString('base64')+'\\n');`);
+  return runOwnedTestOperation({ command: process.execPath, args: [child], cwd: root, env, timeoutMs: 20_000 });
+}
+
+function nestedCompletionEvidence(stdout) {
+  const encoded = stdout.match(/OWNED_TEST_CHILD_COMPLETION:([A-Za-z0-9+/=]+)/)?.[1];
+  assert.ok(encoded, 'nested wrapper must report its completion evidence');
+  return JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+}
+
+async function loadOwnedTestEnvironmentWithClosedMarkerRemovalHook(root) {
+  const sourcePath = fileURLToPath(new URL('./owned-test-environment.mjs', import.meta.url));
+  const source = await readFile(sourcePath, 'utf8');
+  const fsPromisesImport = "import { lstat, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';";
+  assert.equal(source.split(fsPromisesImport).length - 1, 1, 'the controlled I/O seam is pinned to one known import');
+  let instrumented = source.replace(fsPromisesImport, `import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile as nativeWriteFile } from 'node:fs/promises';
+    async function writeFile(...args) {
+      const result = await nativeWriteFile(...args);
+      const path = args[0];
+      if (typeof path === 'string' && basename(path) === '.soulforge-test-children-closed.json') {
+        await rm(dirname(path), { recursive: true, force: true });
+      }
+      return result;
+    }`);
+  instrumented = instrumented.replace("from './owned-temporary-directory.mjs'",
+    `from ${JSON.stringify(new URL('./owned-temporary-directory.mjs', import.meta.url).href)}`);
+  instrumented = instrumented.replace("from './subprocess-control.mjs'",
+    `from ${JSON.stringify(new URL('./subprocess-control.mjs', import.meta.url).href)}`);
+  const instrumentedPath = join(root, 'owned-test-environment-root-drop-hook.mjs');
+  await writeFile(instrumentedPath, instrumented);
+  return await import(pathToFileURL(instrumentedPath).href);
 }
 
 test('actual check operation owns and removes uncooperative fixture TEMP without changing test outcome', async () => {
@@ -433,6 +505,172 @@ for (const forgery of ['incomplete', 'unrelated']) test(`child ledger ${forgery}
       }
       await unrelated.dispose();
     }
+  });
+});
+
+test('missing owner root is failed as unproven instead of idempotently cleaned', { skip: process.platform !== 'linux' && 'fixture depends on POSIX removal of a non-cwd owner root' }, async () => {
+  await fixture(async ({ root, temporaryParent, env }) => {
+    const child = join(root, 'remove-owner-root.cjs');
+    await writeFile(child, `const fs=require('node:fs'),os=require('node:os');
+      const ownerRoot=process.env.SOULFORGE_TEST_TEMP_OWNER_ROOT;process.chdir(os.tmpdir());
+      fs.rmSync(ownerRoot,{recursive:true,force:true});
+      if(fs.existsSync(ownerRoot))throw new Error('owner root removal did not complete');`);
+    const result = await runOwnedTestOperation({ command: process.execPath, args: [child], cwd: root, env, timeoutMs: 15_000 });
+    assert.equal(result.code, 1);
+    assert.equal(result.temporaryOwnership.state, 'unproven');
+    assert.match(result.cleanupError, /OWNED_TEST_OWNER_ROOT_MISSING_UNPROVEN/);
+    assert.equal(existsSync(result.temporaryOwnership.root), false);
+    assert.deepEqual(await readdir(temporaryParent), []);
+  });
+});
+
+test('normally disposed nested wrappers publish a bound completion before the parent ledger is removed', async () => {
+  await fixture(async ({ root, temporaryParent, env }) => {
+    const result = await runNestedCompletionFixture({ root, env });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.temporaryOwnership.state, 'cleaned');
+    const evidence = nestedCompletionEvidence(result.stdout);
+    assert.equal(evidence.nestedState, 'cleaned');
+    assert.equal(evidence.childRootExists, false);
+    assert.equal(evidence.completion.schema, 'soulforge.test-temporary-child-completion.v1');
+    assert.equal(evidence.completion.state, 'disposed');
+    assert.equal(evidence.completion.id, evidence.pending.id);
+    assert.equal(evidence.completion.id, evidence.childReceipt.id);
+    assert.equal(evidence.completion.parentToken, evidence.parentToken);
+    assert.equal(evidence.completion.parentToken, evidence.pending.parentToken);
+    assert.equal(evidence.completion.parentToken, evidence.childReceipt.parentToken);
+    assert.equal(evidence.completion.childToken, evidence.childReceipt.token);
+    assert.equal(evidence.completion.root, evidence.childReceipt.root);
+    assert.equal(evidence.parentRootExistsAtPublication, true, 'the parent is still live while its nested child publishes completion');
+    assert.equal(existsSync(evidence.parentRoot), false, 'the outer wrapper removes the parent only after consuming its completion proof');
+    assert.deepEqual(await readdir(temporaryParent), [], 'parent cleanup consumes the completed child ledger only after the child root is gone');
+  });
+});
+
+for (const mutation of ['missing', 'partial', 'id', 'parentToken', 'childToken', 'root', 'state']) test(`missing nested root with ${mutation} completion proof remains failed and preserves the parent ledger`, async () => {
+  await fixture(async ({ root, temporaryParent, env, preserve }) => {
+    let result;
+    try {
+      result = await runNestedCompletionFixture({ root, env, mutation });
+      assert.equal(result.code, 1, result.stderr);
+      assert.equal(result.temporaryOwnership.state, 'retained');
+      assert.match(result.cleanupError, /OWNED_TEST_CHILD_ROOT_MISSING_UNPROVEN/);
+      const parentRoot = result.temporaryOwnership.root;
+      assert.equal(existsSync(parentRoot), true, 'a missing or untrusted completion must retain the parent owner ledger');
+      const parent = JSON.parse(await readFile(join(parentRoot, '.soulforge-temporary-owner.json'), 'utf8'));
+      assert.equal(parent.retention.schema, 'soulforge.temporary-retention.v1');
+      assert.match(parent.retention.reason, /OWNED_TEST_CHILD_ADMISSION_PENDING/);
+      const names = await readdir(parentRoot);
+      const pendingName = names.find(name => /^\.soulforge-test-child\.[a-f0-9-]{36}\.pending\.json$/.test(name));
+      assert.ok(pendingName, 'pending parent ledger entry is retained');
+      const base = join(parentRoot, pendingName.slice(0, -'.pending.json'.length));
+      const pending = JSON.parse(await readFile(`${base}.pending.json`, 'utf8'));
+      const child = JSON.parse(await readFile(`${base}.json`, 'utf8'));
+      assert.equal(pending.id, child.id);
+      assert.equal(pending.parentToken, parent.token);
+      assert.equal(existsSync(child.root), false, 'the missing child root is not recreated to satisfy the ledger');
+      if (mutation === 'missing') await assert.rejects(readFile(`${base}.completed.json`, 'utf8'), { code: 'ENOENT' });
+      else if (mutation === 'partial') {
+        const partial = await readFile(`${base}.completed.json`, 'utf8');
+        assert.throws(() => JSON.parse(partial), SyntaxError);
+      }
+      else {
+        const completion = JSON.parse(await readFile(`${base}.completed.json`, 'utf8'));
+        const expected = { id: pending.id, parentToken: pending.parentToken, childToken: child.token,
+          root: child.root, state: 'disposed' }[mutation];
+        assert.notEqual(completion[mutation], expected);
+      }
+    } finally {
+      const retained = result?.temporaryOwnership?.root;
+      if (retained && existsSync(retained)) {
+        try {
+          const marker = JSON.parse(await readFile(join(retained, '.soulforge-temporary-owner.json'), 'utf8'));
+          if (process.platform === 'linux') await retireStoppedFixtureOwner(retained, marker.token);
+          else await (await attachOwnedTemporaryDirectory(retained)).dispose();
+        } catch (error) { preserve(); throw error; }
+      }
+    }
+  });
+});
+
+test('a valid completion cannot authorize cleanup after its child root is recreated', async () => {
+  await fixture(async ({ root, temporaryParent, env, preserve }) => {
+    let result, evidence, recreatedPath;
+    const sentinelName = 'completion-root-fixture-sentinel', sentinelValue = 'owned-by-this-fixture';
+    try {
+      result = await runNestedCompletionFixture({ root, env, mutation: 'recreate-root' });
+      evidence = nestedCompletionEvidence(result.stdout);
+      recreatedPath = evidence.recreatedRootPath;
+      assert.equal(result.code, 1, result.stderr);
+      assert.equal(result.temporaryOwnership.state, 'retained');
+      assert.match(result.cleanupError, /OWNED_TEST_CHILD_COMPLETION_CONTRADICTED/);
+      assert.equal(evidence.childRootExists, true);
+      assert.equal(recreatedPath, evidence.childReceipt.root);
+      assert.equal(evidence.completion.schema, 'soulforge.test-temporary-child-completion.v1');
+      assert.equal(evidence.completion.state, 'disposed');
+      assert.equal(evidence.completion.id, evidence.pending.id);
+      assert.equal(evidence.completion.parentToken, evidence.parentToken);
+      assert.equal(evidence.completion.childToken, evidence.childReceipt.token);
+      assert.equal(evidence.completion.root, evidence.childReceipt.root);
+      assert.equal(inside(temporaryParent, recreatedPath), true, "only the fixture-owned temp parent's exact child path is eligible for teardown");
+      assert.deepEqual(await readdir(recreatedPath), [sentinelName]);
+      assert.equal(await readFile(join(recreatedPath, sentinelName), 'utf8'), sentinelValue);
+
+      const parentRoot = result.temporaryOwnership.root;
+      assert.equal(existsSync(parentRoot), true, 'a contradiction retains the parent ledger');
+      const parent = JSON.parse(await readFile(join(parentRoot, '.soulforge-temporary-owner.json'), 'utf8'));
+      assert.equal(parent.retention.schema, 'soulforge.temporary-retention.v1');
+      const names = await readdir(parentRoot);
+      const pendingName = names.find(name => /^\.soulforge-test-child\.[a-f0-9-]{36}\.pending\.json$/.test(name));
+      assert.ok(pendingName);
+      const base = join(parentRoot, pendingName.slice(0, -'.pending.json'.length));
+      assert.equal(JSON.parse(await readFile(`${base}.json`, 'utf8')).root, recreatedPath);
+      assert.equal(JSON.parse(await readFile(`${base}.completed.json`, 'utf8')).root, recreatedPath);
+    } finally {
+      if (!evidence) preserve();
+      else {
+        if (recreatedPath && existsSync(recreatedPath)) {
+          try {
+            assert.equal(inside(temporaryParent, recreatedPath), true);
+            assert.equal(recreatedPath, evidence.childReceipt.root,
+              'teardown must use only the exact child root recorded in this fixture parent ledger');
+            assert.equal(existsSync(join(recreatedPath, '.soulforge-temporary-owner.json')), false,
+              'the recreated path is not an owner root and must not be adopted');
+            assert.deepEqual(await readdir(recreatedPath), [sentinelName]);
+            assert.equal(await readFile(join(recreatedPath, sentinelName), 'utf8'), sentinelValue);
+            await rm(recreatedPath, { recursive: true, force: true });
+          } catch (error) { preserve(); throw error; }
+        }
+        const retained = result?.temporaryOwnership?.root;
+        if (retained && existsSync(retained)) {
+          try {
+            const marker = JSON.parse(await readFile(join(retained, '.soulforge-temporary-owner.json'), 'utf8'));
+            if (process.platform === 'linux') await retireStoppedFixtureOwner(retained, marker.token);
+            else await (await attachOwnedTemporaryDirectory(retained)).dispose();
+          } catch (error) { preserve(); throw error; }
+        }
+      }
+    }
+  });
+});
+
+test('cleanup failure marks a vanished root unproven and preserves an explicit null SIGTERM child exit', { skip: process.platform !== 'linux' && 'Linux Guardian signal receipt required' }, async () => {
+  await fixture(async ({ root, temporaryParent, env }) => {
+    const ready = join(root, 'sigterm-child-ready.json'), child = join(root, 'sigterm-child.cjs');
+    await writeFile(child, `const fs=require('node:fs');
+      fs.writeFileSync(${JSON.stringify(ready)},JSON.stringify({pid:process.pid}));
+      setTimeout(()=>process.kill(process.pid,'SIGTERM'),25);setInterval(()=>{},1000);`);
+    const { runOwnedTestOperation: runInstrumented } = await loadOwnedTestEnvironmentWithClosedMarkerRemovalHook(root);
+    const result = await runInstrumented({ command: process.execPath, args: [child], cwd: root, env, timeoutMs: 15_000 });
+    assert.equal(existsSync(ready), true);
+    assert.equal(result.signal, 'SIGTERM', result.stderr);
+    assert.equal(Object.hasOwn(result, 'childExitCode'), true);
+    assert.equal(result.childExitCode, null, 'cleanup failure must not replace a known signal exit with the wrapper failure code');
+    assert.notEqual(result.code, 0);
+    assert.equal(result.temporaryOwnership.state, 'unproven', 'the cleanup hook deletes the owner after identity validation but before readdir');
+    assert.match(result.cleanupError, /ENOENT/);
+    assert.equal(existsSync(result.temporaryOwnership.root), false);
+    assert.deepEqual(await readdir(temporaryParent), []);
   });
 });
 
