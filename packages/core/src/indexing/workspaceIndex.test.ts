@@ -4,7 +4,7 @@ import { WorkspaceIndex } from './workspaceIndex.js';
 import { preparePostCommitRefreshBaseline, refreshKnowledgeAfterCommit } from './knowledgeRefresh.js';
 import { createDefaultToolRegistry } from '../ai/toolRegistry.js';
 import { loadSymbolBundleIntoIndex } from '../workspace/semanticFileCache.js';
-import type { IndexedFile, SymbolBundle, TaeExport } from '@soulforge/shared';
+import type { EventExport, IndexedFile, SymbolBundle, TaeExport } from '@soulforge/shared';
 
 function makeTaeExport(): TaeExport {
   const entry = (entryIndex: number, entryId: number, entryName: string, taeGroup: string) => ({
@@ -75,6 +75,90 @@ function trackReferenceRebuilds(index: WorkspaceIndex): () => number {
   return () => count;
 }
 
+function makeEventFile(sourceUri: string, absolutePath: string): IndexedFile {
+  const relativePath = 'event/common.emevd.dcx';
+  return {
+    id: sourceUri,
+    workspaceId: 'fixture-source-invalidation',
+    sourceUri,
+    sourcePath: relativePath,
+    absolutePath,
+    relativePath,
+    game: 'sekiro',
+    resourceKind: 'event',
+    parseStatus: 'parsed',
+    diagnostics: [],
+    extension: '.dcx',
+    compoundExtension: '.emevd.dcx',
+    formatKind: 'emevd',
+    formatLabel: 'EMEVD DCX',
+    size: 1,
+    mtimeMs: 1
+  };
+}
+
+function makeEventExport(sourceUri: string, eventIds: readonly number[]): EventExport {
+  return {
+    events: eventIds.map((eventId) => ({
+      uri: `${sourceUri}#event/${eventId}`,
+      sourceUri,
+      eventId,
+      instructions: []
+    }))
+  };
+}
+
+function countReplaceAllForSourceUri<T>(sourceUri: string, run: () => T): { result: T; count: number } {
+  const original = String.prototype.replaceAll;
+  let count = 0;
+  String.prototype.replaceAll = function (
+    this: string,
+    searchValue: string | RegExp,
+    replaceValue: string | Parameters<typeof original>[1]
+  ): string {
+    if (String(this) === sourceUri) count += 1;
+    return Reflect.apply(original, this, [searchValue, replaceValue]) as string;
+  };
+  try {
+    return { result: run(), count };
+  } finally {
+    String.prototype.replaceAll = original;
+  }
+}
+
+describe('WorkspaceIndex changed-source lookup memo', () => {
+  it('memoizes repeated negative and positive URI aliases only for one invalidation call', () => {
+    const index = new WorkspaceIndex('fixture-source-invalidation-memo');
+    const fileA = makeEventFile(
+      'file://root-a/event/common.emevd.dcx',
+      'D:/root-a/event/common.emevd.dcx'
+    );
+    const fileB = makeEventFile(
+      'file://root-b/event/common.emevd.dcx',
+      'D:/root-b/event/common.emevd.dcx'
+    );
+    const absoluteSemanticUri = 'file:///D:/root-b/event/common.emevd.dcx';
+    index.setFiles([fileA]);
+    index.upsertEventExport(makeEventExport(absoluteSemanticUri, [1001, 1002]));
+
+    const first = countReplaceAllForSourceUri(absoluteSemanticUri, () =>
+      index.invalidateChangedSources([fileA.sourceUri])
+    );
+    assert.equal(first.result.removed.events, 0, 'a source in another root must remain unchanged');
+    assert.equal(first.count, 1, 'the same negative absolute alias is normalized once despite repeated semantic items');
+
+    // The next catalog binds the same relative path to root B. A per-call map
+    // must be fresh; carrying the previous negative result would retain stale symbols.
+    index.setFiles([fileB]);
+    const second = countReplaceAllForSourceUri(absoluteSemanticUri, () =>
+      index.invalidateChangedSources(['file://EVENT\\common.emevd.dcx'])
+    );
+    assert.equal(second.result.removed.events, 2, 'relative, case-insensitive aliases must invalidate both repeated items');
+    assert.equal(second.count, 1, 'the repeated positive absolute alias is normalized once in this call');
+    assert.equal(index.getEvent(`${absoluteSemanticUri}#event/1001`), undefined);
+    assert.equal(index.getEvent(`${absoluteSemanticUri}#event/1002`), undefined);
+  });
+});
 describe('WorkspaceIndex TAE section identity', () => {
   it('裸 animId 在跨 section 时返回 AMBIGUOUS', () => {
     const index = new WorkspaceIndex('fixture');

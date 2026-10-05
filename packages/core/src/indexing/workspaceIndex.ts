@@ -646,9 +646,15 @@ export class WorkspaceIndex {
     const changedFiles = uniqueSources
       .map((sourceUri) => findUniqueSourceFile(this.filesByUri, sourceUri))
       .filter((file): file is IndexedFile => file !== undefined);
-    const isChangedSource = (sourceUri: string): boolean =>
-      uniqueSources.includes(sourceUri)
-      || changedFiles.some((file) => sourceUriMatchesFile(sourceUri, file));
+    const changedSourceByUri = new Map<string, boolean>();
+    const isChangedSource = (sourceUri: string): boolean => {
+      const cached = changedSourceByUri.get(sourceUri);
+      if (cached !== undefined) return cached;
+      const changed = uniqueSources.includes(sourceUri)
+        || changedFiles.some((file) => sourceUriMatchesFile(sourceUri, file));
+      changedSourceByUri.set(sourceUri, changed);
+      return changed;
+    };
     const removed = {
       events: 0,
       mapEntities: 0,
