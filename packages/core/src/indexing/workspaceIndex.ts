@@ -631,8 +631,14 @@ export class WorkspaceIndex {
    * Remove semantic projections whose provenance points at changed sources.
    * Replacing the file catalog alone proves only that bytes changed; it does
    * not prove that old decoded symbols still describe the new bytes.
+   * A synchronous projection replacement may defer the intermediate graph;
+   * that caller must rebuild before returning. Reference queries do not
+   * rebuild lazily, and the default still rebuilds synchronously here.
    */
-  invalidateChangedSources(sourceUris: readonly string[]): SourceInvalidationResult {
+  invalidateChangedSources(
+    sourceUris: readonly string[],
+    options: { rebuildReferences?: boolean } = {}
+  ): SourceInvalidationResult {
     const uniqueSources = [...new Set(sourceUris.filter((sourceUri) => sourceUri.trim().length > 0))];
     this.invalidateSemanticSourceUriCache();
     if (uniqueSources.length > 0) this.markReferencesDirty();
@@ -708,7 +714,12 @@ export class WorkspaceIndex {
     });
     this.scriptExports = this.scriptExports.filter((item) => !isChangedSource(item.sourceUri));
 
-    const referencesRebuilt = uniqueSources.length > 0 ? this.rebuildReferences().edges.length : this.references.length;
+    let referencesRebuilt = this.references.length;
+    if (uniqueSources.length > 0) {
+      referencesRebuilt = options.rebuildReferences === false
+        ? 0
+        : this.rebuildReferences().edges.length;
+    }
     this.recomputeCoverageStates();
     return { sourceUris: uniqueSources, removed, referencesRebuilt };
   }

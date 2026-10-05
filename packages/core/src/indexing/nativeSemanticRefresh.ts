@@ -328,39 +328,89 @@ function commitRefreshProjection(
   // source whose native read failed.  That keeps failed sources stale and
   // partial sources explicitly incomplete instead of leaving an old row set
   // that looks current.
-  target.invalidateChangedSources(sourceUris);
-  const bundle = refreshed.toSymbolBundle();
-  const sourceBundle: SymbolBundle = {
-    ...(bundle.events ? {
-      events: bundle.events
-        .map((item) => ({ ...item, events: item.events.filter((event) => sourceSet.has(event.sourceUri)) }))
-        .filter((item) => item.events.length > 0)
-    } : {}),
-    ...(bundle.maps ? {
-      maps: bundle.maps
-        .map((item) => ({
-          ...item,
-          entities: item.entities.filter((entity) => sourceSet.has(entity.sourceUri)),
-          regions: item.regions.filter((region) => sourceSet.has(region.sourceUri))
-        }))
-        .filter((item) => item.entities.length > 0 || item.regions.length > 0)
-    } : {}),
-    ...(bundle.params ? {
-      params: bundle.params.filter((item) => sourceSet.has(item.sourceUri ?? '')
-        || item.rows.some((row) => sourceSet.has(row.sourceUri)))
-    } : {}),
-    ...(bundle.msgs ? {
-      msgs: bundle.msgs
-        .map((item) => ({ ...item, entries: item.entries.filter((entry) => sourceSet.has(entry.sourceUri)) }))
-        .filter((item) => item.entries.length > 0)
-    } : {}),
-    ...(bundle.tae ? { tae: bundle.tae.filter((item) => sourceSet.has(item.sourceUri)) } : {})
-  };
-  loadSymbolBundleIntoIndex(target, sourceBundle);
-  if (partialSources.length > 0) {
-    target.markCoveragePartial(partialSources);
+  // This synchronous replacement does not yield or publish an intermediate
+  // graph. Rebuild once after loading, or after restoring a failed source to
+  // its stale state; public reference queries are not lazy.
+  let commitFailed = false;
+  let commitError: unknown;
+  try {
+    target.invalidateChangedSources(sourceUris, { rebuildReferences: false });
+    const bundle = refreshed.toSymbolBundle();
+    const sourceBundle: SymbolBundle = {
+      ...(bundle.events ? {
+        events: bundle.events
+          .map((item) => ({ ...item, events: item.events.filter((event) => sourceSet.has(event.sourceUri)) }))
+          .filter((item) => item.events.length > 0)
+      } : {}),
+      ...(bundle.maps ? {
+        maps: bundle.maps
+          .map((item) => ({
+            ...item,
+            entities: item.entities.filter((entity) => sourceSet.has(entity.sourceUri)),
+            regions: item.regions.filter((region) => sourceSet.has(region.sourceUri))
+          }))
+          .filter((item) => item.entities.length > 0 || item.regions.length > 0)
+      } : {}),
+      ...(bundle.params ? {
+        params: bundle.params.filter((item) => sourceSet.has(item.sourceUri ?? '')
+          || item.rows.some((row) => sourceSet.has(row.sourceUri)))
+      } : {}),
+      ...(bundle.msgs ? {
+        msgs: bundle.msgs
+          .map((item) => ({ ...item, entries: item.entries.filter((entry) => sourceSet.has(entry.sourceUri)) }))
+          .filter((item) => item.entries.length > 0)
+      } : {}),
+      ...(bundle.tae ? { tae: bundle.tae.filter((item) => sourceSet.has(item.sourceUri)) } : {})
+    };
+    loadSymbolBundleIntoIndex(target, sourceBundle);
+    if (partialSources.length > 0) {
+      target.markCoveragePartial(partialSources);
+    }
+  } catch (error) {
+    commitFailed = true;
+    commitError = error;
   }
-  target.rebuildReferences();
+
+  const recoveryErrors: unknown[] = [];
+  if (commitFailed) {
+    // A synchronous failure may happen after some rows have been loaded.
+    // Remove every target source again, mark it stale, and build only from
+    // the remaining unchanged projection.
+    try {
+      target.invalidateChangedSources(sourceUris, { rebuildReferences: false });
+    } catch (error) {
+      recoveryErrors.push(error);
+      // A partial upsert may already have accepted a native version and
+      // cleared its stale marker. Even if removing that projection fails,
+      // do not let it advertise complete coverage.
+      try {
+        target.markCoverageStale(sourceUris, 'native semantic projection commit recovery failed');
+      } catch (staleError) {
+        recoveryErrors.push(staleError);
+      }
+    }
+  }
+  if (recoveryErrors.length === 0) {
+    try {
+      // If invalidation itself failed, do not publish a graph from a possibly
+      // partial projection. Otherwise success and recovery each build once.
+      target.rebuildReferences();
+    } catch (error) {
+      recoveryErrors.push(error);
+    }
+  }
+  if (commitFailed) {
+    if (recoveryErrors.length > 0) {
+      const aggregate = new AggregateError(
+        [commitError, ...recoveryErrors],
+        'Native semantic projection commit failed and recovery also encountered errors.'
+      );
+      Object.defineProperty(aggregate, 'cause', { configurable: true, value: commitError });
+      throw aggregate;
+    }
+    throw commitError;
+  }
+  if (recoveryErrors.length > 0) throw recoveryErrors[0];
 }
 
 async function readEventExport(
