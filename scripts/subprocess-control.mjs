@@ -1,6 +1,51 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 
 const DEFAULT_OUTPUT_LIMIT_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Decode a subprocess byte stream incrementally while retaining a UTF-8-safe
+ * byte-bounded tail. Call end() after stream EOF (or process close) so an
+ * incomplete final sequence is represented by StringDecoder's replacement
+ * character, just as Buffer.toString('utf8') does for malformed input.
+ */
+export function createUtf8OutputTail(outputLimitBytes) {
+  const decoder = new StringDecoder('utf8');
+  let value = '';
+  let truncated = false;
+  let ended = false;
+
+  const append = (text) => {
+    if (!text) return;
+    const next = value + text;
+    if (Buffer.byteLength(next, 'utf8') <= outputLimitBytes) {
+      value = next;
+      return;
+    }
+
+    const bytes = Buffer.from(next, 'utf8');
+    let start = Math.max(0, bytes.length - outputLimitBytes);
+    // A valid UTF-8 string can only start inside a code point at a continuation
+    // byte. Drop that incomplete leading code point rather than returning a
+    // replacement character whose three bytes could exceed the byte limit.
+    while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start += 1;
+    value = bytes.subarray(start).toString('utf8');
+    truncated = true;
+  };
+
+  return {
+    write(chunk) {
+      append(decoder.write(chunk));
+    },
+    end() {
+      if (ended) return;
+      ended = true;
+      append(decoder.end());
+    },
+    get value() { return value; },
+    get truncated() { return truncated; }
+  };
+}
 
 export function readTimeoutMs(name, fallbackMs, { minMs = 100, maxMs = 60 * 60 * 1000 } = {}) {
   const raw = process.env[name]?.trim();
@@ -78,36 +123,21 @@ export async function runProcess({
     }
     if (stdinData !== undefined) { child.stdin.on('error', () => {}); child.stdin.end(stdinData); }
 
-    let stdout = '';
-    let stderr = '';
-    let stdoutTruncated = false;
-    let stderrTruncated = false;
+    const stdoutOutput = createUtf8OutputTail(outputLimitBytes);
+    const stderrOutput = createUtf8OutputTail(outputLimitBytes);
     let terminationReason = null;
     let spawnError = null;
     let treeTerminated = false;
     let settled = false;
     let cancelForcedTermination = () => {};
 
-    const append = (current, chunk) => {
-      const next = current + chunk.toString();
-      if (Buffer.byteLength(next) <= outputLimitBytes) return { value: next, truncated: false };
-      return {
-        value: Buffer.from(next).subarray(-outputLimitBytes).toString(),
-        truncated: true
-      };
-    };
-
     child.stdout.on('data', (chunk) => {
       onStdout?.(chunk);
-      const next = append(stdout, chunk);
-      stdout = next.value;
-      stdoutTruncated ||= next.truncated;
+      stdoutOutput.write(chunk);
     });
     child.stderr.on('data', (chunk) => {
       onStderr?.(chunk);
-      const next = append(stderr, chunk);
-      stderr = next.value;
-      stderrTruncated ||= next.truncated;
+      stderrOutput.write(chunk);
     });
 
     const terminate = (reason) => {
@@ -126,15 +156,18 @@ export async function runProcess({
     child.on('close', (code, closeSignal) => {
       if (settled) return;
       settled = true;
+      // Process close is the fallback for streams destroyed before EOF.
+      stdoutOutput.end();
+      stderrOutput.end();
       clearTimeout(timer);
       cancelForcedTermination();
       signal?.removeEventListener('abort', onAbort);
       resolvePromise({
         code: code ?? 1,
-        stdout,
-        stderr: spawnError ? `${stderr}\n${spawnError}`.trim() : stderr,
-        stdoutTruncated,
-        stderrTruncated,
+        stdout: stdoutOutput.value,
+        stderr: spawnError ? `${stderrOutput.value}\n${spawnError}`.trim() : stderrOutput.value,
+        stdoutTruncated: stdoutOutput.truncated,
+        stderrTruncated: stderrOutput.truncated,
         timedOut: terminationReason === 'timeout',
         cancelled: terminationReason === 'cancelled',
         terminationReason,

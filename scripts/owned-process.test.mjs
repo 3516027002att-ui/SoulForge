@@ -272,6 +272,87 @@ test('missing Linux Guardian fails before the user command is spawned', { skip: 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('Linux Guardian adapter preserves split UTF-8 output and raw callback buffers',
+  { skip: !linuxX64 && 'Linux x64 guardian only' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sf-owned-guardian-utf8-output-'));
+  const artifactDirectory = join(root, 'linux-x64');
+  const binaryFile = `soulforge-owned-process-guardian.${randomUUID()}`;
+  const helperPath = join(artifactDirectory, binaryFile);
+  const text = '仓库🙂';
+  const bytes = Buffer.from(text, 'utf8');
+  const encoded = bytes.toString('base64');
+  const stdoutChunks = [], stderrChunks = [];
+  const splitTestHelper = `#!/usr/bin/env node
+const fs = require('node:fs');
+const nonce = process.argv[3];
+const bytes = Buffer.from(${JSON.stringify(encoded)}, 'base64');
+let offset = 0;
+function writeNextByte() {
+  if (offset >= bytes.length) {
+    fs.writeSync(3, JSON.stringify({
+      protocol: 'soulforge.owned-process-guardian.v1', nonce, code: 0, signal: null,
+      childExitCode: 0, treeStopped: true, descendantsObserved: false,
+      terminationReason: null, spawnErrno: 0
+    }) + '\\n');
+    return;
+  }
+  const part = bytes.subarray(offset, offset + 1);
+  offset += 1;
+  process.stdout.write(part);
+  process.stderr.write(part);
+  setTimeout(writeNextByte, 25);
+}
+writeNextByte();
+`;
+  try {
+    await mkdir(artifactDirectory);
+    const helperBytes = Buffer.from(splitTestHelper);
+    await writeFile(helperPath, helperBytes, { flag: 'wx', mode: 0o700 });
+    await chmod(helperPath, 0o700);
+    const sourceBytes = await readFile(new URL('./owned-process-linux-guardian.c', import.meta.url));
+    const sha256 = value => createHash('sha256').update(value).digest('hex');
+    await writeFile(join(artifactDirectory, 'soulforge-owned-process-guardian.manifest.json'), JSON.stringify({
+      schema: 'soulforge.owned-process-guardian-build.v2',
+      protocol: 'soulforge.owned-process-guardian.v1', protocolVersion: 1,
+      platform: 'linux', arch: 'x64', binaryFile,
+      sourceSha256: sha256(sourceBytes), binarySha256: sha256(helperBytes),
+      compiler: { command: process.execPath, version: process.version,
+        flags: ['-D_GNU_SOURCE', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror'] }
+    }), { flag: 'wx', mode: 0o600 });
+
+    const result = await runLinuxGuardianProcess({ command: process.execPath, args: ['-e', 'process.exit(0)'],
+      cwd: root, env: process.env, timeoutMs: 5_000, outputLimitBytes: 64,
+      onStdout: chunk => {
+        assert.ok(Buffer.isBuffer(chunk), 'Linux Guardian stdout callback must receive a Buffer');
+        stdoutChunks.push(Buffer.from(chunk));
+      },
+      onStderr: chunk => {
+        assert.ok(Buffer.isBuffer(chunk), 'Linux Guardian stderr callback must receive a Buffer');
+        stderrChunks.push(Buffer.from(chunk));
+      } }, artifactDirectory);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.treeStopped, true);
+    assert.equal(result.timedOut, false);
+    assert.equal(result.cancelled, false);
+    assert.equal(result.stdout, text);
+    assert.equal(result.stderr, text);
+    assert.ok(stdoutChunks.length > 1);
+    assert.ok(stderrChunks.length > 1);
+    assert.deepEqual(Buffer.concat(stdoutChunks), bytes);
+    assert.deepEqual(Buffer.concat(stderrChunks), bytes);
+    const splitsInsideCodePoint = chunks => {
+      let byteOffset = 0;
+      for (const chunk of chunks.slice(0, -1)) {
+        byteOffset += chunk.length;
+        if (byteOffset < bytes.length && (bytes[byteOffset] & 0xc0) === 0x80) return true;
+      }
+      return false;
+    };
+    assert.equal(splitsInsideCodePoint(stdoutChunks), true);
+    assert.equal(splitsInsideCodePoint(stderrChunks), true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('an exited helper with live descendants holding inherited pipes returns incomplete proof',
   { skip: !linuxX64 && 'Linux x64 guardian only' }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'sf-owned-guardian-open-pipe-test-'));

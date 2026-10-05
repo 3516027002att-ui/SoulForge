@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { constants as osConstants } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { createUtf8OutputTail } from './subprocess-control.mjs';
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, '..');
@@ -65,12 +66,6 @@ async function verifyGuardianArtifact(directory = artifactDirectory) {
     throw new Error('OWNED_PROCESS_GUARDIAN_ARTIFACT_STALE');
   }
   return binaryPath;
-}
-
-function appendOutput(current, chunk, outputLimitBytes) {
-  const next = current + chunk.toString();
-  if (Buffer.byteLength(next) <= outputLimitBytes) return { value: next, truncated: false };
-  return { value: Buffer.from(next).subarray(-outputLimitBytes).toString(), truncated: true };
 }
 
 function failedResult({ error, reason, timeoutMs, stdout = '', stderr = '', stdoutTruncated = false,
@@ -179,6 +174,8 @@ export async function runLinuxGuardianProcess(options, guardianDirectory = artif
   }
 
   let stdout = '', stderr = '', stdoutTruncated = false, stderrTruncated = false;
+  const stdoutOutput = createUtf8OutputTail(outputLimitBytes);
+  const stderrOutput = createUtf8OutputTail(outputLimitBytes);
   let receiptBytes = 0, receiptChunks = [], spawnError = null, ownerError = null;
   let terminationReason = null, closed = false, hardStopTimer;
   const forceStopGuardian = () => {
@@ -193,13 +190,13 @@ export async function runLinuxGuardianProcess(options, guardianDirectory = artif
   };
   child.stdout.on('data', chunk => {
     onStdout?.(chunk);
-    const next = appendOutput(stdout, chunk, outputLimitBytes);
-    stdout = next.value; stdoutTruncated ||= next.truncated;
+    stdoutOutput.write(chunk);
+    stdout = stdoutOutput.value; stdoutTruncated = stdoutOutput.truncated;
   });
   child.stderr.on('data', chunk => {
     onStderr?.(chunk);
-    const next = appendOutput(stderr, chunk, outputLimitBytes);
-    stderr = next.value; stderrTruncated ||= next.truncated;
+    stderrOutput.write(chunk);
+    stderr = stderrOutput.value; stderrTruncated = stderrOutput.truncated;
   });
   const receiptStream = child.stdio[3];
   if (!receiptStream) {
@@ -250,6 +247,11 @@ export async function runLinuxGuardianProcess(options, guardianDirectory = artif
     child.once('close', (code, closeSignal) => finish({ code, signal: closeSignal, forcedIncomplete: forcedStdioClose }));
   });
   clearTimeout(timeout); clearTimeout(hardStopTimer); signal?.removeEventListener('abort', onAbort);
+  // The forced stdio-close path may not emit readable EOF. Flush each decoder
+  // only after the Guardian process/stdio close facts have been observed.
+  stdoutOutput.end(); stderrOutput.end();
+  stdout = stdoutOutput.value; stderr = stderrOutput.value;
+  stdoutTruncated = stdoutOutput.truncated; stderrTruncated = stderrOutput.truncated;
   if (ownerError) return failedResult({ error: `OWNED_PROCESS_GUARDIAN_OWNER_RECEIPT_FAILED: ${ownerError}`,
     reason: terminationReason, timeoutMs, stdout, stderr, stdoutTruncated, stderrTruncated });
   if (spawnError) return failedResult({ error: `OWNED_PROCESS_GUARDIAN_SPAWN_FAILED: ${spawnError}`,

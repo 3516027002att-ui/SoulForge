@@ -3,7 +3,9 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { processSucceeded, runProcess } from './subprocess-control.mjs';
+import * as subprocessControl from './subprocess-control.mjs';
+
+const { processSucceeded, runProcess } = subprocessControl;
 
 const root = process.cwd();
 const grandchildProgram = `
@@ -41,6 +43,118 @@ async function main() {
   const timeoutSentinel = join(fixtureRoot, 'timeout-grandchild.sentinel');
   const cancelSentinel = join(fixtureRoot, 'cancel-grandchild.sentinel');
   try {
+    const unicodeText = '仓库🙂';
+    const unicodeBytes = Buffer.from(unicodeText, 'utf8');
+    const unicodeBase64 = unicodeBytes.toString('base64');
+    const splitWriter = `
+      const bytes = Buffer.from(${JSON.stringify(unicodeBase64)}, 'base64');
+      let offset = 0;
+      function writeNextByte() {
+        if (offset >= bytes.length) return;
+        const byte = bytes.subarray(offset, offset + 1);
+        offset += 1;
+        process.stdout.write(byte);
+        process.stderr.write(byte);
+        setTimeout(writeNextByte, 25);
+      }
+      writeNextByte();
+    `;
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    const splitUnicode = await runProcess({
+      command: process.execPath,
+      args: ['-e', splitWriter],
+      cwd: root,
+      timeoutMs: 5_000,
+      outputLimitBytes: 64,
+      onStdout: chunk => {
+        assert.ok(Buffer.isBuffer(chunk), 'stdout callback must receive the original Buffer type');
+        stdoutChunks.push(Buffer.from(chunk));
+      },
+      onStderr: chunk => {
+        assert.ok(Buffer.isBuffer(chunk), 'stderr callback must receive the original Buffer type');
+        stderrChunks.push(Buffer.from(chunk));
+      }
+    });
+    assert.equal(splitUnicode.code, 0);
+    assert.equal(splitUnicode.timedOut, false);
+    assert.equal(splitUnicode.cancelled, false);
+    assert.equal(splitUnicode.terminationReason, null);
+    assert.equal(splitUnicode.stdout, unicodeText, 'stdout must decode UTF-8 split across stream chunks');
+    assert.equal(splitUnicode.stderr, unicodeText, 'stderr must decode UTF-8 split across stream chunks');
+    assert.ok(stdoutChunks.length > 1, 'stdout callback must receive multiple original byte chunks');
+    assert.ok(stderrChunks.length > 1, 'stderr callback must receive multiple original byte chunks');
+    assert.deepEqual(Buffer.concat(stdoutChunks), unicodeBytes, 'stdout callback bytes must remain unchanged');
+    assert.deepEqual(Buffer.concat(stderrChunks), unicodeBytes, 'stderr callback bytes must remain unchanged');
+    const hasSplitInsideCodePoint = chunks => {
+      let byteOffset = 0;
+      for (const chunk of chunks.slice(0, -1)) {
+        byteOffset += chunk.length;
+        if (byteOffset < unicodeBytes.length && (unicodeBytes[byteOffset] & 0xc0) === 0x80) return true;
+      }
+      return false;
+    };
+    assert.equal(hasSplitInsideCodePoint(stdoutChunks), true, 'fixture must split stdout inside a UTF-8 code point');
+    assert.equal(hasSplitInsideCodePoint(stderrChunks), true, 'fixture must split stderr inside a UTF-8 code point');
+
+    const tailLimitBytes = 7;
+    const tailText = 'a仓🙂z';
+    const tailResult = await runProcess({
+      command: process.execPath,
+      args: ['-e', `process.stdout.write(Buffer.from(${JSON.stringify(Buffer.from(tailText).toString('base64'))}, 'base64'))`],
+      cwd: root,
+      timeoutMs: 5_000,
+      outputLimitBytes: tailLimitBytes
+    });
+    assert.equal(tailResult.code, 0);
+    assert.equal(tailResult.stdoutTruncated, true);
+    assert.equal(tailResult.stdout, '🙂z', 'truncated tail must drop a partial leading code point');
+    assert.ok(Buffer.byteLength(tailResult.stdout, 'utf8') <= tailLimitBytes, 'truncated UTF-8 tail must stay within its byte limit');
+    assert.equal(Buffer.from(tailResult.stdout, 'utf8').toString('utf8'), tailResult.stdout, 'truncated tail must be valid UTF-8');
+
+    const incompleteResult = await runProcess({
+      command: process.execPath,
+      args: ['-e', "process.stdout.write(Buffer.from([0xe4, 0xbb])); process.stderr.write(Buffer.from([0xff]));"],
+      cwd: root,
+      timeoutMs: 5_000,
+      outputLimitBytes: 64
+    });
+    assert.equal(incompleteResult.code, 0);
+    assert.equal(incompleteResult.stdout, '\uFFFD', 'an incomplete final UTF-8 sequence must flush as a replacement character');
+    assert.equal(incompleteResult.stderr, '\uFFFD', 'invalid final UTF-8 bytes must retain replacement decoding');
+
+    // The direct collector cases make chunk splitting deterministic; the
+    // process-level byte writer above remains the old-implementation RED.
+    assert.equal(typeof subprocessControl.createUtf8OutputTail, 'function', 'the shared UTF-8 collector must be wired into subprocess control');
+    const splitCollector = subprocessControl.createUtf8OutputTail(64);
+    for (const byte of unicodeBytes) splitCollector.write(Buffer.from([byte]));
+    splitCollector.end();
+    assert.equal(splitCollector.value, unicodeText);
+    assert.equal(splitCollector.truncated, false);
+
+    for (const [limit, expected] of [[8, '仓🙂z'], [7, '🙂z'], [3, 'z'], [0, '']]) {
+      const collector = subprocessControl.createUtf8OutputTail(limit);
+      collector.write(Buffer.from(tailText, 'utf8'));
+      collector.end();
+      assert.equal(collector.value, expected, `tail at ${limit} bytes must retain whole UTF-8 code points`);
+      assert.equal(collector.truncated, true);
+      assert.ok(Buffer.byteLength(collector.value, 'utf8') <= limit);
+      assert.equal(Buffer.from(collector.value, 'utf8').toString('utf8'), collector.value);
+    }
+
+    const incompleteCollector = subprocessControl.createUtf8OutputTail(64);
+    incompleteCollector.write(Buffer.from([0xf0, 0x9f, 0x99]));
+    incompleteCollector.end();
+    assert.equal(incompleteCollector.value, '\uFFFD');
+    assert.equal(incompleteCollector.truncated, false);
+
+    const undersizedCollector = subprocessControl.createUtf8OutputTail(2);
+    undersizedCollector.write(Buffer.from([0xf0, 0x9f, 0x99]));
+    undersizedCollector.end();
+    assert.equal(undersizedCollector.value, '');
+    assert.equal(undersizedCollector.truncated, true);
+    assert.ok(Buffer.byteLength(undersizedCollector.value, 'utf8') <= 2);
+
     const timeoutStarted = performance.now();
     const timedOut = await runProcess({
       command: process.execPath,
@@ -106,6 +220,9 @@ async function main() {
       ok: true,
       status: 'passed',
       cases: [
+        'split-multibyte-stdout-stderr-and-raw-callback-buffers',
+        'utf8-safe-output-tail-byte-limit',
+        'incomplete-final-utf8-flush',
         'timeout-kills-child-grandchild',
         'abort-kills-child-grandchild',
         'normal-completion',
