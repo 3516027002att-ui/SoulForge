@@ -26,7 +26,8 @@ const UNC_OR_DEVICE_PATH = /\\\\(?:[?.]\\)?[^\\/\s]+[\\/][^\s'"()（）\[\]「�
 
 /** Match a whole URI before looking for slash paths within it. */
 const URI = /[A-Za-z][A-Za-z0-9+.-]*:\/\/(?:[^\s'"()（）\[\]「」『』，。、；！？]|\[[A-Za-z0-9_.:%-]+\])*/;
-const POSIX_PATH = /(?<![A-Za-z0-9_./:%\\-])\/[^\s'"()（）\[\]「」『』，。、；：！？]+/;
+// A colon may introduce a diagnostic path; URI_OR_PATH matches complete URIs first.
+const POSIX_PATH = /(?<![A-Za-z0-9_./%\\-])\/[^\s'"()（）\[\]「」『』，。、；：！？]+/;
 /** URI metadata and container children must remain relative selectors. */
 const PHYSICAL_URI_SELECTOR = new RegExp(
   [WINDOWS_DRIVE_PATH.source, POSIX_PATH.source, '//', '(?:^|[=&])/'].join('|')

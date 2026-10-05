@@ -3,6 +3,7 @@ import { asNumber, asOptionalString, asRecord, asString, canonicalScriptSourceUr
 import { listLuabndScripts } from '../../editing/luabndEdit.js';
 import { createOpaqueCursor, defaultReadSessionManager, parseOpaqueCursor } from '@soulforge/shared';
 import type { ScriptSymbol } from '@soulforge/shared';
+import { cursorIdentity } from '../../workspace/cursorIdentity.js';
 /** list_luabnd_scripts: one domain tool declaration, schema and handler. */
 export function createListLuabndScriptsTool(): RegisteredTool {
     return {
@@ -33,7 +34,8 @@ export function createListLuabndScriptsTool(): RegisteredTool {
                 ? canonicalScriptSourceUri(context, result.containerPath, result.sourceUri)
                 : result.sourceUri;
             const catalogHash = scriptCatalogSnapshotHash(sourceUriForPaging, result.outerFileHash, result.scripts);
-            const catalogScope = `luabnd-scripts:${sourceUriForPaging}`;
+            const workspaceId = context.workspaceIndex?.workspaceId ?? edit.session.session.meta.workspaceId;
+            const catalogScope = `luabnd-scripts-v2:${cursorIdentity(JSON.stringify([workspaceId, sourceUriForPaging]))}`;
             let page;
             if (cursor) {
                 let payload;
@@ -87,7 +89,7 @@ export function createListLuabndScriptsTool(): RegisteredTool {
             }
             else {
                 const session = defaultReadSessionManager.createSession({
-                    workspaceId: context.workspaceIndex?.workspaceId ?? edit.session.session.meta.workspaceId,
+                    workspaceId,
                     sourceVersion: { sourceUri: sourceUriForPaging, sourceHash: catalogHash },
                     domain: 'script',
                     queryScope: catalogScope,

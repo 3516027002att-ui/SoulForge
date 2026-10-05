@@ -132,6 +132,40 @@ it('masks POSIX paths and physical file URLs while preserving surrounding text',
   assert.equal(maskPathFragments('file:///workspace/%2e%2e/home/user/a.fmg'), MASKED_PATH_PLACEHOLDER);
 });
 
+it('masks POSIX paths directly after colon labels while preserving diagnostic context', () => {
+  for (const [input, expected] of [
+    ['failed:/tmp/private/a.fmg', `failed:${MASKED_PATH_PLACEHOLDER}`],
+    ['path:/home/alice/mod', `path:${MASKED_PATH_PLACEHOLDER}`],
+    ['Read failed:/tmp/private/a.fmg (retry later)', `Read failed:${MASKED_PATH_PLACEHOLDER} (retry later)`],
+    ['path:/home/alice/mod (blocked); failed:/tmp/private/a.fmg', `path:${MASKED_PATH_PLACEHOLDER} (blocked); failed:${MASKED_PATH_PLACEHOLDER}`]
+  ] as const) assert.equal(maskPathFragments(input), expected, input);
+});
+
+it('logical file URI selectors cannot hide POSIX paths behind colon labels', () => {
+  for (const uri of [
+    'file://chr/foo.flver#source=failed:/home/private/demo.fmg',
+    'file://regulation.bin?path=path:/tmp/private/demo.param',
+    'file://pack.bnd#bnd/child/failed:/home/private/demo.fmg',
+    'file://chr/foo.flver#source=path%3A%2Fhome%2Fprivate%2Fdemo.fmg',
+    'file://chr/foo.flver#source=path%253A%252Fhome%252Fprivate%252Fdemo.fmg'
+  ]) assert.equal(maskPathFragments(uri), MASKED_PATH_PLACEHOLDER, uri);
+});
+
+it('preserves complete remote and logical URIs after colon labels', () => {
+  for (const uri of [
+    'https://example.com/docs/a?time=12:30',
+    'https://[2001:db8::1]:8443/docs/a',
+    'resource://owned/map',
+    'file://chr/c0000.anibnd.dcx',
+    'file:///workspace/a.fmg',
+    'file://chr/foo.flver#source=kind:chr/relative.flver'
+  ]) {
+    assert.equal(maskPathFragments(uri), uri, uri);
+    const message = `source:${uri} (retry later)`;
+    assert.equal(maskPathFragments(message), message, message);
+  }
+});
+
 it('preserves logical resource addresses and relative paths', () => {
   for (const value of ['file://chr/c0000.anibnd.dcx', 'file:///workspace/a.fmg', 'resource://owned/map', 'https://example.com/docs/a', 'chr/c0000.anibnd.dcx', './relative/a.fmg']) {
     assert.equal(maskPathFragments(value), value);

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
 import { expandParamFieldQuery } from '../param/containerParamEdit.js';
 import { paramContainerRecoveryUri, paramReadCoverage, paramReadSourceHash, paramReadWindow } from '../param/paramReadWindow.js';
+import { assertCursorPrivacy } from './harness/assertCursorPrivacy.js';
 
 const fixtureRoot = join(tmpdir(), 'soulforge-param-read-window-fixture');
 const overlayRoot = join(fixtureRoot, 'mods');
@@ -42,6 +43,7 @@ assert.equal(page.fieldDefinitions.length, 4);
 assert.ok(page.nextCursor && page.nextCursor.length < 400);
 assert.ok(!page.queryScope.includes('private'));
 const cursor = page.nextCursor!;
+assert.equal(assertCursorPrivacy(page, ['file:///C:/private/container', 'private', 'long-field-scope']), 1);
 const delivered = [...page.items];
 while (page.nextCursor) {
   page = paramReadWindow({ ...input, cursor: page.nextCursor });
@@ -58,4 +60,5 @@ const migrated = paramReadWindow({ ...input, cursor: legacy });
 assert.equal(migrated.offset, 4);
 assert.ok(migrated.nextCursor && migrated.nextCursor.length < 400);
 assert.equal(parseOpaqueCursor(migrated.nextCursor!).sessionId, 'param-fields-v2');
+assert.equal(assertCursorPrivacy(migrated, ['file:///C:/private/container', 'private', 'long-field-scope']), 1);
 console.log('PARAM bounded cursor and per-page definitions smoke passed.');

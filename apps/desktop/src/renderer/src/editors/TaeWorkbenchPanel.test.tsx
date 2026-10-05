@@ -7,12 +7,12 @@
  * 动画列表、词条事件与中栏详情区的文件统计；选择联动由 e2e 覆盖。
  * 面板只在提交/重读处理器里触达 window，SSR 渲染路径不触达，无需假 window。
  *
- * T3（2026-08-15，grok）重构后四栏为：
- *   Animations | Events / 词条 | 详情 | 动作视图。
+ * 动作工作台三栏为：
+ *   Animations | Events / 词条（含可折叠详情） | 动作视图。
  * 没有 Timeline / Events、没有 Inspector 第三栏 —— 详情收进中栏。
  *
  * 覆盖：
- * 1. SSR 结构：四栏 Animations | Events / 词条 | 详情 | 动作视图挂载即存在；
+ * 1. SSR 结构：三栏 Animations | Events / 词条 | 动作视图挂载即存在；
  *    无 Timeline / Events、无 Inspector、无 Tools 空栏；动画列表由 shared pages
  *    投影派生（不按 chr/action 目录分类），hkxName 去扩展作主标签。
  * 2. 纯逻辑：isInvalidTimeRange（startTime > endTime / 非有限时间判非法）。
@@ -121,13 +121,22 @@ function renderWithSelection(): string {
   );
 }
 
-describe('TaeWorkbenchPanel 初始结构（挂载即有的四栏骨架）', () => {
+describe('TaeWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () => {
   it('工作台根的可访问名是「动作工作台」', () => {
     assert.match(render(), /aria-label="动作工作台"/);
   });
 
-  it('四栏 Animations | Events / 词条 | 详情 | 动作视图同时存在，无 Timeline/Inspector/Tools', () => {
+  it('三栏 Animations | Events / 词条 | 动作视图，详情收在中栏且不占第四栏', () => {
     const html = render();
+    const columns = html.split('<section class="workbench__column"').slice(1);
+    assert.equal(columns.length, 3);
+    assert.match(columns[0]!, /^ aria-label="动画"/);
+    assert.match(columns[1]!, /^ aria-label="事件 \/ 词条"/);
+    assert.match(columns[1]!, /aria-label="详情"/);
+    assert.match(columns[1]!, /data-testid="tae-details-empty"/);
+    assert.match(columns[2]!, /^ aria-label="动作视图"/);
+    assert.doesNotMatch(columns[2]!, /aria-label="详情"/);
+    assert.equal((html.match(/role="separator"/g) ?? []).length, 2);
     assert.match(html, /aria-label="动画"/);
     assert.match(html, /aria-label="事件 \/ 词条"/);
     assert.match(html, /aria-label="详情"/);
@@ -136,7 +145,7 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的四栏骨架）', () =
     assert.doesNotMatch(html, /aria-label="Inspector"/);
     assert.doesNotMatch(html, /aria-label="Files \/ Animations"/);
     assert.doesNotMatch(html, /aria-label="Tools"/);
-    assert.match(html, /aria-label="收起详情栏"/);
+    assert.match(html, /aria-label="收起详情" aria-expanded="true"/);
     assert.match(html, />收起<\/button>/);
   });
 
@@ -465,7 +474,7 @@ describe('TAE 非法时间行（主工作区不显示 authority/诊断长文）'
   });
 });
 
-describe('问题4-C 词条详情（独立详情栏，可关，只留一套帧；typed event write）', () => {
+describe('问题4-C 词条详情（中栏详情，可关，只留一套帧；typed event write）', () => {
   it('选中词条后详情可见：起始帧/结束帧各出现一次，主单位帧、小字 ≈ 秒', () => {
     const html = renderWithSelection();
     assert.match(html, /data-testid="tae-details"/);

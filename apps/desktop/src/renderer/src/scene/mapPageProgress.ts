@@ -1,3 +1,25 @@
+// With `u`, valid surrogate pairs are single code points and do not match;
+// lone surrogates still match and keep JSON.stringify's well-formed escaping.
+const needsJsonStringEscape = /["\\\u0000-\u001f\ud800-\udfff]/u;
+
+function countMapEnvelopeWireCharacters(envelope: unknown): number {
+  let removedCharacters = 0;
+  const serialized = JSON.stringify(envelope, (_key, value: unknown) => {
+    // Native JSON still owns traversal, hooks, omission and unsupported-value
+    // behavior. Only escape-free long string values use the allocation-saving
+    // path; property keys, boxed strings and escaped text serialize normally.
+    if (typeof value === 'string' && value.length >= 1024 && !needsJsonStringEscape.test(value)) {
+      removedCharacters += value.length;
+      return ''; // Keep the same two quote characters in the small projection.
+    }
+    return value;
+  });
+  if (typeof serialized !== 'string') throw new Error('MAP_STATIC_PAGE_INVALID');
+  // Preserve the existing UTF-16 character budget, rather than changing it to
+  // UTF-8 bytes. The replacer does not modify or retain the input envelope.
+  return serialized.length + removedCharacters;
+}
+
 /** A malformed/replayed page must terminate one model, never occupy a loader forever. */
 export class MapPageProgress {
   private readonly cursors = new Set<string>();
@@ -29,9 +51,7 @@ export class MapPageProgress {
     // including data URI textures, nested materials, metadata and cursors.
     // Counting only *Base64 properties allowed PNG preview tokens to bypass
     // the accumulated model budget on every page.
-    const serialized = JSON.stringify(retainedResponse);
-    if (typeof serialized !== 'string') throw new Error('MAP_STATIC_PAGE_INVALID');
-    this.wireCharacters += serialized.length;
+    this.wireCharacters += countMapEnvelopeWireCharacters(retainedResponse);
     if (this.wireCharacters > this.maxWireCharacters) throw new Error('MAP_STATIC_MODEL_WIRE_LIMIT');
     this.complete = page.complete === true;
   }

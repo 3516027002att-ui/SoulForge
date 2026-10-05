@@ -5,6 +5,7 @@ import { WorkspaceIndex, type SearchResourcesOptions } from '../../indexing/work
 import { createAgentToolBridge } from '../agentToolBridge.js';
 import { ToolRegistry, type ToolContext } from '../toolRegistry.js';
 import { createSearchResourcesTool } from './search_resources.js';
+import { assertCursorPrivacy } from '../../testing/harness/assertCursorPrivacy.js';
 
 class ObservedWorkspaceIndex extends WorkspaceIndex {
     readonly searches: SearchResourcesOptions[] = [];
@@ -39,8 +40,8 @@ function indexedFile(kind: ResourceKind, name = 'fixture', backup = false): Inde
     };
 }
 
-function fixture(mode: ToolContext['mode'] = 'normal') {
-    const workspaceIndex = new ObservedWorkspaceIndex('resource-kinds');
+function fixture(mode: ToolContext['mode'] = 'normal', workspaceId = 'resource-kinds') {
+    const workspaceIndex = new ObservedWorkspaceIndex(workspaceId);
     workspaceIndex.setFiles([
         ...ALL_RESOURCE_KINDS.map((kind) => indexedFile(kind)),
         indexedFile('map', 'second'),
@@ -53,6 +54,13 @@ function fixture(mode: ToolContext['mode'] = 'normal') {
 }
 
 describe('search_resources resource kind contract', () => {
+    it('keeps physical workspace identities out of every nested model cursor', async () => {
+        const workspaceId = 'file:///C:/Users/Alice/private-mod-workspace';
+        const { bridge } = fixture('plan', workspaceId);
+        const result = await bridge.executeTool({ id: 'private-cursor', name: 'search_resources', argumentsJson: JSON.stringify({ limit: 1 }) });
+        assert.equal(result.ok, true, result.content);
+        assert.ok(assertCursorPrivacy(JSON.parse(result.content), [workspaceId, 'private-mod-workspace', '/Users/Alice']) >= 2);
+    });
     it('advertises every supported kind as an optional array item enum', () => {
         const { bridge } = fixture();
         const schema = bridge.tools[0]!.parametersJsonSchema as {

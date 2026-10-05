@@ -529,17 +529,22 @@ test('行为工作台三栏：机器 → 状态 → 条件/转移选择链，par
   await app.close();
 });
 
-test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件参数体未解码边界明确', async () => {
+test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件参数体未解码边界明确', async ({}, testInfo) => {
   const { app, window } = await launchApp();
+  await window.setViewportSize({ width: 1600, height: 1000 });
   await openFixtureWorkspace(window);
 
   // T3（2026-08-15）：行为 + 动画合并为「动作」。TAE 资源从开始侧栏资源树选择，
-  // 进入四栏动作工作台（Animations | Events / 词条 + 详情 | 动作视图）。
+  // 进入三栏动作工作台（Animations | Events / 词条 + 详情 | 动作视图）。
   await selectFileItem(window, 'action/c0000.tae');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('动作工作台')).toBeVisible();
 
-  // 四栏（无 Inspector / Tools 空栏；动作视图保留真实只读画布与时间轴）。
+  const workbench = window.getByLabel('动作工作台');
+  const columns = workbench.locator('.workbench__column');
+  await expect(columns).toHaveCount(3);
+  await expect(workbench.getByRole('separator')).toHaveCount(2);
+  // 三栏（无 Inspector / Tools 空栏；动作视图保留真实只读画布与时间轴）。
   await expect(window.getByRole('region', { name: '动画' })).toBeVisible();
   await expect(window.getByRole('region', { name: '事件 / 词条' })).toBeVisible();
   await expect(window.getByRole('region', { name: '动作视图' })).toBeVisible();
@@ -571,6 +576,7 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   await middle.getByRole('row', { name: /1 未命名/ }).click();
   const details = window.getByTestId('tae-details');
   await expect(details).toBeVisible();
+  await expect(middle.getByTestId('tae-details')).toBeVisible();
   // 起始帧 / 结束帧各出现一次（主单位帧，旁边小字 ≈ 秒）。
   await expect(details.getByText('起始帧')).toHaveCount(1);
   await expect(details.getByText('结束帧')).toHaveCount(1);
@@ -588,6 +594,38 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   await expect(preview.locator('input[type="number"], input[type="text"], textarea')).toHaveCount(0);
   await expect(preview.getByTestId('tae-timeline-ctrl')).toBeVisible();
   await expect(preview.getByRole('button', { name: '播放' })).toBeVisible();
+  const eventTimeDraft = details.getByLabel('新起始帧');
+  await eventTimeDraft.fill('6');
+
+  const geometry = () => columns.evaluateAll((elements) => elements.map((element) => {
+    const { x, y, width, height } = element.getBoundingClientRect();
+    return { label: element.getAttribute('aria-label'), x, y, width, height };
+  }));
+  const expanded = await geometry();
+  expect(expanded.map((column) => column.label)).toEqual(['动画', '事件 / 词条', '动作视图']);
+  expect(expanded[0].y).toBe(expanded[1].y);
+  expect(expanded[1].y).toBe(expanded[2].y);
+  expect(expanded[0].x).toBeLessThan(expanded[1].x);
+  expect(expanded[1].x).toBeLessThan(expanded[2].x);
+  await window.screenshot({ path: testInfo.outputPath('tae-three-columns-expanded.png') });
+
+  await middle.getByRole('button', { name: '收起详情', exact: true }).click();
+  await expect(middle.getByTestId('tae-details-collapsed')).toBeVisible();
+  await expect(details).toHaveCount(1);
+  await expect(details).toBeHidden();
+  await expect(middle.getByRole('button', { name: '展开详情', exact: true })).toHaveAttribute('aria-expanded', 'false');
+  await expect(columns).toHaveCount(3);
+  const collapsed = await geometry();
+  expect(collapsed).toEqual(expanded);
+  await window.screenshot({ path: testInfo.outputPath('tae-three-columns-collapsed.png') });
+
+  await middle.getByRole('button', { name: '展开详情', exact: true }).click();
+  await expect(details).toBeVisible();
+  await expect(middle.getByRole('button', { name: '收起详情', exact: true })).toHaveAttribute('aria-expanded', 'true');
+  await expect(middle.getByRole('row', { name: /1 未命名/ })).toHaveAttribute('aria-selected', 'true');
+  await expect(eventTimeDraft).toHaveValue('6');
+  await eventTimeDraft.fill('0');
+  expect(await geometry()).toEqual(expanded);
 
   // 问题4-C：详情必须能关——点 × 关闭后详情不在，回到该动画。
   await window.getByRole('button', { name: '关闭词条详情' }).click();
@@ -602,7 +640,92 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   await window.getByRole('button', { name: '更新事件时间' }).click();
   await expect(window.getByTestId('tae-write-notice')).toContainText('事件时间已更新并重读验证');
 
+  await window.setViewportSize({ width: 820, height: 700 });
+  const narrow = await geometry();
+  expect(narrow[0].y).toBe(narrow[1].y);
+  expect(narrow[1].y).toBe(narrow[2].y);
+  expect(narrow[1].x).toBeLessThan(narrow[2].x);
+  expect(narrow[2].width).toBeGreaterThanOrEqual(220);
+  const geometryPath = testInfo.outputPath('tae-three-column-geometry.json');
+  fs.writeFileSync(geometryPath, JSON.stringify({ expanded, collapsed, narrow }, null, 2));
+  await testInfo.attach('tae-three-column-geometry', { path: geometryPath, contentType: 'application/json' });
+
   await window.screenshot({ path: 'test-results/18-animation-workbench.png' });
+  await app.close();
+});
+
+test('TAE 详情折叠保留数字、枚举和布尔字段草稿，切换事件仍重置字段', async ({}, testInfo) => {
+  const { app, window } = await launchApp();
+  await window.setViewportSize({ width: 1600, height: 1000 });
+  // Only the owned synthetic fixture's parameter read is replaced. This does not
+  // exercise native decoding or grant any write authority.
+  await app.evaluate(({ ipcMain }) => {
+    ipcMain.removeHandler('resource.readTaeEventParams');
+    ipcMain.handle('resource.readTaeEventParams', (_event, sourceUri, animId, eventIndex) => {
+      if (sourceUri !== 'fixture://action/c0000.tae' || animId !== 0 || ![0, 1].includes(eventIndex)) {
+        return { ok: false, diagnostics: [{ code: 'SYNTHETIC_TAE_PARAMS_OUT_OF_SCOPE', message: 'Unregistered synthetic event.' }] };
+      }
+      return {
+        ok: true,
+        data: {
+          eventTypeId: eventIndex + 1, templateName: 'synthetic-draft-regression',
+          fields: [
+            { index: 0, name: 'NumericDraft', type: 'f32', offset: 0, size: 4, value: eventIndex === 0 ? 1.5 : 9.5 },
+            { index: 1, name: 'EnumDraft', type: 'u8', offset: 4, size: 1, value: 0,
+              enumEntries: [{ value: 0, name: 'First' }, { value: 2, name: 'Second' }] },
+            { index: 2, name: 'BooleanDraft', type: 'b', offset: 5, size: 1, value: false },
+            { index: 3, name: 'Padding', type: 'u8', offset: 6, size: 1, value: 0, isPadding: true },
+            { index: 4, name: 'Constant', type: 'u8', offset: 7, size: 1, value: 7, assert: 7, assertValid: true }
+          ],
+          tailHex: null, undecodedHex: null
+        },
+        diagnostics: []
+      };
+    });
+  });
+  await openFixtureWorkspace(window);
+  await selectFileItem(window, 'action/c0000.tae');
+  await expandTaeAnimationGroup(window, 'a00');
+  await window.getByRole('region', { name: '动画' }).getByRole('row', { name: /a0000/ }).click();
+  const middle = window.getByRole('region', { name: '事件 / 词条' });
+  await middle.getByRole('row', { name: /1 未命名/ }).click();
+  const details = middle.getByTestId('tae-details');
+  const numeric = details.getByLabel('字段 NumericDraft');
+  const enumValue = details.getByLabel('字段 EnumDraft');
+  const booleanValue = details.getByLabel('字段 BooleanDraft');
+  await expect(numeric).toHaveValue('1.5');
+  await expect(enumValue).toHaveValue('0');
+  await expect(booleanValue).toHaveValue('false');
+  await expect(details.getByLabel('字段 Padding')).toBeDisabled();
+  await expect(details.getByLabel('字段 Constant')).toBeDisabled();
+  await numeric.fill('2.75');
+  await enumValue.selectOption('2');
+  await booleanValue.selectOption('true');
+  const fieldWrites = details.getByRole('button', { name: '写入', exact: true });
+  await expect(fieldWrites).toHaveCount(3);
+  for (const button of await fieldWrites.all()) await expect(button).toBeEnabled();
+  await middle.getByRole('button', { name: '收起详情', exact: true }).click();
+  await expect(details).toBeHidden();
+  await middle.getByRole('button', { name: '展开详情', exact: true }).click();
+  await expect(details).toBeVisible();
+  await expect.soft(numeric).toHaveValue('2.75');
+  await expect.soft(enumValue).toHaveValue('2');
+  await expect.soft(booleanValue).toHaveValue('true');
+  await window.screenshot({ path: testInfo.outputPath('tae-field-drafts-preserved.png') });
+
+  // Selecting another event while collapsed must still synchronize the mounted
+  // editor with that event's read; the previous drafts cannot leak into it.
+  await middle.getByRole('button', { name: '收起详情', exact: true }).click();
+  await middle.getByRole('row', { name: /2 未命名/ }).click();
+  await middle.getByRole('button', { name: '展开详情', exact: true }).click();
+  await expect(numeric).toHaveValue('9.5');
+  await expect(enumValue).toHaveValue('0');
+  await expect(booleanValue).toHaveValue('false');
+  await expect(details.getByLabel('字段 Padding')).toBeDisabled();
+  await expect(details.getByLabel('字段 Constant')).toBeDisabled();
+  for (const button of await fieldWrites.all()) await expect(button).toBeDisabled();
+  expect((await ipcCalls(app))['resource.commitTaeEvent'] ?? 0).toBe(0);
+  await window.screenshot({ path: testInfo.outputPath('tae-field-drafts-event-reset.png') });
   await app.close();
 });
 

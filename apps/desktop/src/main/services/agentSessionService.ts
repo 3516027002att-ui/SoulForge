@@ -1,9 +1,9 @@
 import { BoundedEventHistory } from '../../../../../packages/agent/src/eventHistory.mjs';
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { basename, join, relative, resolve, sep } from 'node:path';
-import { createAgentToolBridge, createConfirmationReceipt, createUnifiedDiff, CoreToolSession, openAgentCoreToolSession, createAgentToolContextProvider, createAgentRagSearch, listRolloutSessions, loadRolloutSession, createAgentRunAssembly, type AgentEvent, type ApprovalDecision, type ApprovalDiff, type ResumedRollout, type AgentSessionRunParams, type ToolContext, type ToolRegistry, type WorkspaceIndex, type WorkspaceSession } from '@soulforge/core';
+import { createAgentToolBridge, createConfirmationReceipt, createUnifiedDiff, CoreToolSession, openAgentCoreToolSession, createAgentToolContextProvider, createAgentRagSearch, isPathInside, listRolloutSessions, loadRolloutSession, createAgentRunAssembly, type AgentEvent, type ApprovalDecision, type ApprovalDiff, type ResumedRollout, type AgentSessionRunParams, type ToolContext, type ToolRegistry, type WorkspaceIndex, type WorkspaceSession } from '@soulforge/core';
 import type { ConfirmationReceipt } from '@soulforge/shared';
 import type { AiAgentRunRequest, AiAgentRunIpcResult, AiAgentCancelIpcResult, AiAgentEventEnvelope, AiAgentSessionLifecycleEvent, AiAgentEventReplayIpcResult, AiAgentSessionListIpcResult, AiAgentSessionLoadIpcResult } from '../../ipc/publicTypes.js';
 import type { MemoryManager } from '../memoryManager.js';
@@ -105,52 +105,73 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
     }
   };
 
-  function findRolloutInSessions(base: string, targetFileName: string): string | null {
-    const root = join(base, 'sessions');
-    if (!existsSync(root)) return null;
-    try {
-      const years = readdirSync(root);
-      for (const year of years) {
-        const yearPath = join(root, year);
-        const months = readdirSync(yearPath);
-        for (const month of months) {
-          const monthPath = join(yearPath, month);
-          const days = readdirSync(monthPath);
-          for (const day of days) {
-            const candidate = join(monthPath, day, targetFileName);
-            if (existsSync(candidate)) return candidate;
-          }
+  type SessionPathResolution = { ok: true; absolute: string } | { ok: false; error: { code: string; message: string } };
+  const checkPhysicalPath = (candidate: string): SessionPathResolution => {
+      try {
+        const physicalBase = realpathSync(agentSessionsBaseDir);
+        const physicalPath = realpathSync(candidate);
+        if (!isPathInside(physicalBase, physicalPath)) {
+          return { ok: false, error: { code: 'ROLLOUT_PATH_FORBIDDEN', message: '会话路径必须位于会话目录内。' } };
         }
+        // Read the checked target, so retargeting a directory/file alias after
+        // resolution cannot redirect the loader through that original alias.
+        return { ok: true, absolute: physicalPath };
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        return { ok: false, error: code === 'ENOENT'
+          ? { code: 'ROLLOUT_NOT_FOUND', message: '会话记录不存在。' }
+          : { code: 'ROLLOUT_READ_FAILED', message: '无法解析会话路径。' } };
       }
-    } catch {
-      // 目录并发或权限异常静默跳过
-    }
-    return null;
+  };
+
+  function findRolloutInSessions(base: string, targetFileName: string): SessionPathResolution | null {
+    let blocked: SessionPathResolution | null = null;
+    const visit = (directory: string, remainingLevels: number): SessionPathResolution | null => {
+      const checked = checkPhysicalPath(directory);
+      if (!checked.ok) {
+        if (checked.error.code === 'ROLLOUT_PATH_FORBIDDEN') blocked = checked;
+        return null;
+      }
+      if (remainingLevels === 0) {
+        const candidate = join(checked.absolute, targetFileName);
+        return existsSync(candidate) ? checkPhysicalPath(candidate) : null;
+      }
+      let entries: string[];
+      try { entries = readdirSync(checked.absolute); }
+      catch { return null; }
+      for (const entry of entries) {
+        const found = visit(join(checked.absolute, entry), remainingLevels - 1);
+        if (found?.ok) return found;
+        if (found) blocked = found;
+      }
+      return null;
+    };
+    return visit(join(base, 'sessions'), 3) ?? blocked;
   }
 
-  const resolveSessionPath = (sessionPath: string): { ok: true; absolute: string } | { ok: false; error: { code: string; message: string } } => {
+  const resolveSessionPath = (sessionPath: string): SessionPathResolution => {
     const base = resolve(agentSessionsBaseDir);
     const normalized = sessionPath.replace(/^[\\/]+/, '');
     const absolute = resolve(base, normalized);
     if (absolute !== base && !absolute.startsWith(base + sep)) {
       return { ok: false, error: { code: 'ROLLOUT_PATH_FORBIDDEN', message: '会话路径必须位于会话目录内。' } };
     }
-    if (existsSync(absolute)) return { ok: true, absolute };
+    if (existsSync(absolute)) return checkPhysicalPath(absolute);
 
     // 兼容直接传入纯文件名（如 rollout-2026-09-06T...jsonl）：优先按时间戳解析 sessions/YYYY/MM/DD/ 子目录
     const fileName = basename(normalized);
     const match = /^rollout-(\d{4})-(\d{2})-(\d{2})T/i.exec(fileName);
     if (match) {
       const candidate = join(base, 'sessions', match[1]!, match[2]!, match[3]!, fileName);
-      if (existsSync(candidate)) return { ok: true, absolute: candidate };
+      if (existsSync(candidate)) return checkPhysicalPath(candidate);
     }
     const candidateDirect = join(base, 'sessions', fileName);
-    if (existsSync(candidateDirect)) return { ok: true, absolute: candidateDirect };
+    if (existsSync(candidateDirect)) return checkPhysicalPath(candidateDirect);
 
     const searched = findRolloutInSessions(base, fileName);
-    if (searched && existsSync(searched)) return { ok: true, absolute: searched };
+    if (searched) return searched;
 
-    return { ok: true, absolute };
+    return { ok: false, error: { code: 'ROLLOUT_NOT_FOUND', message: '会话记录不存在。' } };
   };
 
   function freezeOwnedEvent(value: unknown): void {

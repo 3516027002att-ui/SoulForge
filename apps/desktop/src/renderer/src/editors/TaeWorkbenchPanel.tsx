@@ -1,14 +1,14 @@
 /**
  * ANIMATION-56B / T3（2026-08-15）：动作工作台（grok T3，对照 DSAS）。
  *
- * 四栏工作台：`[动作 | 词条 | 详情 | 动作视图]`；动作组按原生 TAE child 折叠。
+ * 三栏工作台：`[动作 | 词条（含可折叠详情） | 动作视图]`；动作组按原生 TAE child 折叠。
  *
- * ── T3 重构（行为 + 动画合并为「动作」）+ 底部 IDE 终端式详情 ──
+ * ── T3 重构（行为 + 动画合并为「动作」）+ 中栏词条详情 ──
  *
  * 左栏列动画 id（hkxName 去扩展，如 a000_003013；无 hkxName 用 a000_ + 6位 id）。
  * 次栏列当前动画的词条事件列表——事件名称与参数字段来自内置 first-party
- * registry；选中后详情在底部独立面板展示起止帧、枚举和全部已覆盖字段，参数尾部
- * 原始字节仍单独保留，支持拖拽调高、独立滚动。
+ * registry；选中后详情在中栏下方展示起止帧、枚举和全部已覆盖字段，参数尾部
+ * 原始字节仍单独保留，详情与词条列表独立滚动。
  * 右栏是只读动作视图（S17）：
  * `read-chrbnd-flver-preview`（已登记进 AdvertisedCommands）从 overlay 或原版
  * chr/<id>.chrbnd.dcx 取伴生 FLVER，renderer 按 meshIndex=0..meshCount-1 循环读齐
@@ -24,7 +24,7 @@
  *
  * ── 写回（ANIMATION-56C 保留，收进详情栏）──
  *
- * 详情栏在选中事件时保留「编辑事件时间」（问题4-C：独立第四栏前的第三栏、可关，
+ * 中栏详情在选中事件时保留「编辑事件时间」（问题4-C：可关，
  * 起始帧/结束帧只留一套、**按帧编辑**、提交时 /30 换秒），经 preload 的
  * commitTaeEvent（write-tae-document）提交。mutation 定位用 animId + 事件表下标：
  * eventIndex 是选中事件在其动画 events 数组内的下标（中栏词条列表就是该动画的
@@ -33,13 +33,12 @@
  * （refreshedDocument）；失败展示 diagnostics + 回滚提示。提交期间禁用重复提交。
  * 写回不经过通用文本保存/字节直写，只有 commitTaeEvent 一个 typed 出口。右栏仍只负责动作预览。
  *
- * ── 词条详情（底部 IDE 终端式面板，对照 DSAS）──
+ * ── 词条详情（中栏可折叠区域）──
  *
- * 点一条词条，详情沉到底部独立面板展示（独立滚动，不与词条/动画列表共享滚动）；
+ * 点一条词条，详情在中栏下方展示（独立滚动，不与词条/动画列表共享滚动）；
  * 未选中时显示「选中词条以编辑」空态。必须能关：栏内 × 或再点同一条词条取消
- * （两者都支持），关闭后 selected.kind 回到 animation，详情卸掉。面板高度受控
- * state（默认 280px，min 160 max 60% 视口），顶部 6px drag handle 支持 pointer
- * 拖拽调高。起始帧/结束帧只留一套（主单位帧、旁边小字 ≈ 秒），禁止
+ * （两者都支持），关闭后 selected.kind 回到 animation，详情卸掉。收起详情保留
+ * 当前选择与编辑草稿，不改变左右栏宽度。起始帧/结束帧只留一套（主单位帧、旁边小字 ≈ 秒），禁止
  * 「编辑事件时间（update-event-times，内部秒）」协议名上屏，内部 mutation 仍走秒。
  *
  * ── 分页 ──
@@ -1484,92 +1483,99 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           id: 'events',
            title: '事件 / 词条',
            hint: selectedAnimation ? `${selectedAnimationEvents.length} 个事件` : '—',
-          initialFlex: 0.28,
+          initialFlex: 0.56,
           minWidth: 220,
           children: (
-            <div className="wb-list">
-              {mergedDocument === null && <p className="wb-empty">先选择 .tae / .anibnd.dcx 文件。</p>}
-              {mergedDocument !== null && selectedAnimation === undefined && (
-                <p className="wb-empty" data-testid="tae-events-pick-animation">
-                  选中左侧动画以查看其词条事件列表。
-                </p>
-              )}
-              {mergedDocument !== null && selectedAnimation !== undefined && (
-                <>
-                  <div className="wb-list__group-label">
-                    词条 · 动画 {selectedAnimation.animId}
-                    {' · '}{actionAnimationGroupLabel(selectedAnimation)}
-                    {selectedAnimation.hkxName ? `（${animationIdLabel(selectedAnimation)}）` : ''}
-                  </div>
-                  {selectedAnimationEvents.map((event, index) => {
-                    const invalid = isInvalidTimeRange(event.startTime, event.endTime);
-                    const typeName = eventTypeNames.get(event.eventTypeId) ?? '未命名';
-                    const isTriggering = !invalid && event.startTime <= playbackTime && playbackTime <= event.endTime;
-                    const rowClass = [
-                      'wb-row',
-                      invalid ? 'wb-row--failed' : '',
-                      isTriggering ? 'is-triggering' : ''
-                    ].filter(Boolean).join(' ');
-                    return (
-                      <div
-                        key={`${taeAnimationIdentityKey(selectedAnimation)}-${index}`}
-                        className={rowClass}
-                        {...selectableRowAttributes({
-                          selected: selected?.kind === 'event' && selected.eventIndex === index,
-                          isTabEntry: false,
-                          onSelect: () => selectEvent(index)
-                        })}
-                        title={`${event.eventTypeId} ${typeName}`}
-                      >
-                        <span className="wb-row__name" title={`${event.eventTypeId} ${typeName}`}>
-                          {event.eventTypeId} {typeName}
-                        </span>
-                        <span className="wb-row__meta">
-                          {invalid ? '非法时间' : `帧 ${secondsToFrame(event.startTime)}–${secondsToFrame(event.endTime)}`}
-                        </span>
-                      </div>
-                    );
-                  })}
-                  {selectedAnimationEvents.length === 0 && (
-                    <p className="wb-empty">该动画没有可显示的词条事件。</p>
+            <div className="tae-events-body">
+              <div className="wb-list tae-events-list">
+                {mergedDocument === null && <p className="wb-empty">先选择 .tae / .anibnd.dcx 文件。</p>}
+                {mergedDocument !== null && selectedAnimation === undefined && (
+                  <p className="wb-empty" data-testid="tae-events-pick-animation">
+                    选中左侧动画以查看其词条事件列表。
+                  </p>
+                )}
+                {mergedDocument !== null && selectedAnimation !== undefined && (
+                  <>
+                    <div className="wb-list__group-label">
+                      词条 · 动画 {selectedAnimation.animId}
+                      {' · '}{actionAnimationGroupLabel(selectedAnimation)}
+                      {selectedAnimation.hkxName ? `（${animationIdLabel(selectedAnimation)}）` : ''}
+                    </div>
+                    {selectedAnimationEvents.map((event, index) => {
+                      const invalid = isInvalidTimeRange(event.startTime, event.endTime);
+                      const typeName = eventTypeNames.get(event.eventTypeId) ?? '未命名';
+                      const isTriggering = !invalid && event.startTime <= playbackTime && playbackTime <= event.endTime;
+                      const rowClass = [
+                        'wb-row',
+                        invalid ? 'wb-row--failed' : '',
+                        isTriggering ? 'is-triggering' : ''
+                      ].filter(Boolean).join(' ');
+                      return (
+                        <div
+                          key={`${taeAnimationIdentityKey(selectedAnimation)}-${index}`}
+                          className={rowClass}
+                          {...selectableRowAttributes({
+                            selected: selected?.kind === 'event' && selected.eventIndex === index,
+                            isTabEntry: false,
+                            onSelect: () => selectEvent(index)
+                          })}
+                          title={`${event.eventTypeId} ${typeName}`}
+                        >
+                          <span className="wb-row__name" title={`${event.eventTypeId} ${typeName}`}>
+                            {event.eventTypeId} {typeName}
+                          </span>
+                          <span className="wb-row__meta">
+                            {invalid ? '非法时间' : `帧 ${secondsToFrame(event.startTime)}–${secondsToFrame(event.endTime)}`}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {selectedAnimationEvents.length === 0 && (
+                      <p className="wb-empty">该动画没有可显示的词条事件。</p>
+                    )}
+                  </>
+                )}
+              </div>
+              <section className="tae-details-section" aria-label="详情">
+                <header className="workbench__column-header">
+                  <h3 className="workbench__column-title">详情</h3>
+                  <span className="workbench__column-hint">{selected?.kind === 'event' ? '词条详情' : '—'}</span>
+                  <button
+                    type="button"
+                    className="workbench__column-action"
+                    aria-label={detailsCollapsed ? '展开详情' : '收起详情'}
+                    aria-expanded={!detailsCollapsed}
+                    onClick={() => setDetailsCollapsed((collapsed) => !collapsed)}
+                  >
+                    {detailsCollapsed ? '展开' : '收起'}
+                  </button>
+                </header>
+                <div className="wb-list tae-details-body">
+                  {detailsCollapsed && (
+                    <p className="wb-empty" data-testid="tae-details-collapsed">详情已收起，点击“展开”继续查看。</p>
                   )}
-                </>
-              )}
-            </div>
-          )
-        },
-        {
-          id: 'details',
-          title: '详情',
-          hint: selected?.kind === 'event' ? '词条详情' : '—',
-          headerAction: {
-            label: detailsCollapsed ? '展开' : '收起',
-            ariaLabel: detailsCollapsed ? '展开详情栏' : '收起详情栏',
-            onClick: () => setDetailsCollapsed((collapsed) => !collapsed)
-          },
-          initialFlex: 0.28,
-          minWidth: 240,
-          children: (
-            <div className="wb-list">
-              {detailsCollapsed ? (
-                <p className="wb-empty" data-testid="tae-details-collapsed">详情栏已收起，点击“展开”继续查看。</p>
-              ) : selected?.kind === 'event' && selectedEvent ? (
-                <TaeEventDetail
-                  event={selectedEvent}
-                  eventIndex={selectedEventIndex}
-                  eventTypeName={eventTypeNames.get(selectedEvent.eventTypeId) ?? '未命名'}
-                  eventParams={eventParams}
-                  timeDraft={timeDraft}
-                  saving={saving}
-                  writeNotice={writeNotice}
-                  onTimeDraftChange={(draft) => setTimeDraft(draft)}
-                  onSubmitTime={() => void submitTimeEdit()}
-                  onSubmitField={(field, value) => void submitFieldEdit(field, value)}
-                  onClose={closeEventDetail}
-                />
-              ) : (
-                <p className="wb-empty" data-testid="tae-details-empty">选中词条以编辑</p>
-              )}
+                  {/* Preserve local field drafts while collapsed; event/params changes still synchronize the editor. */}
+                  <div hidden={detailsCollapsed}>
+                    {selected?.kind === 'event' && selectedEvent ? (
+                      <TaeEventDetail
+                        event={selectedEvent}
+                        eventIndex={selectedEventIndex}
+                        eventTypeName={eventTypeNames.get(selectedEvent.eventTypeId) ?? '未命名'}
+                        eventParams={eventParams}
+                        timeDraft={timeDraft}
+                        saving={saving}
+                        writeNotice={writeNotice}
+                        onTimeDraftChange={(draft) => setTimeDraft(draft)}
+                        onSubmitTime={() => void submitTimeEdit()}
+                        onSubmitField={(field, value) => void submitFieldEdit(field, value)}
+                        onClose={closeEventDetail}
+                      />
+                    ) : (
+                      <p className="wb-empty" data-testid="tae-details-empty">选中词条以编辑</p>
+                    )}
+                  </div>
+                </div>
+              </section>
             </div>
           )
         },

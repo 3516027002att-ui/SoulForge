@@ -8,6 +8,7 @@ import { createRequire } from 'node:module';
 import test from 'node:test';
 import { mkdirSync } from 'node:fs';
 import { discoverChecks } from './verify/checkRegistry.mjs';
+import { analyzeEntry } from './verify/classify.mjs';
 import { loadWorkspaces } from './verify/scriptGraph.mjs';
 import { planScript } from './verify/commandPlan.mjs';
 import { classifyOutcome, OUTCOME } from './verify/runner.mjs';
@@ -15,6 +16,163 @@ import {extractCaseEvidence} from './verify/runner.mjs';
 
 const runner = fileURLToPath(new URL('./check.mjs', import.meta.url));
 const compatibilityRunner = fileURLToPath(new URL('./verify.mjs', import.meta.url));
+
+test('owned registry and discovery contracts remain in the public check selection', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const registry = discoverChecks(root, loadWorkspaces(root));
+  const publicNames = [...registry.values()].filter(row => ['governance', 'unit'].includes(row.tier)).map(row => row.scriptName);
+  for (const source of ['scripts/governance-retirement.fixture.mjs', 'scripts/stale-validation.fixture.mjs',
+    'packages/core/src/testing/nativeFixtureRegistry.test.ts']) {
+    const name = `file:${source}`;
+    assert.ok(publicNames.includes(name), `${name} must run in public CI`);
+    assert.equal(registry.get(name).requirements.includes('native-env'), false, name);
+  }
+  for (const name of ['test:map-streaming-native', 'test:workspace-readiness-native',
+    'workspace:@soulforge/core:test:native-esd', 'workspace:@soulforge/core:test:emevd-corpus-matrix']) {
+    assert.equal(registry.get(name)?.tier, 'native', name);
+    assert.ok(registry.get(name)?.requirements.includes('native-env'), name);
+  }
+  assert.equal(registry.get('test:first-party-schema-package')?.tier, 'release');
+  assert.ok(registry.get('test:first-party-schema-package')?.requirements.includes('packaged-app'));
+});
+
+test('classification follows executable environment reads and native fallbacks instead of fixture text', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sf-check-env-access-'));
+  try {
+    const helper = join(root, 'helper.mjs');
+    const entry = join(root, 'proof.test.mjs');
+    writeFileSync(helper, `
+      export const labels = {SOULFORGE_NATIVE_FIXTURE_ROOT: 'native-env'};
+      export function resolveInput(options = {}) {
+        return options.fixtureRoot || process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
+          || process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+      }
+      export function roleRegistered() {
+        return Boolean(process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY && process.env.SOULFORGE_NATIVE_FIXTURE_ROOT);
+      }
+      export function defaultRoot(root=process.env.SOULFORGE_NATIVE_FIXTURE_ROOT) {return root;}
+      export function destructuredRoot({root=process.env.SOULFORGE_NATIVE_FIXTURE_ROOT}={}) {return root;}
+    `);
+    const check = (source, native) => {
+      writeFileSync(entry, source);
+      assert.equal(analyzeEntry(entry).requirements.includes('native-env'), native, source);
+    };
+    check(`import {labels} from './helper.mjs'; console.log(labels);
+      // process.env.SOULFORGE_SEKIRO_GAME_ROOT is documentation.
+      console.log('process.env.SOULFORGE_NATIVE_FIXTURE_ROOT');
+      const source = \`import '../helper.mjs'; process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY\`;
+      const env = {SOULFORGE_SEKIRO_GAME_ROOT: '/owned'};`, false);
+    check(`import {resolveInput as read} from './helper.mjs';
+      import {mkdtempSync} from 'node:fs'; import {tmpdir} from 'node:os'; import {join} from 'node:path';
+      const root = mkdtempSync(join(tmpdir(), 'sf-owned-')); read({fixtureRoot:root});`, false);
+    check(`import {resolveInput} from './helper.mjs'; resolveInput({fixtureRoot:'D:/private/native-corpus'});`, true);
+    check(`import {resolveInput} from './helper.mjs'; import {mkdtempSync} from 'node:fs';
+      const root=mkdtempSync(process.argv[2]); resolveInput({fixtureRoot:root});`, true);
+    check(`import {resolveInput} from './helper.mjs'; import {mkdtempSync} from 'node:fs';
+      import {tmpdir} from 'node:os';import {join} from 'node:path';
+      function run(mkdtempSync){const root=mkdtempSync(join(tmpdir(),'prefix-'));resolveInput({fixtureRoot:root});}run(()=>undefined);`, true);
+    check(`import {resolveInput} from './helper.mjs'; import {mkdtempSync} from 'node:fs';
+      import {tmpdir} from 'node:os';import {join} from 'node:path';
+      function run(){const mkdtempSync=()=>'';const root=mkdtempSync(join(tmpdir(),'prefix-'));resolveInput({fixtureRoot:root});}run();`, true);
+    for (const declaration of ["let mkdtempSync=()=>'';", "var mkdtempSync=()=>'';", "function mkdtempSync(){return '';}"]) {
+      check(`import {resolveInput} from './helper.mjs';import {mkdtempSync} from 'node:fs';
+        import {tmpdir} from 'node:os';import {join} from 'node:path';
+        function run(){${declaration}const root=mkdtempSync(join(tmpdir(),'prefix-'));resolveInput({fixtureRoot:root});}run();`, true);
+    }
+    check(`import {resolveInput} from './helper.mjs';import {mkdtempSync} from 'node:fs';
+      import {tmpdir} from 'node:os';import {join} from 'node:path';
+      class Harness{run(mkdtempSync){const root=mkdtempSync(join(tmpdir(),'prefix-'));resolveInput({fixtureRoot:root});}}
+      new Harness().run(()=>undefined);`, true);
+    check(`import {resolveInput} from './helper.mjs';import {mkdtempSync} from 'node:fs';
+      import {tmpdir} from 'node:os';import {join} from 'node:path';
+      const root=mkdtempSync(join(tmpdir(),'prefix-'));resolveInput({fixtureRoot:join(root,'..','private')});`, true);
+    check(`import {resolveInput} from './helper.mjs'; resolveInput();`, true);
+    check(`import {resolveInput} from './helper.mjs'; resolveInput({});`, true);
+    check(`import {resolveInput} from './helper.mjs'; resolveInput({fixtureRoot:''});`, true);
+    check(`import {resolveInput} from './helper.mjs'; resolveInput({fixtureRoot:process.argv[2]});`, true);
+    check(`import {resolveInput} from './helper.mjs'; resolveInput({fixtureRoot:'/owned'}); resolveInput();`, true);
+    check(`import {roleRegistered} from './helper.mjs'; roleRegistered();`, true);
+    check(`import {defaultRoot} from './helper.mjs'; defaultRoot();`, true);
+    check(`import {destructuredRoot} from './helper.mjs'; destructuredRoot();`, true);
+    check(`function go(root=process.env.SOULFORGE_NATIVE_FIXTURE_ROOT){return root;} go();`, true);
+    check(`function go({root=process.env.SOULFORGE_NATIVE_FIXTURE_ROOT}={}){return root;} go();`, true);
+    check(`import * as inputs from './helper.mjs'; inputs.roleRegistered();`, true);
+    check(`import {resolveInput} from './helper.mjs'; const options={fixtureRoot:'/owned'}; options.fixtureRoot=''; resolveInput(options);`, true);
+    check(`import {resolveInput} from './helper.mjs'; const options={fixtureRoot:'/owned'}; const alias=options; alias.fixtureRoot=''; resolveInput(options);`, true);
+    check(`import {resolveInput} from './helper.mjs'; const options={fixtureRoot:'/owned'}; delete options.fixtureRoot; resolveInput(options);`, true);
+    check(`import {resolveInput} from './helper.mjs'; const options={fixtureRoot:'/owned'}; Object.assign(options,{fixtureRoot:''}); resolveInput(options);`, true);
+    check(`function run() {function nested() {return process.env.SOULFORGE_NATIVE_FIXTURE_ROOT;} nested();} run();`, true);
+    check(`console.log(process.env['SOULFORGE_NATIVE_FIXTURE_ROOT']);`, true);
+    check(`const key='SOULFORGE_NATIVE_FIXTURE_ROOT'; console.log(process.env[key]);`, true);
+    check(`console.log(process.env[process.argv[2]]);`, true);
+    check(`const env=process.env; console.log(env.SOULFORGE_NATIVE_FIXTURE_ROOT);`, true);
+    check(`let env=process.env; console.log(env.SOULFORGE_NATIVE_FIXTURE_ROOT);`, true);
+    check(`var env=process.env; console.log(env.SOULFORGE_NATIVE_FIXTURE_ROOT);`, true);
+    check(`const {env}=process; console.log(env.SOULFORGE_NATIVE_FIXTURE_ROOT);`, true);
+    check(`const env=process['env']; console.log(env.SOULFORGE_NATIVE_FIXTURE_ROOT);`, true);
+    check(`const env={...process.env}; console.log(env.SOULFORGE_NATIVE_FIXTURE_ROOT);`, true);
+    check(`const holder={env:process.env}; console.log(holder.env.SOULFORGE_NATIVE_FIXTURE_ROOT);`, true);
+    check(`const {SOULFORGE_SEKIRO_GAME_ROOT: root} = process.env; console.log(root);`, true);
+    writeFileSync(join(root, 'forward.mjs'), `export {roleRegistered as selected} from './helper.mjs';`);
+    check(`import {selected} from './forward.mjs'; selected();`, true);
+    writeFileSync(join(root, 'forward.mjs'), `export * from './helper.mjs';`);
+    check(`import {roleRegistered} from './forward.mjs'; roleRegistered();`, true);
+    writeFileSync(join(root, 'owned.mjs'), `export function other(){return 'owned';}`);
+    writeFileSync(join(root, 'forward.mjs'), `export * from './helper.mjs';export * from './owned.mjs';`);
+    check(`import {roleRegistered} from './forward.mjs'; roleRegistered();`, true);
+    writeFileSync(join(root, 'forward.mjs'), `export default function () {return process.env.SOULFORGE_NATIVE_FIXTURE_ROOT;}`);
+    check(`import selected from './forward.mjs'; selected();`, true);
+    writeFileSync(helper, `export const input = process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY;`);
+    check(`import './helper.mjs';`, true);
+    assert.throws(() => analyzeEntry(entry, {maxFiles:1}), error => error.code === 'CHECK_CLASSIFICATION_INCOMPLETE'
+      && error.diagnostics[0].maxFiles === 1, 'incomplete closure cannot prove public inputs');
+    writeFileSync(entry, `import {readFileSync} from 'node:fs';
+      const payload='apps/desktop/release/win-unpacked/resources/app.asar';readFileSync(payload);`);
+    assert.ok(analyzeEntry(entry).requirements.includes('packaged-app'), 'a constant packaged path retains the release prerequisite');
+    writeFileSync(entry, `import {readFileSync} from 'node:fs';const resources='release/win-unpacked/resources';
+      readFileSync(\`\${resources}/app.asar\`);`);
+    assert.ok(analyzeEntry(entry).requirements.includes('packaged-app'), 'constant template paths retain packaging prerequisites');
+    writeFileSync(entry, `import {readFileSync} from 'node:fs';import {resolve} from 'node:path';
+      const root=process.cwd();const resources=resolve(root,'apps/desktop/release/win-unpacked/resources');
+      const payload=resolve(resources,'app.asar');readFileSync(payload);`);
+    assert.ok(analyzeEntry(entry).requirements.includes('packaged-app'), 'chained constant path segments retain packaging prerequisites');
+  } finally { rmSync(root, {recursive:true, force:true}); }
+});
+
+test('public selection executes owned input assertions while missing native inputs remain unavailable', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sf-check-owned-selection-'));
+  try {
+    mkdirSync(join(root, 'scripts'), {recursive:true});
+    writeFileSync(join(root, 'package.json'), JSON.stringify({scripts:{}}));
+    writeFileSync(join(root, 'scripts/input.mjs'), `
+      export function input(options = {}) {return options.fixtureRoot || process.env.SOULFORGE_NATIVE_FIXTURE_ROOT;}
+      export function registered() {return Boolean(process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY);}
+    `);
+    writeFileSync(join(root, 'scripts/owned.test.mjs'), `import test from 'node:test'; import assert from 'node:assert/strict';
+      import {mkdtempSync,rmSync} from 'node:fs';import {tmpdir} from 'node:os';import {join} from 'node:path';
+      import {input} from './input.mjs';test('owned root assertion',()=>{
+        const root=mkdtempSync(join(tmpdir(),'sf-owned-root-'));
+        try{assert.equal(input({fixtureRoot:root}),root);}finally{rmSync(root,{recursive:true,force:true});}});`);
+    writeFileSync(join(root, 'scripts/native.test.mjs'), `import test from 'node:test';import {registered} from './input.mjs';
+      test('missing native registry',{skip:!registered() && 'native corpus missing'},()=>{});`);
+    const env = {...process.env};
+    for (const key of ['SOULFORGE_NATIVE_FIXTURE_ROOT', 'SOULFORGE_NATIVE_FIXTURE_REGISTRY', 'SOULFORGE_SEKIRO_GAME_ROOT']) delete env[key];
+    const invoke = args => spawnSync(process.execPath, [runner, ...args, '--require-executed', '--case-evidence'],
+      {cwd:root, encoding:'utf8', env, timeout:30000});
+    const owned = invoke(['--tier', 'unit']);
+    assert.equal(owned.status, 0, owned.stderr || owned.stdout);
+    const publicReport = JSON.parse(owned.stdout);
+    assert.equal(publicReport.results.length, 1);
+    assert.equal(publicReport.results[0].scriptName, 'file:scripts/owned.test.mjs');
+    assert.equal(publicReport.results[0].steps[0].caseEvidence.passed, 1);
+    const native = invoke(['--tier', 'native']);
+    assert.equal(native.status, 1, native.stderr || native.stdout);
+    const nativeReport = JSON.parse(native.stdout);
+    assert.equal(nativeReport.results[0].status, 'unavailable');
+    assert.equal(nativeReport.results[0].steps[0].caseEvidence.skipped, 1);
+    assert.equal(nativeReport.completionVerified, false);
+  } finally { rmSync(root, {recursive:true, force:true}); }
+});
 
 test('damaged or explicitly failed case output cannot remain a passed check',()=>{
   const root=mkdtempSync(join(tmpdir(),'sf-damaged-evidence-'));

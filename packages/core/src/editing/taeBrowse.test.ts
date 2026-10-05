@@ -8,6 +8,8 @@ import { createOpaqueCursor, defaultReadSessionManager, parseOpaqueCursor } from
 import { readTaeBrowse, type TaeBrowseNativePage, type TaeBrowseResult } from './taeBrowse.js';
 import type { NativeEditSession } from './nativeEditSession.js';
 import type { TaeEventSnapshot } from './taeEdit.js';
+import { assertCursorPrivacy } from '../testing/harness/assertCursorPrivacy.js';
+import { pathToFileURL } from 'node:url';
 
 const hash = (bytes: string) => createHash('sha256').update(bytes).digest('hex');
 
@@ -43,7 +45,7 @@ async function fixture(run: (input: {
 }) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), 'sf-tae-browse-'));
   const filePath = join(root, 'chr/c0000.tae'); await mkdir(join(root, 'chr')); await writeFile(filePath, 'snapshot-A');
-  const edit = { session: { layers: { overlayRoot: root }, meta: { workspaceId: 'browse-test' } } } as NativeEditSession;
+  const edit = { session: { layers: { overlayRoot: root }, meta: { workspaceId: pathToFileURL(root).href } } } as NativeEditSession;
   const calls: Array<[number, number]> = [];
   const pages = [page(0, true, Array.from({ length: 64 }, (_, i) => event(i))),
     page(1, true, Array.from({ length: 64 }, (_, i) => event(64 + i))), page(2, false, [event(128), event(129)])];
@@ -56,6 +58,7 @@ async function fixture(run: (input: {
 
 test('broad browsing loads one native page and crosses it only after an explicit boundary cursor', async () => fixture(async input => {
   let result = success(await readTaeBrowse({ ...input, pageSize: 7 }));
+  assert.equal(assertCursorPrivacy(result, [input.root, pathToFileURL(input.root).href, input.root.split(/[\\/]/u).at(-1)!]), 1);
   assert.deepEqual(input.calls, [[0, 64]]);
   assert.equal(result.pagination.totalCount, null);
   assert.equal(result.pagination.totalPages, null);

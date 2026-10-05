@@ -20,6 +20,7 @@ import { noteOperationStarted, journalStateWithRequest } from '../packages/core/
 const require = createRequire(import.meta.url), root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const adapterPath = path.join(root, 'apps/desktop/src/main/ipc/agent.ts');
 const sessionServicePath = path.join(root, 'apps/desktop/src/main/services/agentSessionService.ts');
+const rolloutStoragePath = path.join(root, 'packages/core/src/model-services/fileRolloutStorage.ts');
 const evidenceServicePath = path.join(root, 'apps/desktop/src/main/services/agentEvidenceService.ts');
 const localServicePath = path.join(root, 'apps/desktop/src/main/services/agentLocalService.ts');
 const channels = ['ai.agent.permission.request', 'ai.tools', 'ai.memory.list', 'ai.memory.save', 'ai.memory.delete',
@@ -90,6 +91,24 @@ async function harness(options = {}) {
     const exports = {}; modules.set(filename, exports);
     vm.runInNewContext(built.outputText, { exports, module: { exports }, process, Buffer, console, AbortController, Float32Array, ...clock,
       require(name) {
+        if (filename === sessionServicePath && name === 'node:fs') {
+          const io = require(name);
+          return { ...io, readdirSync: (...args) => {
+            calls.push(['rolloutSyncIO', 'readdirSync', args[0]]);
+            return io.readdirSync(...args);
+          } };
+        }
+        if (filename === rolloutStoragePath) {
+          if (name === './rolloutRecorder.js' || name === '../workspace/pathBoundary.js') return realCore;
+          if (name === 'node:fs/promises') {
+            const io = require(name);
+            return { ...io, ...Object.fromEntries(['readdir', 'stat', 'readFile'].map(operation => [operation, async (...args) => {
+              calls.push(['rolloutIO', operation, args[0]]);
+              await options.beforeRolloutIO?.(operation, args[0]);
+              return io[operation](...args);
+            }])) };
+          }
+        }
         if (name.startsWith('node:')) return require(name);
         if (name === '@soulforge/core') return core;
         if (name === '@soulforge/shared') return realShared;
@@ -106,6 +125,12 @@ async function harness(options = {}) {
     }, { filename });
     return exports;
   }
+  const rolloutStorage = load(rolloutStoragePath);
+  Object.assign(core, rolloutStorage, { loadRolloutSession: async filename => {
+    calls.push(['loadRollout', filename]);
+    await options.beforeRolloutLoad?.(filename);
+    return rolloutStorage.loadRolloutSession(filename);
+  } });
   const api = load(adapterPath);
   const deps = { handle: (channel, listener) => handlers.set(channel, (...args) => { if (options.untrusted) throw new Error('IPC_UNTRUSTED_SENDER'); return listener(...args); }), webContents: target, toolRegistry: registry, memoryManager,
     modelServiceVault: { listConfigs: async () => options.noConfig ? [] : [{ ...stored, hasCredential: !options.noCredential }],
@@ -367,6 +392,160 @@ test('session list and bounded load use owned rollouts and reject path traversal
     assert.equal((await h.invoke('ai.agent.session.load', '../outside.jsonl')).error.code, 'ROLLOUT_PATH_FORBIDDEN');
   } finally { await h.close(); }
 });
+async function writeOwnedRollout(filename, content, sessionId = 'owned-rollout') {
+  const recorder = new realCore.RolloutRecorder(new realCore.FileRolloutStorage(filename), {
+    sessionId, startedAt: '2026-10-05T00:00:00.000Z', configId: 'owned-config',
+    protocol: 'openai-compatible', permissionMode: 'plan'
+  });
+  recorder.enqueue({ type: 'message', step: 1, message: { role: 'user', content } });
+  await recorder.close();
+}
+
+const directoryLinkType = process.platform === 'win32' ? 'junction' : 'dir';
+for (const layout of [
+  { name: 'direct directory link', request: 'linked/owned.jsonl', link: 'linked', target: 'outside', file: 'outside/owned.jsonl' },
+  { name: 'timestamp basename directory link', request: 'rollout-2026-10-05T00-00-00-owned.jsonl', link: 'sessions/2026', target: 'outside', file: 'outside/10/05/rollout-2026-10-05T00-00-00-owned.jsonl' },
+  { name: 'sessions root basename directory link', request: 'owned.jsonl', link: 'sessions', target: 'outside', file: 'outside/owned.jsonl' },
+  { name: 'recursive legacy basename directory link', request: 'legacy.jsonl', link: 'sessions/1989', target: 'outside', file: 'outside/04/12/legacy.jsonl' },
+  { name: 'file symlink', request: 'linked.jsonl', link: 'linked.jsonl', target: 'outside/owned.jsonl', file: 'outside/owned.jsonl', type: 'file' }
+]) {
+  test(`rollout physical boundary rejects ${layout.name} for load and resume`, async t => {
+    const h = await harness(), base = path.join(h.owned, 'agent');
+    try {
+      await writeOwnedRollout(path.join(h.owned, layout.file), 'External owned rollout sentinel.');
+      const link = path.join(base, layout.link);
+      await fs.promises.mkdir(path.dirname(link), { recursive: true });
+      try { await fs.promises.symlink(path.join(h.owned, layout.target), link, layout.type ?? directoryLinkType); }
+      catch (error) {
+        if (layout.type === 'file' && process.platform === 'win32' && ['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) {
+          t.skip(`Windows file symlink unavailable: ${error.code}; directory junction cases remain required.`); return;
+        }
+        throw error;
+      }
+      const loaded = await h.invoke('ai.agent.session.load', layout.request);
+      await h.request('plan', { resumeSessionPath: layout.request }); await h.waitEvent('session-done');
+      assert.equal(h.calls.find(([name]) => name === 'utilityRun')[1].resumeFrom, undefined, 'external history must not enter the resumed run');
+      assert.equal(loaded.ok, false, `${layout.name} must not expose the external rollout`);
+      assert.equal(loaded.error.code, 'ROLLOUT_PATH_FORBIDDEN');
+      assert.equal(h.calls.filter(([name]) => name === 'loadRollout').length, 0, 'refusal must happen before external reads');
+      for (const [, operation, filename] of h.calls.filter(([name]) => name === 'rolloutSyncIO')) {
+        assert.equal(realCore.isPathInside(await fs.promises.realpath(base), await fs.promises.realpath(filename)), true,
+          `${operation} must not enumerate an external directory while locating a legacy basename`);
+      }
+      assert.equal(JSON.stringify(h.calls.filter(([name]) => name === 'complete')).includes('External owned rollout sentinel.'), false);
+    } finally { await h.close(); }
+  });
+}
+
+test('rollout physical boundary preserves direct and legacy basename load and resume', async () => {
+  const h = await harness(), base = path.join(h.owned, 'agent');
+  try {
+    for (const [request, stored] of [
+      ['direct.jsonl', 'direct.jsonl'],
+      ['rollout-2026-10-05T00-00-00-owned.jsonl', 'sessions/2026/10/05/rollout-2026-10-05T00-00-00-owned.jsonl'],
+      ['old-root.jsonl', 'sessions/old-root.jsonl'],
+      ['legacy.jsonl', 'sessions/1989/04/12/legacy.jsonl']
+    ]) {
+      await writeOwnedRollout(path.join(base, stored), `Owned history ${request}`);
+      const loaded = await h.invoke('ai.agent.session.load', request);
+      assert.equal(loaded.ok, true, request); assert.equal(loaded.parseErrors, 0);
+      assert.equal(loaded.messagesPage[0].content, `Owned history ${request}`);
+    }
+    await h.request('plan', { resumeSessionPath: 'legacy.jsonl' }); await h.waitEvent('session-done');
+    const run = h.calls.find(([name]) => name === 'utilityRun')[1];
+    assert.equal(run.resumeFrom.messages[0].content, 'Owned history legacy.jsonl');
+    assert.equal((await h.invokeAs(99, 'ai.agent.events', run.sessionId)).error.code, 'AGENT_SESSION_FORBIDDEN');
+    assert.equal((await h.invoke('ai.agent.session.load', 'missing.jsonl')).error.code, 'ROLLOUT_NOT_FOUND');
+    const empty = await harness();
+    try { assert.equal((await empty.invoke('ai.agent.session.load', 'missing.jsonl')).error.code, 'ROLLOUT_NOT_FOUND'); }
+    finally { await empty.close(); }
+  } finally { await h.close(); }
+});
+
+test('rollout physical boundary reads the checked target when an in-root directory alias is retargeted', async () => {
+  let alias, outside;
+  const h = await harness({ beforeRolloutLoad: async () => {
+    await fs.promises.unlink(alias); await fs.promises.symlink(outside, alias, directoryLinkType);
+  } }), base = path.join(h.owned, 'agent');
+  try {
+    const internal = path.join(base, 'safe'); outside = path.join(h.owned, 'outside'); alias = path.join(base, 'linked');
+    await writeOwnedRollout(path.join(internal, 'owned.jsonl'), 'Owned internal history.');
+    await writeOwnedRollout(path.join(outside, 'owned.jsonl'), 'External owned rollout sentinel.');
+    await fs.promises.symlink(internal, alias, directoryLinkType);
+    const loaded = await h.invoke('ai.agent.session.load', 'linked/owned.jsonl');
+    assert.equal(loaded.ok, true); assert.equal(loaded.messagesPage[0].content, 'Owned internal history.');
+    assert.equal(h.calls.find(([name]) => name === 'loadRollout')[1], fs.realpathSync(path.join(internal, 'owned.jsonl')));
+  } finally { await h.close(); }
+});
+
+for (const layout of [
+  { name: 'sessions root junction', link: 'sessions', target: 'outside', file: 'outside/2026/10/05/external.jsonl' },
+  { name: 'year junction', link: 'sessions/2026', target: 'outside', file: 'outside/10/05/external.jsonl' },
+  { name: 'month junction', link: 'sessions/2026/10', target: 'outside', file: 'outside/05/external.jsonl' },
+  { name: 'day junction', link: 'sessions/2026/10/05', target: 'outside', file: 'outside/external.jsonl' },
+  { name: 'file symlink', link: 'sessions/2026/10/05/external.jsonl', target: 'outside/external.jsonl', file: 'outside/external.jsonl', type: 'file' }
+]) {
+  test(`rollout list physical boundary rejects ${layout.name} before enumeration and file reads`, async t => {
+    const h = await harness(), base = path.join(h.owned, 'agent');
+    try {
+      await writeOwnedRollout(path.join(h.owned, layout.file), 'External owned history.', 'external-owned-meta-sentinel');
+      const link = path.join(base, layout.link);
+      await fs.promises.mkdir(path.dirname(link), { recursive: true });
+      try { await fs.promises.symlink(path.join(h.owned, layout.target), link, layout.type ?? directoryLinkType); }
+      catch (error) {
+        if (layout.type === 'file' && process.platform === 'win32' && ['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) {
+          t.skip(`Windows file symlink unavailable: ${error.code}; directory junction cases remain required.`); return;
+        }
+        throw error;
+      }
+      const listed = await h.invoke('ai.agent.sessions');
+      assert.equal(listed.ok, true); assert.deepEqual(plain(listed.sessions), []);
+      for (const [, operation, filename] of h.calls.filter(([name]) => name === 'rolloutIO')) {
+        assert.equal(realCore.isPathInside(await fs.promises.realpath(base), await fs.promises.realpath(filename)), true,
+          `${operation} must not inspect an external directory or read an external file`);
+      }
+    } finally { await h.close(); }
+  });
+}
+
+test('rollout list physical boundary preserves ordinary and legacy filenames and tolerates missing entries', async () => {
+  const h = await harness(), base = path.join(h.owned, 'agent');
+  try {
+    assert.deepEqual(plain((await h.invoke('ai.agent.sessions')).sessions), []);
+    for (const filename of ['rollout-2026-10-05T00-00-00-owned.jsonl', 'legacy-owned.jsonl']) {
+      await writeOwnedRollout(path.join(base, 'sessions/2026/10/05', filename), 'Owned history.', filename);
+    }
+    await fs.promises.symlink(path.join(h.owned, 'missing-year'), path.join(base, 'sessions/missing'), directoryLinkType);
+    const listed = await h.invoke('ai.agent.sessions'); assert.equal(listed.ok, true); assert.equal(listed.sessions.length, 2);
+    assert.deepEqual(plain(listed.sessions.map(item => item.fileName).sort()), ['legacy-owned.jsonl', 'rollout-2026-10-05T00-00-00-owned.jsonl']);
+    assert.equal(listed.sessions.every(item => item.messageCount === 1 && item.parseErrors === 0), true);
+    for (const item of listed.sessions) {
+      assert.equal(item.sessionPath, path.join('sessions/2026/10/05', item.fileName));
+      assert.equal((await h.invoke('ai.agent.session.load', item.sessionPath)).ok, true);
+    }
+  } finally { await h.close(); }
+});
+
+test('rollout list physical boundary reads checked targets while keeping lexical paths after alias retargeting', async () => {
+  let alias, outside, retargeted = false;
+  const h = await harness({ beforeRolloutIO: async operation => {
+    if (operation !== 'stat' || retargeted) return;
+    retargeted = true; await fs.promises.unlink(alias); await fs.promises.symlink(outside, alias, directoryLinkType);
+  } }), base = path.join(h.owned, 'agent');
+  try {
+    const internal = path.join(base, 'safe-year'); outside = path.join(h.owned, 'outside-year'); alias = path.join(base, 'sessions/2026');
+    await writeOwnedRollout(path.join(internal, '10/05/owned.jsonl'), 'Owned internal history.', 'internal-owned-meta');
+    await writeOwnedRollout(path.join(outside, '10/05/owned.jsonl'), 'External owned history.', 'external-owned-meta-sentinel');
+    await fs.promises.mkdir(path.dirname(alias), { recursive: true }); await fs.promises.symlink(internal, alias, directoryLinkType);
+    const listed = await h.invoke('ai.agent.sessions');
+    assert.equal(retargeted, true); assert.equal(listed.ok, true); assert.equal(listed.sessions.length, 1);
+    assert.equal(listed.sessions[0].sessionId, 'internal-owned-meta');
+    assert.equal(listed.sessions[0].sessionPath, path.join('sessions/2026/10/05/owned.jsonl'));
+    assert.equal(h.calls.find(([name, operation]) => name === 'rolloutIO' && operation === 'readFile')[2],
+      await fs.promises.realpath(path.join(internal, '10/05/owned.jsonl')));
+  } finally { await h.close(); }
+});
+
 test('manual embedding without a workspace and read-only local status never start a model', async () => {
   const h = await harness(); try { assert.equal((await h.invoke('rag.embed', {})).error.code, 'WORKSPACE_REQUIRED');
     assert.equal((await h.invoke('rag.localModelStatus')).state, 'unavailable'); assert.equal(h.calls.filter(([name]) => name === 'embeddingEnsure').length, 0);

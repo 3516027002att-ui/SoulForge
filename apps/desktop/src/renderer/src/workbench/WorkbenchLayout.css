@@ -33,28 +33,6 @@
   overflow-x: auto; overflow-y: hidden;
 }
 
-/*
- * ACTION 是唯一同时需要动画、事件、详情和 viewport 的四栏工作台。
- * Agent 抽屉打开后，主区可能只有约 520px；继续沿用四个 220px 的最小宽度
- * 会把最后的 viewport 推到主区外，DOM 虽然存在，用户却完全看不到。只对
- * ACTION 使用两行两栏的紧凑投影，桌面宽度仍保留可拖拽的四栏布局。
- */
-@container (max-width: 900px) {
-  .tae-workbench .workbench__columns {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
-    overflow: auto;
-    align-items: stretch;
-  }
-  .tae-workbench .workbench__column-slot {
-    width: auto !important;
-    min-width: 0 !important;
-    min-height: 0;
-    flex: 1 1 auto !important;
-  }
-  .tae-workbench .workbench__resizer { display: none; }
-}
 .workbench__column-slot { display: flex; min-width: 0; min-height: 0; position: relative; }
 .workbench__column {
   flex: 1; display: flex; flex-direction: column;

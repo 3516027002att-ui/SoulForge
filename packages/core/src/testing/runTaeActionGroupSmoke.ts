@@ -9,6 +9,9 @@ import { createAgentToolBridge } from '../ai/agentToolBridge.js';
 import { createDefaultToolRegistry } from '../ai/toolRegistry.js';
 import type { NativeEditSession } from '../editing/nativeEditSession.js';
 import type { TaeExport } from '@soulforge/shared';
+import { assertCursorPrivacy } from './harness/assertCursorPrivacy.js';
+import { pathToFileURL } from 'node:url';
+import { defaultReadSessionManager, parseOpaqueCursor } from '@soulforge/shared';
 
 const sourceUri = 'file://chr/c0000.anibnd.dcx';
 const events = Array.from({ length: 160 }, (_, index) => ({
@@ -20,11 +23,13 @@ const events = Array.from({ length: 160 }, (_, index) => ({
 const bundle: TaeExport = { chrId: 'c0000', sourceUri, readerSchemaRevision: 2,
   animations: [{ animId: 10, code: 'A0010', taeEntryIndex: 2, eventCount: 160, eventsComplete: true, events },
     { animId: 20, code: 'A0020', taeEntryIndex: 2, eventCount: 1, eventsComplete: true, events: [{ ...events[0]!, uri: 'action://c0000/entry/2/A0020/e0', typeName: 'UniqueNeedle' }] }] };
-const index = new WorkspaceIndex('tae-group-test'); index.upsertTaeExport(bundle);
+const privateWorkspace = 'file:///home/alice/private-mod-workspace';
+const index = new WorkspaceIndex(privateWorkspace); index.upsertTaeExport(bundle);
 const registry = createDefaultToolRegistry();
 const found = await registry.run('search_tae_events', { query: 'UniqueNeedle', limit: 1, pageSize: 128 }, { workspaceIndex: index, mode: 'plan' });
 assert.equal(found.ok, true);
 const data = found.data as any;
+assert.ok(assertCursorPrivacy(data, [privateWorkspace, '/home/alice', 'private-mod-workspace']) >= 2);
 assert.equal(data.total, 2, 'limit counts actions, not matching events');
 assert.equal(data.matches.length, 1);
 assert.equal(data.matches[0].item.animId, 10);
@@ -34,6 +39,7 @@ assert.equal(data.matches[0].item.pagination.totalPages, 2);
 assert.equal(data.matches[0].item.pagination.nextRead.args.offset, data.matches[0].item.events.length);
 const model = await createAgentToolBridge({ registry, context: { workspaceIndex: index, mode: 'plan' } }).executeTool({ id: 'group', name: 'search_tae_events', argumentsJson: JSON.stringify({ query: 'UniqueNeedle', limit: 1, pageSize: 7 }) });
 assert.equal(model.ok, true);
+assert.ok(assertCursorPrivacy(JSON.parse(model.content), [privateWorkspace, '/home/alice', 'private-mod-workspace']) >= 2);
 assert.equal(JSON.parse(model.content).data.record.matches[0].item.events.length, 7, 'Agent transport must preserve every delivered sibling');
 const second = await registry.run('search_tae_events', { cursor: data.nextCursor }, { workspaceIndex: index, mode: 'plan' });
 assert.equal((second.data as any).matches[0].item.animId, 20);
@@ -49,7 +55,21 @@ const hooks = registerHooks({
 });
 try {
   const { readTaeEvents } = await import(new URL('../editing/taeEdit.js?group-test', import.meta.url).href) as typeof import('../editing/taeEdit.js');
-  const edit = { session: { layers: { overlayRoot: root }, meta: { workspaceId: 'group-read' }, resolveWritablePath: (absolutePath: string) => ({ ok: true, absolutePath, diagnostics: [] }) }, allowedRoots: () => [root] } as unknown as NativeEditSession;
+  const edit = { session: { layers: { overlayRoot: root }, meta: { workspaceId: pathToFileURL(root).href }, resolveWritablePath: (absolutePath: string) => ({ ok: true, absolutePath, diagnostics: [] }) }, allowedRoots: () => [root] } as unknown as NativeEditSession;
+  const initial = await readTaeEvents({ edit, file, addresses: ['c0000#A0010'], pageSize: 7 });
+  assert.equal(initial.ok, true);
+  if (initial.ok) {
+    assert.equal(assertCursorPrivacy(initial, [root, pathToFileURL(root).href, root.split(/[\\/]/u).at(-1)!]), 1);
+    const otherEdit = { ...edit, session: { ...edit.session, meta: { ...edit.session.meta, workspaceId: 'other-workspace' } } } as NativeEditSession;
+    const crossed = await readTaeEvents({ edit: otherEdit, file, addresses: ['c0000#A0010'], cursor: initial.pagination.nextCursor! });
+    assert.equal(crossed.ok, false, 'an exact-action host session must reject another workspace');
+    if (!crossed.ok) assert.equal(crossed.error.code, 'TAE_CURSOR_SCOPE_MISMATCH');
+    const session = defaultReadSessionManager.getSession(parseOpaqueCursor(initial.pagination.nextCursor!).sessionId)!;
+    session.createdAt -= session.ttlMs + 1;
+    const expired = await readTaeEvents({ edit, file, addresses: ['c0000#A0010'], cursor: initial.pagination.nextCursor! });
+    assert.equal(expired.ok, false);
+    if (!expired.ok) assert.equal(expired.error.code, 'STALE_READ_CURSOR');
+  }
   let cursor: string | undefined; const ordinals: number[] = [];
   do {
     const read = await readTaeEvents({ edit, file, addresses: ['c0000#A0010'], pageSize: 7, ...(cursor ? { cursor } : {}) });

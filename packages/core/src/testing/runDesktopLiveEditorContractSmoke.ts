@@ -10,8 +10,9 @@
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-function main(): void {
+async function main(): Promise<void> {
   const root = resolve('../..');
   const preload = readFileSync(resolve(root, 'apps/desktop/src/preload/index.ts'), 'utf8');
   // The composition root delegates domain handlers to split modules. Keep the
@@ -80,11 +81,12 @@ function main(): void {
       + ' a full-table read alone never carries payloads (C# gates payloads per page)'
     );
   }
-  // Real (non-SFBN) BND4 containers must fall back to native full entry-table
-  // enumeration so the bnd4 editor gets complete bounded access on real corpus.
-  for (const token of ['isRealNativeBndContainer', 'enumerateNativeContainerEntries', 'BND_NATIVE_ENUMERATION_COMPLETE']) {
-    if (!ipc.includes(token)) throw new Error(`ipc missing bnd4 native enumeration ${token}`);
-  }
+  // Exercise actual RAW service routing/pagination with owned ports; helper names
+  // are implementation details and cannot establish native enumeration behavior.
+  const { assertRawNativeContainerContract } = await import(pathToFileURL(
+    resolve(root, 'scripts/testing/raw-native-container-contract.mjs')
+  ).href);
+  const rawNativeContract = await assertRawNativeContainerContract();
   if (!ipc.includes("game: 'sekiro'")
     || !ipc.includes('rejectNonSekiroNativeWrite(sourceUri, file)')) {
     throw new Error('native semantic writes must fail closed outside the Sekiro adaptation');
@@ -109,11 +111,12 @@ function main(): void {
       'stable LOCALAPPDATA staging root with cleanup',
       'shared normalizePageWindow windowing authority (no private copy)',
       'readParamPage: payload-null-safe rows + explicit per-page row byte fetch (rowPage/rowPageSize)',
-      'listContainerChildrenPage: native BND4 full enumeration fallback for real containers'
+      'listContainerChildrenPage: production BND4/DCX routes, complete bounded pages and explicit refusals'
     ],
+    rawNativeContract,
     rendererUi: 'verified-by-separate-renderer-suites',
     delegatedTo: 'npm run test:desktop-ipc-contract（分页 channel 注册 / preload 分页方法接线 / 双向对账，真实执行观测）'
   }, null, 2));
 }
 
-main();
+await main();

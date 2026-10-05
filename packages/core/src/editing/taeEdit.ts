@@ -274,7 +274,10 @@ export async function readTaeEvents(input: {
       let cursor = input.cursor;
       if (cursor) {
         const payload = parseOpaqueCursor(cursor);
-        if (payload.domain !== 'tae' || payload.scope !== queryScope) {
+        const existing = defaultReadSessionManager.getSession(payload.sessionId);
+        if (payload.domain !== 'tae' || payload.scope !== queryScope
+          || (existing && (existing.domain !== 'tae' || existing.queryScope !== queryScope
+            || existing.workspaceId !== input.edit.session.meta.workspaceId))) {
           return {
             ok: false,
             error: { code: 'TAE_CURSOR_SCOPE_MISMATCH', message: 'TAE 分页 cursor 与当前文件或读取范围不匹配，请重新读取。' },
