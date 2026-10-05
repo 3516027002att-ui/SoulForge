@@ -74,9 +74,10 @@ try { if (cancellation) for (const entry of plan) {
     continue;
   }
   try {
-    if (entry.buildInput && !entry.steps.some(step => step.kind === 'prepare')
-      && entry.steps.some(step => !existsSync(resolve(step.cwd,step.args.at(-1))))) {
-      results.push({scriptName:entry.scriptName,tier:entry.tier,status:'unavailable',reason:'required-build-output-missing',
+    if (entry.buildInput && !entry.steps.some(step => step.kind === 'prepare')) {
+      const outputMissing = entry.steps.some(step => !existsSync(resolve(step.cwd,step.args.at(-1))));
+      results.push({scriptName:entry.scriptName,tier:entry.tier,status:'unavailable',
+        reason:outputMissing ? 'required-build-output-missing' : 'required-build-prepare-unavailable',
         buildInput:entry.buildInput,steps:entry.steps.map(step => ({...step,execution:'not_run',status:'unavailable'}))});
       continue;
     }

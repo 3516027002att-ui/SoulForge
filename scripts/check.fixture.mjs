@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import test from 'node:test';
@@ -431,19 +431,192 @@ test('new unregistered convention test is discovered without duplicated known en
   } finally {rmSync(root,{recursive:true,force:true});}
 });
 
-test('unbuilt discovered workspace test is unavailable rather than an assertion failure', () => {
+test('unbuilt discovered workspace test with missing dist is unavailable', () => {
   const root = mkdtempSync(join(tmpdir(),'sf-check-unbuilt-'));
   try {
     mkdirSync(join(root,'packages/a/src'),{recursive:true});
     writeFileSync(join(root,'package.json'),JSON.stringify({workspaces:['packages/*'],scripts:{}}));
-    writeFileSync(join(root,'packages/a/package.json'),JSON.stringify({name:'@test/a'}));
+    writeFileSync(join(root,'packages/a/package.json'),JSON.stringify({name:'@test/a',type:'module'}));
     writeFileSync(join(root,'packages/a/src/new.test.ts'),'import "node:test";');
     const result = spawnSync(process.execPath,[runner,'--suite','file:packages/a/src/new.test.ts'],{cwd:root,encoding:'utf8'});
     const report = JSON.parse(result.stdout);
     assert.equal(report.results[0].status,'unavailable');
+    assert.equal(report.results[0].reason,'required-build-output-missing');
     assert.equal(report.results[0].steps[0].execution,'not_run');
     assert.equal(report.completionVerified,false);
   } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test('workspace TS source without a supported compiler prepare cannot pass from stale dist', () => {
+  const root = mkdtempSync(join(tmpdir(),'sf-check-stale-without-prepare-'));
+  try {
+    mkdirSync(join(root,'packages/a/src'),{recursive:true});
+    mkdirSync(join(root,'packages/a/dist'),{recursive:true});
+    writeFileSync(join(root,'package.json'),JSON.stringify({workspaces:['packages/*'],scripts:{}}));
+    writeFileSync(join(root,'packages/a/package.json'),JSON.stringify({name:'@test/a',type:'module'}));
+    writeFileSync(join(root,'packages/a/src/new.test.ts'),'import "node:test";');
+    writeFileSync(join(root,'packages/a/dist/new.test.js'),
+      `import { writeFileSync } from 'node:fs'; writeFileSync('packages/a/stale-dist-ran.txt','ran');`);
+    const result = spawnSync(process.execPath,[runner,'--suite','file:packages/a/src/new.test.ts'],{cwd:root,encoding:'utf8'});
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.results[0].status,'unavailable');
+    assert.equal(report.results[0].reason,'required-build-prepare-unavailable');
+    assert.equal(report.results[0].steps[0].execution,'not_run');
+    assert.equal(report.completionVerified,false);
+    assert.equal(existsSync(join(root,'packages/a/stale-dist-ran.txt')),false);
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+function createFakeBuildWorkspace(root, sourceText, {buildCommand='tsc -b .',compilerOptions={},include=['src/**/*.ts']}={}) {
+  mkdirSync(join(root,'packages/a/src'),{recursive:true});
+  mkdirSync(join(root,'packages/a/dist'),{recursive:true});
+  mkdirSync(join(root,'node_modules/typescript/bin'),{recursive:true});
+  writeFileSync(join(root,'node_modules/typescript/package.json'),JSON.stringify({type:'commonjs'}));
+  writeFileSync(join(root,'package.json'),JSON.stringify({type:'module',workspaces:['packages/*'],scripts:{}}));
+  writeFileSync(join(root,'packages/a/package.json'),JSON.stringify({name:'@test/a',type:'module',scripts:{
+    test:`${buildCommand} && node --test dist/new.test.js && node --test dist/other.test.js`
+  }}));
+  writeFileSync(join(root,'packages/a/tsconfig.json'),JSON.stringify({compilerOptions:{
+    composite:true,rootDir:'src',outDir:'dist',target:'ES2022',module:'NodeNext',moduleResolution:'NodeNext',...compilerOptions
+  },include}));
+  writeFileSync(join(root,'packages/a/src/new.test.ts'),sourceText);
+  writeFileSync(join(root,'packages/a/src/other.test.ts'),'// aggregate tail source');
+  writeFileSync(join(root,'packages/a/dist/new.test.js'),
+    `import { writeFileSync } from 'node:fs'; import { test } from 'node:test';\nwriteFileSync('packages/a/stale-dist-ran.txt','ran'); test('old dist passes',()=>{});`);
+  writeFileSync(join(root,'node_modules/typescript/bin/tsc'),
+    `const { mkdirSync, readFileSync, writeFileSync } = require('node:fs');\n` +
+    `const source=readFileSync('src/new.test.ts','utf8');\n` +
+    `writeFileSync('compiler-args.log',process.argv.slice(2).join(' ')+'\\n',{flag:'a'});\n` +
+    `if(source.includes('COMPILER_FAIL')){process.exitCode=7;}else{\n` +
+    `mkdirSync('dist',{recursive:true});\n` +
+    `const body=source.includes('CURRENT_SOURCE_FAILURE')?` +
+    `${JSON.stringify("import { test } from 'node:test'; test('fresh source',()=>{throw new Error('fresh source failure');});")}:` +
+    `${JSON.stringify("import { test } from 'node:test'; test('fresh source',()=>{});")};\n` +
+    `writeFileSync('dist/new.test.js',body);\n` +
+    `writeFileSync('dist/other.test.js',${JSON.stringify("import { test } from 'node:test'; test('aggregate tail',()=>{});")});\n` +
+    `}`);
+}
+
+test('direct workspace TS suite force-compiles current source before running dist assertions', () => {
+  const root = mkdtempSync(join(tmpdir(),'sf-check-stale-ts-dist-'));
+  try {
+    createFakeBuildWorkspace(root,'// CURRENT_SOURCE_FAILURE');
+    const result = spawnSync(process.execPath,[runner,'--suite','file:packages/a/src/new.test.ts'],
+      {cwd:root,encoding:'utf8',timeout:30000});
+    const report = JSON.parse(result.stdout);
+    const row = report.results[0];
+    assert.equal(result.status,1,result.stderr);
+    assert.equal(row.status,'failed');
+    assert.deepEqual(row.steps.map(step=>[step.command,step.execution,step.outcome]),[
+      ['tsc','executed','passed'],['node','executed','failed']
+    ]);
+    assert.deepEqual(row.steps[0].args,['-b','--force','.']);
+    assert.equal(existsSync(join(root,'packages/a/stale-dist-ran.txt')),false);
+    assert.match(readFileSync(join(root,'packages/a/compiler-args.log'),'utf8'),/-b --force \./);
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test('failed builds block stale dist and aggregate tail; successful aggregate build is not reused as forced freshness proof', () => {
+  const failedRoot = mkdtempSync(join(tmpdir(),'sf-check-failed-ts-prepare-'));
+  try {
+    createFakeBuildWorkspace(failedRoot,'// COMPILER_FAIL');
+    const failed = spawnSync(process.execPath,[runner,'--suite',[
+      'workspace:@test/a:test','file:packages/a/src/new.test.ts'
+    ].join(',')],
+      {cwd:failedRoot,encoding:'utf8',timeout:30000});
+    const failedReport = JSON.parse(failed.stdout);
+    assert.equal(failed.status,1,failed.stderr);
+    const failedAggregate = failedReport.results.find(row=>row.scriptName==='workspace:@test/a:test');
+    const failedFile = failedReport.results.find(row=>row.scriptName==='file:packages/a/src/new.test.ts');
+    assert.equal(failedAggregate.status,'failed');
+    assert.deepEqual(failedAggregate.steps.map(step=>[step.command,step.outcome]),[['tsc','failed']],
+      'a failed aggregate prepare must not turn either assertion tail green');
+    assert.equal(failedFile.status,'failed');
+    assert.deepEqual(failedFile.steps.map(step=>[step.command,step.outcome]),[['tsc','failed']]);
+    assert.equal(existsSync(join(failedRoot,'packages/a/stale-dist-ran.txt')),false);
+  } finally {rmSync(failedRoot,{recursive:true,force:true});}
+
+  const root = mkdtempSync(join(tmpdir(),'sf-check-ts-prepare-cache-'));
+  try {
+    createFakeBuildWorkspace(root,'// CURRENT_SOURCE_PASS');
+    const result = spawnSync(process.execPath,[runner,'--suite',[
+      'workspace:@test/a:test','file:packages/a/src/new.test.ts','file:packages/a/src/other.test.ts'
+    ].join(',')],{cwd:root,encoding:'utf8',timeout:30000});
+    const report = JSON.parse(result.stdout);
+    const aggregate = report.results.find(row=>row.scriptName==='workspace:@test/a:test');
+    const freshFile = report.results.find(row=>row.scriptName==='file:packages/a/src/new.test.ts');
+    const cachedFile = report.results.find(row=>row.scriptName==='file:packages/a/src/other.test.ts');
+    assert.equal(result.status,0,result.stderr);
+    assert.equal(report.completionVerified,true);
+    assert.equal(aggregate.status,'passed');
+    assert.deepEqual(aggregate.steps.map(step=>step.execution),['executed','executed','executed']);
+    assert.deepEqual(aggregate.steps.slice(1).map(step=>step.outcome),['passed','passed']);
+    assert.deepEqual(aggregate.steps[0].args,['-b','.']);
+    assert.equal(freshFile.status,'passed');
+    assert.equal(freshFile.steps[0].execution,'executed','non-force aggregate build is not freshness proof for direct source selection');
+    assert.deepEqual(freshFile.steps[0].args,['-b','--force','.']);
+    assert.equal(cachedFile.status,'passed');
+    assert.equal(cachedFile.steps[0].execution,'reused','identical forced workspace prepare is cached across direct files');
+    assert.equal(cachedFile.steps[0].reusedFrom,'file:packages/a/src/new.test.ts');
+    assert.deepEqual(readFileSync(join(root,'packages/a/compiler-args.log'),'utf8').trim().split(/\r?\n/u),[
+      '-b .','-b --force .'
+    ]);
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test('workspace project target, emission mode, and include mapping must be proven before direct TS execution', () => {
+  for (const [name,options] of [
+    ['wrong-project-target',{buildCommand:'tsc -b ../other'}],
+    ['no-emit',{compilerOptions:{noEmit:true}}],
+    ['source-outside-include',{include:['src/other/**/*.ts']}]
+  ]) {
+    const root = mkdtempSync(join(tmpdir(),`sf-check-ts-unproven-${name}-`));
+    try {
+      createFakeBuildWorkspace(root,'// CURRENT_SOURCE_PASS',options);
+      const result = spawnSync(process.execPath,[runner,'--suite','file:packages/a/src/new.test.ts'],
+        {cwd:root,encoding:'utf8',timeout:30000});
+      const report = JSON.parse(result.stdout);
+      const row = report.results[0];
+      assert.equal(result.status,1,`${name}: ${result.stderr}`);
+      assert.equal(row.status,'unavailable',name);
+      assert.equal(row.reason,'required-build-prepare-unavailable',name);
+      assert.equal(row.steps[0].execution,'not_run',name);
+      assert.equal(existsSync(join(root,'packages/a/stale-dist-ran.txt')),false,name);
+      assert.equal(existsSync(join(root,'packages/a/compiler-args.log')),false,name);
+    } finally {rmSync(root,{recursive:true,force:true});}
+  }
+});
+
+test('core convention files inherit the existing shared-reference compiler step without desktop build expansion', () => {
+  const root = fileURLToPath(new URL('..',import.meta.url));
+  const workspaces = loadWorkspaces(root);
+  const registry = discoverChecks(root,workspaces);
+  const coreAggregate = planScript(root,workspaces,'test',{workspace:'@soulforge/core'});
+  const coreFile = registry.get('file:packages/core/src/indexing/nativeSemanticRefreshReferenceRebuild.test.ts');
+  const coreConfig = JSON.parse(readFileSync(join(root,'packages/core/tsconfig.json'),'utf8'));
+  assert.ok(coreFile);
+  assert.deepEqual(coreAggregate[0].args,['-b','../shared','.']);
+  assert.equal(coreFile.steps[0].command,'tsc');
+  assert.equal(coreFile.steps[0].kind,'prepare');
+  assert.deepEqual(coreFile.steps[0].args,['-b','--force','../shared','.']);
+  assert.notEqual(coreFile.steps[0].key,coreAggregate[0].key,'forced source freshness must not alias non-forced aggregate evidence');
+  assert.deepEqual(coreFile.steps.at(-1).args,['--test','packages/core/dist/indexing/nativeSemanticRefreshReferenceRebuild.test.js']);
+  assert.equal(coreConfig.compilerOptions.rootDir,'src');
+  assert.equal(coreConfig.compilerOptions.outDir,'dist');
+  assert.equal(coreConfig.compilerOptions.composite,true);
+  assert.deepEqual(coreConfig.include,['src/**/*.ts']);
+  assert.deepEqual(coreConfig.references.map(reference=>reference.path),['../shared']);
+  const currentSourceRelative = relative(join(root,'packages/core/src'),
+    join(root,'packages/core/src/indexing/nativeSemanticRefreshReferenceRebuild.test.ts')).replaceAll('\\','/');
+  assert.match(currentSourceRelative,/^indexing\/.*\.ts$/u);
+
+  const desktop = registry.get('file:apps/desktop/src/main/pathSanitizerConsistency.test.ts');
+  const desktopConfig = JSON.parse(readFileSync(join(root,'apps/desktop/tsconfig.json'),'utf8'));
+  assert.equal(desktopConfig.compilerOptions.noEmit,true);
+  assert.ok(desktop);
+  assert.equal(desktop.buildInput,undefined);
+  assert.ok(desktop.steps.every(step=>step.kind!=='prepare'));
+  assert.ok(desktop.steps.some(step=>step.args.includes('scripts/run-renderer-unit-tests.mjs')));
 });
 
 test('failed aggregate does not hide reachable workspace-tail tests from independent execution', () => {
