@@ -89,7 +89,8 @@ function workspaceCompilerPrepareSteps(repoRoot, workspaces, workspaceDir, sourc
 export function selectCheckTier(name, sources, requirements) {
   const paths = sources.map(path => path.replaceAll('\\','/'));
   if (paths.some(path => path.includes('/e2e/')) || /(?:renderer-(?:e2e|playwright)|test:e2e|playwright)/u.test(name)) return 'e2e';
-  if (/^(?:test:)?(?:release|installer|portable-packaging|cross-machine)/u.test(name)
+  // Installed/all update suites run real owned NSIS installers, so they are release checks.
+  if (/^(?:test:)?(?:release|installer|portable-packaging|cross-machine|update:(?:installed|all)$)/u.test(name)
     || paths.some(path => /\/(?:verify-(?:release|installer|portable-packaging|cross-machine)|run(?:Release|Installer))[^/]*\./u.test(path))) return 'release';
   if (paths.some(path => /\/scripts\/(?:check\.fixture|verify-(?:verify-entrypoint|scheduling|ci-change-scope)-fixtures)\.mjs$/u.test(path))) return 'governance';
   if (requirements.includes('packaged-app')) return 'release';
