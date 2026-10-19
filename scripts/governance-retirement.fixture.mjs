@@ -67,10 +67,8 @@ test('actual product entry remains runnable without a fixed historical task map'
   assert.ok(registry.get('workspace:@soulforge/core:test:audit-sf-01-native')?.steps.some(step => step.kind === 'test'));
 });
 
-test('CI uses the independent check runner and stable engineering entry points', () => {
-  const workflow = readFileSync('.github/workflows/windows-ci.yml', 'utf8');
-  assert.doesNotMatch(workflow, /run: node scripts\/verify\.mjs --audit/);
-  assert.match(workflow, /node scripts\/check\.mjs --tier/);
+// The CI shape itself is asserted by scripts/gate.test.mjs inside the trust zone.
+test('stable engineering entry points exist', () => {
   for (const file of ['AGENTS.md', 'ARCHITECTURE.md', 'docs/DECISIONS.md']) {
     assert.equal(existsSync(file), true, file);
   }

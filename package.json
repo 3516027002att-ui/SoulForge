@@ -15,6 +15,7 @@
     "dev": "npm run dev -w @soulforge/desktop",
     "build": "npm run build -w @soulforge/shared && npm run build -w @soulforge/core && npm run build -w @soulforge/desktop && node scripts/generate-agent-production-build-manifest.mjs && npm run release:manifest",
     "typecheck": "tsc -b packages/shared packages/core apps/desktop --pretty false",
+    "gate": "node scripts/gate.mjs",
     "test": "node scripts/owned-test-environment.mjs -- npm run soulforge:test-body --silent --",
     "presoulforge:test-body": "node scripts/ensure-host-native-binding.mjs",
     "soulforge:test-body": "npm run test --workspaces --if-present && npm run test:desktop-security && npm run test:agent-native-proof-gate && npm run test:agent-tool-envelope && npm run test:agent-bridge-context && npm run test:agent-task-status && npm run test:real-agent-harness && npm run test:real-agent-four-tasks && npm run test:ai-log-sync && npm run test:agent-production-build && npm run test:first-party-schema-clean && npm run test:first-party-schema-boundary && npm run test:ui-localization && npm run test:database-utility && npm run test:param-metadata-read-bridge && npm run test:workspace-analysis-lifecycle && npm run test:workspace-scan-fast-path && npm run test:param-canonical-projection && npm run test:rag-refresh-queue && npm run test:param-read-fallback && npm run test:map-request-cancellation && npm run test:bridge-cancellation-terminal-phase && npm run test:map-streaming-contract && npm run test:update:unit && npm run test:scene-contracts",
