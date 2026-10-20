@@ -64,10 +64,13 @@ const CONFIGURED_SNAPSHOT_ROOT = CONFIGURED_SNAPSHOT_ROOT_VALUE
 const PRODUCTION_MAIN = CONFIGURED_SNAPSHOT_ROOT
   ? resolve(CONFIGURED_SNAPSHOT_ROOT, 'apps/desktop/e2e/playwright/production-main.mjs')
   : resolve(REPO_ROOT, 'apps/desktop/e2e/playwright/production-main.mjs');
-const GAME_ROOT = process.env.SOULFORGE_SEKIRO_ROOT
-  ?? 'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro';
-const MOD_ROOT = process.env.SOULFORGE_SEKIRO_MOD_ROOT
-  ?? join(GAME_ROOT, 'mods');
+// Real game data never ships with the repository. Empty here is fine for --help;
+// run() refuses to start a simulation without a configured game root.
+const GAME_ROOT = process.env.SOULFORGE_SEKIRO_ROOT?.trim()
+  || process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim()
+  || '';
+const MOD_ROOT = process.env.SOULFORGE_SEKIRO_MOD_ROOT?.trim()
+  || (GAME_ROOT ? join(GAME_ROOT, 'mods') : '');
 const DEFAULT_TASK_QUERY = '把鬼刑部改为精英怪，血条改为2，死亡后掉落靛蓝星陨';
 const DEFAULT_GOALS = Object.freeze([
   Object.freeze({
@@ -1313,6 +1316,10 @@ async function run() {
   if (CLI_OPTIONS.help) {
     printHelp();
     return { ok: true, help: true };
+  }
+  if (!GAME_ROOT) {
+    throw harnessError('REAL_AGENT_GAME_ROOT_MISSING',
+      '未设置游戏根：请设置 SOULFORGE_SEKIRO_ROOT 或 SOULFORGE_SEKIRO_GAME_ROOT（Mod 根默认取其下 mods，可用 SOULFORGE_SEKIRO_MOD_ROOT 覆盖）。');
   }
   if (CLI_OPTIONS.observationOnly === true && (CLI_OPTIONS.write === true || CANDIDATE_WRITE_MODE)) {
     throw harnessError('REAL_AGENT_MODE_INVALID', '--observe 与 --write/--apply-overlay/--candidate-write 不能同时使用。');

@@ -16,7 +16,6 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const localGameRootCandidates = [
-  'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro',
   resolve(repoRoot, 'Sekiro Shadows Die Twice')
 ];
 const localRegistryPath = resolve(

@@ -191,8 +191,8 @@ function printUsage() {
 
 示例:
   node tools/soulforge-cli/sfcli.mjs \\
-    --workspace "D:/mystream/Sekiro Shadows Die Twice/Sekiro/mods" \\
-    --base "D:/mystream/Sekiro Shadows Die Twice/Sekiro" \\
+    --workspace "<游戏根>/mods" \\
+    --base "<游戏根>" \\
     search-param 落雷 Bullet
 
   node tools/soulforge-cli/sfcli.mjs \\

@@ -64,8 +64,8 @@ if (cliArgs.includes('-h') || cliArgs.includes('--help')) {
 
 const GAME_ROOT = process.env.SOULFORGE_SEKIRO_ROOT?.trim()
   || process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim()
-  || 'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro';
-const OVERLAY_ROOT = process.env.SOULFORGE_SEKIRO_MOD_ROOT?.trim() || join(GAME_ROOT, 'mods');
+  || '';
+const OVERLAY_ROOT = process.env.SOULFORGE_SEKIRO_MOD_ROOT?.trim() || (GAME_ROOT ? join(GAME_ROOT, 'mods') : '');
 const MAP_ID = process.env.SF_MAP_ID?.trim() || 'm11_00_00_00';
 const REQUESTED_MODEL = process.env.SF_MAP_MODEL_NAME?.trim() || 'o000100';
 const MODE = process.argv.includes('--cancel') || process.env.SF_MAP_MODE === 'cancel' ? 'cancel' : 'normal';
@@ -109,6 +109,12 @@ const DIRECT_TIMEOUT_MS = boundedInteger('SF_MAP_DIRECT_TIMEOUT_MS', DEFAULT_DIR
 const CANCEL_DELAY_MS = boundedInteger('SF_MAP_CANCEL_DELAY_MS', DEFAULT_CANCEL_DELAY_MS, 100, 30_000);
 const MAX_GEOMETRY_PAGES = boundedInteger('SF_MAP_MAX_GEOMETRY_PAGES', 256, 1, 4096);
 const TOTAL_TIMEOUT_MS = boundedInteger('SF_MAP_TOTAL_TIMEOUT_MS', DEFAULT_TOTAL_TIMEOUT_MS, 60_000, 1_800_000);
+
+// The --fixture contract needs no game data; the real probe skips honestly without a game root.
+if (!FIXTURE_ONLY && !GAME_ROOT) {
+  console.log(JSON.stringify({ status: 'skipped', skipped: true, reason: 'SOULFORGE_SEKIRO_GAME_ROOT is not set' }));
+  process.exit(0);
+}
 
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const reportDir = resolve(ROOT, 'output/playwright', `map-streaming-native-${MAP_ID}-${MODE}-${stamp}`);

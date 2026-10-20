@@ -7,7 +7,7 @@ import assert from 'node:assert';
 
 const execFileAsync = promisify(execFile);
 
-const sekiroRoot = 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
+const sekiroRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() ?? '';
 const modsAicommon = join(sekiroRoot, 'mods/script/aicommon.luabnd.dcx');
 const modsM11 = join(sekiroRoot, 'mods/script/m11_00_00_00.luabnd.dcx');
 const vanillaAicommon = join(sekiroRoot, 'script/aicommon.luabnd.dcx');
@@ -37,6 +37,11 @@ async function runBridge(command, filePath, options = {}) {
 }
 
 async function main() {
+  // Real game data never ships with the repository; without the game root this check skips honestly.
+  if (!sekiroRoot) {
+    console.log(JSON.stringify({ status: 'skipped', skipped: true, reason: 'SOULFORGE_SEKIRO_GAME_ROOT is not set' }));
+    return;
+  }
   console.log('--- 开始 FromSoftware *.luabnd.dcx 专有模块集成验证 ---');
   assert(existsSync(bridgeExe), `Bridge 可执行文件不存在: ${bridgeExe}`);
   assert(existsSync(modsAicommon), `测试 Mod 资源不存在: ${modsAicommon}`);

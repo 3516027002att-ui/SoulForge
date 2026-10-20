@@ -7,16 +7,17 @@ const here = dirname(fileURLToPath(import.meta.url));
 const productionMain = resolve(here, '../production-main.mjs');
 const repoRoot = resolve(here, '../../../../..');
 const gameRoot = process.env.SF_REAL_GAME_ROOT?.trim()
-  || 'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro';
-const overlayRoot = process.env.SF_REAL_OVERLAY_ROOT?.trim() || join(gameRoot, 'mods');
-const hasCorpus = [
+  || process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim()
+  || '';
+const overlayRoot = process.env.SF_REAL_OVERLAY_ROOT?.trim() || (gameRoot ? join(gameRoot, 'mods') : '');
+const hasCorpus = Boolean(gameRoot) && [
   join(overlayRoot, 'chr', 'c0000.anibnd.dcx'),
   join(overlayRoot, 'chr', 'c1130.anibnd.dcx'),
   join(overlayRoot, 'map', 'mapstudio', 'm10_00_00_00.msb.dcx'),
   join(overlayRoot, 'obj', 'o000100.objbnd.dcx'),
   join(gameRoot, 'chr', 'c1130.chrbnd.dcx')
 ].every(existsSync);
-const hasC5400Corpus = [
+const hasC5400Corpus = Boolean(gameRoot) && [
   join(gameRoot, 'chr', 'c5400.chrbnd.dcx'),
   join(gameRoot, 'chr', 'c5409.texbnd.dcx')
 ].every(existsSync);

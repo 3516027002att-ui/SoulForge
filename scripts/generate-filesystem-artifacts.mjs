@@ -2,9 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
-const gameRoot = 'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro';
-const repoRoot = 'D:\\Repository\\SoulForge';
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const gameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() || '';
+if (!gameRoot) {
+  console.error(JSON.stringify({ ok: false, code: 'SOULFORGE_SEKIRO_GAME_ROOT_MISSING', message: 'set SOULFORGE_SEKIRO_GAME_ROOT to the Sekiro game root' }));
+  process.exit(2);
+}
 
 const entries = [
   { logicalUri: 'sekiro://param/gameparam.parambnd.dcx', relativePath: 'param/gameparam.parambnd.dcx', diskRelativePath: 'param/gameparam/gameparam.parambnd.dcx', resourceRole: 'gameparam', format: 'DFLT' },
