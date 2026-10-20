@@ -7,7 +7,8 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { classify, compareOrdered, emevdFromBridgePages, emevdFromReferenceGraph, emevdKeys, failedComparison, fmgEntriesFromBridge,
-  fmgEntriesFromReferenceGraph, groupStatus, resolveReferenceResponse, staleKnownDiffs, taeAnimationsFromBridge,
+  fmgEntriesFromReferenceGraph, groupStatus, msbFromBridge, msbFromReferenceGraph, msbKeys, resolveReferenceResponse, staleKnownDiffs,
+  taeAnimationsFromBridge,
   taeAnimationsFromReferenceGraph } from './lib.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -174,7 +175,36 @@ async function compareEmevd(testCase, input, items) {
   }
 }
 
-const RULES = { fmg: compareFmg, tae: compareTae, emevd: compareEmevd };
+// MSB: per map, the models (type, name, sib path), parts (type, name, model name, position/rotation/scale float bits,
+// entity id), regions (type, name, shape, position/rotation float bits, entity id) and events (type, name, event id), each
+// in MSBS type order and then file order. Per-type payloads beyond these fields are not compared: the Bridge does not
+// read them. The reference structure.json is large (60 MB for the smallest map); only the compact rows are kept.
+async function compareMsb(testCase, input, items) {
+  const file = join(gameRoot, ...input.split('/'));
+  if (!existsSync(file)) throw new Error(`corpus input is missing from the game root: ${input}`);
+  const key = `${testCase.game}/${testCase.format}/${testCase.operation}/${input}`;
+  const inputSha256 = createHash('sha256').update(readFileSync(file)).digest('hex');
+  const add = (suffix, reference, comparison) => items.push({ key: `${key}#${suffix}`, group: testCase, input, inputSha256,
+    reference: reference.status, referenceReason: reference.reason, comparison });
+  const parts = ['models', 'parts', 'regions', 'events'];
+
+  const decoded = referenceCall(testCase.reference, 'decode', { input: file, format: 'SoulsFormats.MSBS' });
+  if (decoded.status !== 'ok') { for (const part of parts) add(part, decoded, null); return; }
+  const reference = msbFromReferenceGraph(referenceArtifact(decoded.response, 'structure.json'));
+  const result = await runBridge({ command: 'read-msb-document', filePath: file, allowedRoots: [gameRoot], oodleRuntimeRoot: gameRoot,
+    timeoutMs: 300_000 });
+  let bridge;
+  if (result.parseStatus === 'failed' || !result.data) bridge = { error: result.diagnostics?.[0]?.code ?? 'BRIDGE_READ_FAILED' };
+  else {
+    try { bridge = { data: msbFromBridge(result.data) }; }
+    catch (error) { bridge = { error: `BRIDGE_MSB_INCONSISTENT: ${error.message}` }; }
+  }
+  for (const part of parts) {
+    add(part, decoded, bridge.error ? failedComparison(bridge.error) : compareOrdered(reference[part], bridge.data[part], msbKeys[part]));
+  }
+}
+
+const RULES = { fmg: compareFmg, tae: compareTae, emevd: compareEmevd, msb: compareMsb };
 let exitCode = 2;
 try {
   const items = [];

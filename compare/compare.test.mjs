@@ -2,9 +2,9 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
-import { classify, compareOrdered, emevdFromBridgePages, emevdFromReferenceGraph, emevdKeys, failedComparison, fmgEntriesFromBridge,
-  fmgEntriesFromReferenceGraph, graphRefResolver, groupStatus, resolveReferenceResponse, staleKnownDiffs,
-  taeAnimationsFromBridge, taeAnimationsFromReferenceGraph } from './lib.mjs';
+import { classify, compareOrdered, emevdFromBridgePages, emevdFromReferenceGraph, emevdKeys, failedComparison, float32Bits, fmgEntriesFromBridge,
+  fmgEntriesFromReferenceGraph, graphRefResolver, groupStatus, int64Text, memberItems, msbDisambiguateNames, msbFromBridge, msbFromReferenceGraph, msbKeys,
+  referenceFloatBits, resolveReferenceResponse, staleKnownDiffs, taeAnimationsFromBridge, taeAnimationsFromReferenceGraph } from './lib.mjs';
 
 test('a large reference result takes its identity only from the matching result manifest', () => {
   const full = { requestId: 'r1', status: 'ok', source: { commit: 'c' }, artifacts: [] };
@@ -210,4 +210,186 @@ test('recorded differences that no longer occur are reported as stale, unrun one
   const known = [{ key: 'fixed' }, { key: 'still' }, { key: 'not-run' }];
   const items = [{ key: 'fixed', status: 'match' }, { key: 'still', status: 'known-diff' }];
   assert.deepEqual(staleKnownDiffs(items, known), ['fixed']);
+});
+
+// IEEE-754 single bits written out by hand, not computed with the code under test.
+const BITS = { '1': '3F800000', '-303': 'C3978000', '0.5': '3F000000', '2': '40000000', '0': '00000000', '90': '42B40000' };
+
+test('float32 bits are exact: -0 differs from +0, one ulp differs, non-floats and malformed reference nodes fail', () => {
+  for (const [text, bits] of Object.entries(BITS)) assert.equal(float32Bits(Number(text)), bits);
+  assert.equal(float32Bits(-0), '80000000');
+  assert.equal(float32Bits(1 + 2 ** -23), '3F800001');
+  for (const bad of [NaN, Infinity, '1', null, undefined]) assert.throws(() => float32Bits(bad), /not a finite float/u);
+  assert.equal(referenceFloatBits({ $type: 'System.Single', value: '-303', bits: 'c3978000' }), 'C3978000');
+  for (const bad of [{ $type: 'System.Double', value: '1', bits: '3F800000' }, { $type: 'System.Single', value: '1' },
+    { $type: 'System.Single', bits: '3F80000' }, { $type: 'System.Single', bits: '3F80000G' }, 1, null]) {
+    assert.throws(() => referenceFloatBits(bad), /expected a System\.Single with bits/u);
+  }
+});
+
+test('Int64 text accepts canonical in-range decimals only', () => {
+  assert.equal(int64Text({ $type: 'System.Int64', value: '-9223372036854775808' }), '-9223372036854775808');
+  assert.equal(int64Text({ $type: 'System.Int64', value: '9223372036854775807' }), '9223372036854775807');
+  assert.equal(int64Text({ $type: 'System.Int64', value: '0' }), '0');
+  assert.throws(() => int64Text({ $type: 'System.Int64', value: '9223372036854775808' }), /out of range/u);
+  assert.throws(() => int64Text({ $type: 'System.Int64', value: '-9223372036854775809' }), /out of range/u);
+  for (const value of ['-0', '01', '1.0', '', ' 1', 1]) assert.throws(() => int64Text({ $type: 'System.Int64', value }), /not an Int64 decimal/u);
+  for (const bad of [{ $type: 'System.Int32', value: '1' }, '1', 1, null]) assert.throws(() => int64Text(bad), /expected System\.Int64/u);
+});
+
+test('member items resolve the list and each item through $ref; a non-list or a missing member fails', () => {
+  const shared = { $id: 2, $type: 'T', $members: [] };
+  const graph = { $id: 1, $type: 'Root', $members: [{ name: 'A', value: { $id: 3, $items: [shared, { $ref: 2 }] } },
+    { name: 'B', value: { $ref: 3 } }, { name: 'C', value: { $id: 4, $type: 'NotAList' } }, { name: 'D', value: null }] };
+  const deref = graphRefResolver(graph);
+  assert.deepEqual(memberItems(graph, 'A', deref), [shared, shared]);
+  assert.deepEqual(memberItems(graph, 'B', deref), [shared, shared]);
+  assert.throws(() => memberItems(graph, 'C', deref), /Root C has no items/u);
+  assert.throws(() => memberItems(graph, 'D', deref), /Root D has no items/u);
+  assert.throws(() => memberItems(graph, 'E', deref), /member E missing on Root/u);
+  assert.throws(() => memberItems(graph, 'A'), /needs a graphRefResolver/u);
+});
+
+// One map in both shapes, written by hand. File order interleaves types; both sides must come out in MSBS type order.
+// Class names per type id are written out here, not taken from lib.mjs MSBS_TYPES.
+const CLASS = { model: { 0: 'MapPiece', 2: 'Enemy' }, part: { 0: 'MapPiece', 2: 'Enemy' }, region: { 5: 'SFX', '-1': 'Other' },
+  event: { 23: 'Talk', 4: 'Treasure' }, shape: { 0: 'Point', 5: 'Box' } };
+const MSB_ROWS = {
+  models: [[0, 'm0', 'sib/m0'], [2, 'e0', 'sib/e0'], [0, 'm1', null]],
+  parts: [[2, 'p1', 1, ['2', '0', '0'], ['0', '0', '0'], ['1', '1', '2'], 7], [0, 'p0', 2, ['1', '-303', '0.5'], ['0', '90', '0'], ['1', '1', '1'], 0]],
+  regions: [[-1, 'r1', 5, ['0', '0', '0'], ['0', '0', '0'], 9], [5, 'r0', 0, ['1', '2', '0.5'], ['0', '90', '0'], 0]],
+  events: [[23, 'k0', 11], [4, 't0', 10]]
+};
+const single = text => ({ $type: 'System.Single', value: text, bits: BITS[text] });
+const vector3 = (x, y, z) => ({ $type: 'System.Numerics.Vector3', $members: [['X', x], ['Y', y], ['Z', z]].map(([name, text]) => ({ name, value: single(text) })) });
+
+function msbGraph(rows = MSB_ROWS) {
+  let id = 1;
+  const node = (type, members) => ({ $id: id++, $type: type, $members: Object.entries(members).map(([name, value]) => ({ name, value })) });
+  const param = (family, familyClass, rows, build) => {
+    const lists = {};
+    for (const row of rows) (lists[CLASS[family][row[0]]] ??= []).push(node(`SoulsFormats.MSBS+${familyClass}+${CLASS[family][row[0]]}`, build(row)));
+    return node(`SoulsFormats.MSBS+${familyClass}Param`, { Version: 1,
+      ...Object.fromEntries(Object.entries(lists).map(([name, items]) => [`${name}s`, { $id: id++, $type: 'List', $items: items }])) });
+  };
+  const models = param('model', 'Model', rows.models, ([, name, sib]) => ({ Name: name, SibPath: sib }));
+  const parts = param('part', 'Part', rows.parts, ([, name, index, p, r, s, entity]) => ({ Name: name,
+    ModelName: rows.models[index][1], Position: vector3(...p), Rotation: vector3(...r), Scale: vector3(...s), EntityID: entity }));
+  const regions = param('region', 'Region', rows.regions, ([, name, shape, p, r, entity]) => ({ Name: name,
+    Shape: { $id: id++, $type: `SoulsFormats.MSB+Shape+${CLASS.shape[shape]}`, $members: [] }, Position: vector3(...p), Rotation: vector3(...r), EntityID: entity }));
+  const events = param('event', 'Event', rows.events, ([, name, eventId]) => ({ Name: name, EventID: eventId }));
+  return node('SoulsFormats.MSBS', { Models: models, Events: events, Regions: regions, Parts: parts });
+}
+
+function msbEnvelope(mutate = rows => rows, base = MSB_ROWS) {
+  const rows = mutate(structuredClone(base));
+  const xyz = (prefix, [x, y, z]) => ({ [`${prefix}X`]: Number(x), [`${prefix}Y`]: Number(y), [`${prefix}Z`]: Number(z) });
+  const envelope = { format: 'MSB',
+    models: rows.models.map(([typeId, name, sibPath]) => ({ name, sibPath, typeId })),
+    parts: rows.parts.map(([typeId, name, modelIndex, p, r, s, entityId]) => ({ name, typeId, modelIndex, ...xyz('pos', p), ...xyz('rot', r), ...xyz('scale', s), entityId })),
+    regions: rows.regions.map(([typeId, name, shapeType, p, r, entityId]) => ({ name, typeId, shapeType, ...xyz('pos', p), ...xyz('rot', r), entityId })),
+    events: rows.events.map(([typeId, name, eventId]) => ({ name, typeId, eventId })) };
+  for (const key of ['models', 'parts', 'regions', 'events']) { envelope[`${key.slice(0, -1)}Count`] = envelope[key].length; envelope[`${key}Truncated`] = false; }
+  return envelope;
+}
+
+test('MSB reference graph and Bridge envelope normalise to the same rows, in type order then file order', () => {
+  const reference = msbFromReferenceGraph(msbGraph());
+  const bridge = msbFromBridge(msbEnvelope());
+  for (const part of ['models', 'parts', 'regions', 'events']) assert.equal(compareOrdered(reference[part], bridge[part], msbKeys[part]).equal, true, part);
+  assert.deepEqual(reference.models.map(m => [m.type, m.name, m.sibPath]), [['MapPiece', 'm0', 'sib/m0'], ['MapPiece', 'm1', null], ['Enemy', 'e0', 'sib/e0']]);
+  assert.deepEqual(reference.parts[0], { type: 'MapPiece', name: 'p0', model: 'm1', position: '3F800000,C3978000,3F000000',
+    rotation: '00000000,42B40000,00000000', scale: '3F800000,3F800000,3F800000', entityId: '0' });
+  assert.deepEqual(reference.regions.map(r => [r.type, r.name, r.shape]), [['SFX', 'r0', 'Point'], ['Other', 'r1', 'Box']]);
+  assert.deepEqual(reference.events.map(e => [e.type, e.name, e.eventId]), [['Treasure', 't0', '10'], ['Talk', 'k0', '11']]);
+});
+
+test('one ulp, -0, a shifted model index, a type, shape, entity or event id change is a diff; unknown ids stay visible', () => {
+  const reference = msbFromReferenceGraph(msbGraph());
+  const diff = (part, mutate) => compareOrdered(reference[part], msbFromBridge(msbEnvelope(mutate))[part], msbKeys[part]);
+  assert.equal(diff('parts', rows => { rows.parts[1][3][0] = String(1 + 2 ** -23); return rows; }).differenceCount, 1);
+  assert.equal(diff('parts', rows => { rows.parts[1][4][0] = '-0'; return rows; }).differenceCount, 1);
+  assert.equal(diff('parts', rows => { rows.parts[1][2] = 0; return rows; }).differenceCount, 1);
+  assert.equal(diff('parts', rows => { rows.parts[0][0] = 10; return rows; }).differenceCount, 1, 'Enemy read as DummyEnemy');
+  assert.equal(diff('regions', rows => { rows.regions[1][2] = 2; return rows; }).differenceCount, 1);
+  assert.equal(diff('regions', rows => { rows.regions[0][5] = 8; return rows; }).differenceCount, 1);
+  assert.equal(diff('events', rows => { rows.events[1][2] = 11; return rows; }).differenceCount, 1);
+  const unknown = msbFromBridge(msbEnvelope(rows => { rows.events[0][0] = 99; rows.regions[1][2] = 9; return rows; }));
+  assert.equal(unknown.events.at(-1).type, '<unknown typeId 99>');
+  assert.equal(unknown.regions[0].shape, '<unknown shapeType 9>');
+  // SoulsFormats MSB.FindName: -1 or past the end is no model name; another negative index is not a name either.
+  const indexes = msbFromBridge(msbEnvelope(rows => { rows.parts[0][2] = -1; rows.parts[1][2] = 3; return rows; }));
+  assert.deepEqual(indexes.parts.map(p => p.model), [null, null]);
+  assert.equal(msbFromBridge(msbEnvelope(rows => { rows.parts[1][2] = -2; return rows; })).parts[0].model, '<invalid modelIndex -2>');
+});
+
+test('a truncated or inconsistent Bridge envelope and an unknown or malformed reference graph fail instead of comparing', () => {
+  assert.throws(() => msbFromBridge({ ...msbEnvelope(), format: 'TAE' }), /expected a Bridge MSB envelope/u);
+  assert.throws(() => msbFromBridge({ ...msbEnvelope(), regionsTruncated: true }), /regions are truncated/u);
+  assert.throws(() => msbFromBridge({ ...msbEnvelope(), eventCount: 3 }), /events length does not match its count/u);
+  const typeText = msbEnvelope(); typeText.parts[0].typeId = '2';
+  assert.throws(() => msbFromBridge(typeText), /part typeId is not an integer/u);
+  const nonFinite = msbEnvelope(); nonFinite.parts[0].posX = null;
+  assert.throws(() => msbFromBridge(nonFinite), /not a finite float/u);
+  assert.throws(() => msbFromReferenceGraph({ $type: 'SoulsFormats.MSB3' }), /expected SoulsFormats\.MSBS/u);
+  const section = (graph, param, list) => graph.$members.find(m => m.name === param).value.$members.find(m => m.name === list).value;
+  const unknownClass = msbGraph(); section(unknownClass, 'Events', 'Talks').$items[0].$type = 'SoulsFormats.MSBS+Event+Navmesh';
+  assert.throws(() => msbFromReferenceGraph(unknownClass), /unknown MSBS event class/u);
+  const noBits = msbGraph(); delete section(noBits, 'Parts', 'MapPieces').$items[0].$members.find(m => m.name === 'Position').value.$members[0].value.bits;
+  assert.throws(() => msbFromReferenceGraph(noBits), /expected a System\.Single with bits/u);
+});
+
+test('MSB name disambiguation follows SoulsFormats: duplicates get " {n}", blanks always do, and passes repeat until unique', () => {
+  assert.deepEqual(msbDisambiguateNames(['名', '名', '名']), ['名', '名 {2}', '名 {3}']);
+  assert.deepEqual(msbDisambiguateNames(['']), [' {1}']);
+  assert.deepEqual(msbDisambiguateNames(['', 'a', '']), [' {1}', 'a', ' {2}']);
+  // Pass 1 renames the second "A" to "A {2}", which collides with the third entry's own name; pass 2 renames that one.
+  assert.deepEqual(msbDisambiguateNames(['A', 'A', 'A {2}']), ['A', 'A {2}', 'A {2} {2}']);
+  assert.deepEqual(msbDisambiguateNames(['a', 'b']), ['a', 'b']);
+  assert.deepEqual(msbDisambiguateNames(['a', 'a'], 'C'), ['a', 'Ca {2}']);
+  const input = ['x', 'x'];
+  msbDisambiguateNames(input);
+  assert.deepEqual(input, ['x', 'x'], 'the input list is not modified');
+  assert.throws(() => msbDisambiguateNames(['a', null]), /not a string/u);
+});
+
+// Raw Bridge rows of one map with duplicate and blank names across types, and the names SoulsFormats shows after its
+// post-read rename, written by hand: one counter per list in file order across types; events are not renamed.
+const DUP_ROWS = {
+  models: [[0, 'm', 'sib/a'], [2, 'm', 'sib/b'], [0, '', null]],
+  parts: [[0, 'p', 1, ['1', '0', '0'], ['0', '0', '0'], ['1', '1', '1'], 0], [2, 'p', 2, ['2', '0', '0'], ['0', '0', '0'], ['1', '1', '1'], 0],
+    [0, 'p', 0, ['0', '0', '0'], ['0', '0', '0'], ['1', '1', '1'], 0]],
+  regions: [[-1, 'r', 0, ['0', '0', '0'], ['0', '0', '0'], 0], [5, 'r', 0, ['1', '0', '0'], ['0', '0', '0'], 0], [5, '', 0, ['2', '0', '0'], ['0', '0', '0'], 0]],
+  events: [[23, 'k', 1], [23, 'k', 2]]
+};
+const DUP_REFERENCE = structuredClone(DUP_ROWS);
+DUP_REFERENCE.models.forEach((row, i) => { row[1] = ['m', 'm {2}', ' {1}'][i]; });
+DUP_REFERENCE.parts.forEach((row, i) => { row[1] = ['p', 'p {2}', 'p {3}'][i]; });
+DUP_REFERENCE.regions.forEach((row, i) => { row[1] = ['r', 'r {2}', ' {1}'][i]; });
+
+test('Bridge duplicate and blank names get the same rename as SoulsFormats, and parts resolve the renamed model names', () => {
+  const reference = msbFromReferenceGraph(msbGraph(DUP_REFERENCE));
+  const bridge = msbFromBridge(msbEnvelope(undefined, DUP_ROWS));
+  for (const part of ['models', 'parts', 'regions', 'events']) assert.equal(compareOrdered(reference[part], bridge[part], msbKeys[part]).equal, true, part);
+  assert.deepEqual(bridge.models.map(m => m.name), ['m', ' {1}', 'm {2}']);
+  assert.deepEqual(bridge.parts.map(p => [p.name, p.model]), [['p', 'm {2}'], ['p {3}', 'm'], ['p {2}', ' {1}']]);
+  // One counter across types in file order: per-type renaming would give the first SFX region "r", not "r {2}".
+  assert.deepEqual(bridge.regions.map(r => r.name), ['r {2}', ' {1}', 'r']);
+  assert.deepEqual(bridge.events.map(e => e.name), ['k', 'k']);
+});
+
+test('a Bridge name cut to a prefix of a unique reference name is still a diff, also when the cut-off part is " {2}"', () => {
+  const suffixed = structuredClone(MSB_ROWS); suffixed.regions[1][1] = 'x {2}';
+  const reference = msbFromReferenceGraph(msbGraph(suffixed));
+  const cut = msbFromBridge(msbEnvelope(rows => { rows.regions[1][1] = 'x'; return rows; }, suffixed));
+  assert.equal(compareOrdered(reference.regions, cut.regions, msbKeys.regions).differenceCount, 1);
+  assert.equal(compareOrdered(reference.regions, msbFromBridge(msbEnvelope(undefined, suffixed)).regions, msbKeys.regions).equal, true);
+  const model = structuredClone(MSB_ROWS); model.models[2][1] = 'm1 {2}';
+  const modelReference = msbFromReferenceGraph(msbGraph(model));
+  const modelCut = msbFromBridge(msbEnvelope(rows => { rows.models[2][1] = 'm1'; return rows; }, model));
+  assert.equal(compareOrdered(modelReference.models, modelCut.models, msbKeys.models).differenceCount, 1);
+  assert.equal(compareOrdered(modelReference.parts, modelCut.parts, msbKeys.parts).differenceCount, 1, 'the part that uses that model');
+  const plain = structuredClone(MSB_ROWS); plain.regions[1][1] = 'route_long_name';
+  const plainCut = msbFromBridge(msbEnvelope(rows => { rows.regions[1][1] = 'route_long'; return rows; }, plain));
+  assert.equal(compareOrdered(msbFromReferenceGraph(msbGraph(plain)).regions, plainCut.regions, msbKeys.regions).differenceCount, 1);
 });

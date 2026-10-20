@@ -35,6 +35,15 @@
         "event/common.emevd.dcx",
         "mods/event/common.emevd.dcx"
       ]
+    },
+    {
+      "game": "sekiro",
+      "format": "msb",
+      "operation": "read-map",
+      "reference": "soulsformats-next",
+      "inputs": [
+        "mods/map/mapstudio/m13_00_00_00.msb.dcx"
+      ]
     }
   ]
 }

@@ -104,11 +104,7 @@ export function taeAnimationsFromBridge(animations, entryIndex) {
 export function emevdFromReferenceGraph(graph) {
   if (graph?.$type !== 'SoulsFormats.EMEVD') throw new Error(`expected SoulsFormats.EMEVD, got ${graph?.$type}`);
   const deref = graphRefResolver(graph);
-  const list = (node, name) => {
-    const items = deref(member(node, name))?.$items;
-    if (!Array.isArray(items)) throw new Error(`${node.$type} ${name} has no items`);
-    return items.map(deref);
-  };
+  const list = (node, name) => memberItems(node, name, deref);
   const events = [], instructions = [], parameters = [];
   for (const event of list(graph, 'Events')) {
     const eventId = integerText(member(event, 'ID'));
@@ -193,6 +189,179 @@ export function graphRefResolver(graph) {
     const target = byId.get(node.$ref);
     if (!target) throw new Error(`unresolved $ref ${node.$ref}`);
     return target;
+  };
+}
+
+// A graph member's collection: the resolved node must carry an $items array; every item is resolved too.
+export function memberItems(node, name, deref) {
+  if (typeof deref !== 'function') throw new Error('memberItems needs a graphRefResolver');
+  const items = deref(member(node, name))?.$items;
+  if (!Array.isArray(items)) throw new Error(`${node.$type} ${name} has no items`);
+  return items.map(deref);
+}
+
+// Int64 graph value { $type: "System.Int64", value: "<decimal>" } -> canonical decimal text, range-checked.
+export function int64Text(value) {
+  if (value?.$type !== 'System.Int64') throw new Error(`expected System.Int64, got ${JSON.stringify(value)}`);
+  const text = value.value;
+  if (typeof text !== 'string' || !/^(0|-?[1-9]\d*)$/u.test(text)) throw new Error(`not an Int64 decimal: ${JSON.stringify(value)}`);
+  const big = BigInt(text);
+  if (big < -(2n ** 63n) || big >= 2n ** 63n) throw new Error(`Int64 out of range: ${text}`);
+  return text;
+}
+
+// IEEE-754 single bits as 8 upper-case hex digits. Exact: no tolerance, -0 differs from +0, one ulp is a difference.
+export function float32Bits(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`not a finite float: ${JSON.stringify(value)}`);
+  const view = new DataView(new ArrayBuffer(4));
+  view.setFloat32(0, value);
+  return view.getUint32(0).toString(16).toUpperCase().padStart(8, '0');
+}
+
+// GraphWriter System.Single { $type, value, bits } -> its recorded bits; the decimal text is display only.
+export function referenceFloatBits(node) {
+  if (node?.$type !== 'System.Single' || typeof node.bits !== 'string' || !/^[0-9A-Fa-f]{8}$/u.test(node.bits)) {
+    throw new Error(`expected a System.Single with bits, got ${JSON.stringify(node)}`);
+  }
+  return node.bits.toUpperCase();
+}
+
+// MSBS type ids -> SoulsFormats class names, copied from the pinned SoulsFormatsNEXT (ee1dd619) enums, in declaration
+// order. Every concrete class overrides Type with the enum member of its own name, so a graph $type class name is the id.
+//   ModelType:  SoulsFormats/Formats/MSB/MSBS/ModelParam.cs:10-17
+//   PartType:   SoulsFormats/Formats/MSB/MSBS/PartsParam.cs:10-20
+//   RegionType: SoulsFormats/Formats/MSB/MSBS/PointParam.cs:10-39 (Other = 0xFFFFFFFF; the Bridge reports it as int32 -1)
+//   EventType:  SoulsFormats/Formats/MSB/MSBS/EventParam.cs:10-38 (Other = 0xFFFFFFFF)
+//   ShapeType:  SoulsFormats/Formats/MSB/Shape.cs:10-20
+export const MSBS_TYPES = Object.freeze({
+  model: [[0, 'MapPiece'], [1, 'Object'], [2, 'Enemy'], [4, 'Player'], [5, 'Collision']],
+  part: [[0, 'MapPiece'], [1, 'Object'], [2, 'Enemy'], [4, 'Player'], [5, 'Collision'], [9, 'DummyObject'], [10, 'DummyEnemy'],
+    [11, 'ConnectCollision']],
+  region: [[1, 'InvasionPoint'], [2, 'EnvironmentMapPoint'], [4, 'Sound'], [5, 'SFX'], [6, 'WindSFX'], [8, 'SpawnPoint'],
+    [11, 'PatrolRoute'], [13, 'WarpPoint'], [14, 'ActivationArea'], [15, 'Event'], [0, 'Logic'], [17, 'EnvironmentMapEffectBox'],
+    [18, 'WindArea'], [20, 'MufflingBox'], [21, 'MufflingPortal'], [23, 'SoundSpaceOverride'], [24, 'MufflingPlane'],
+    [25, 'PartsGroupArea'], [26, 'AutoDrawGroupPoint'], [0xFFFFFFFF, 'Other']],
+  event: [[4, 'Treasure'], [5, 'Generator'], [7, 'ObjAct'], [9, 'MapOffset'], [14, 'PatrolInfo'], [15, 'PlatoonInfo'],
+    [17, 'ResourceItemInfo'], [18, 'GrassLodParam'], [20, 'SkitInfo'], [21, 'PlacementGroup'], [22, 'PartsGroup'], [23, 'Talk'],
+    [24, 'AutoDrawGroupCollision'], [0xFFFFFFFF, 'Other']],
+  shape: [[0, 'Point'], [1, 'Circle'], [2, 'Sphere'], [3, 'Cylinder'], [4, 'Rectangle'], [5, 'Box'], [6, 'Composite']]
+});
+const MSB_FAMILIES = [['models', 'Models', 'Model', 'model'], ['parts', 'Parts', 'Part', 'part'],
+  ['regions', 'Regions', 'Region', 'region'], ['events', 'Events', 'Event', 'event']];
+const msbTypeByClass = family => new Map(MSBS_TYPES[family].map(([id, name], order) => [name, { id, name, order }]));
+const msbTypeById = family => new Map(MSBS_TYPES[family].map(([id, name], order) => [id, { id, name, order }]));
+// Both sides are ordered the same way: the enum declaration order, then the file order inside one type. The interleaving
+// of types in the file is not compared (SoulsFormats does not keep it either).
+const orderByType = rows => rows.map((row, index) => ({ row, index }))
+  .sort((a, b) => a.row.typeOrder - b.row.typeOrder || a.index - b.index).map(({ row }) => { const { typeOrder, ...rest } = row; return rest; });
+
+// SoulsFormats.MSBS graph -> { models, parts, regions, events }, each ordered by MSBS_TYPES. Region scale is not compared:
+// MSBS regions have no Scale, and the Bridge MsbRegion ScaleX/Y/Z (MsbNativeDocument.cs:858-863, constant 1) are not
+// in the read-msb-document envelope.
+export function msbFromReferenceGraph(graph) {
+  if (graph?.$type !== 'SoulsFormats.MSBS') throw new Error(`expected SoulsFormats.MSBS, got ${graph?.$type}`);
+  const deref = graphRefResolver(graph);
+  const result = {};
+  for (const [key, paramName, familyClass, family] of MSB_FAMILIES) {
+    const param = deref(member(graph, paramName));
+    const types = msbTypeByClass(family);
+    const pattern = new RegExp(`^SoulsFormats\\.MSBS\\+${familyClass}\\+(\\w+)$`, 'u');
+    const rows = [];
+    for (const { name } of param?.$members ?? []) {
+      if (!Array.isArray(deref(member(param, name))?.$items)) continue;
+      for (const item of memberItems(param, name, deref)) {
+        const type = types.get(pattern.exec(item?.$type ?? '')?.[1]);
+        if (!type) throw new Error(`unknown MSBS ${family} class ${item?.$type} in ${paramName}.${name}`);
+        rows.push({ typeOrder: type.order, type: type.name, ...msbReferenceRow(family, item, deref) });
+      }
+    }
+    result[key] = orderByType(rows);
+  }
+  return result;
+}
+
+function msbReferenceRow(family, item, deref) {
+  const get = name => deref(member(item, name));
+  const vector = name => { const value = get(name); return ['X', 'Y', 'Z'].map(axis => referenceFloatBits(member(value, axis))).join(','); };
+  if (family === 'model') return { name: get('Name'), sibPath: get('SibPath') };
+  if (family === 'part') return { name: get('Name'), model: get('ModelName'), position: vector('Position'), rotation: vector('Rotation'),
+    scale: vector('Scale'), entityId: integerText(get('EntityID')) };
+  if (family === 'region') {
+    const shapeType = get('Shape')?.$type;
+    const shape = /^SoulsFormats\.MSB\+Shape\+(\w+)$/u.exec(shapeType ?? '')?.[1];
+    if (!msbTypeByClass('shape').has(shape)) throw new Error(`unknown MSB shape ${shapeType}`);
+    return { name: get('Name'), shape, position: vector('Position'), rotation: vector('Rotation'), entityId: integerText(get('EntityID')) };
+  }
+  return { name: get('Name'), eventId: integerText(get('EventID')) };
+}
+
+export const msbKeys = Object.freeze({
+  models: model => JSON.stringify([model.type, model.name, model.sibPath]),
+  parts: part => JSON.stringify([part.type, part.name, part.model, part.position, part.rotation, part.scale, part.entityId]),
+  regions: region => JSON.stringify([region.type, region.name, region.shape, region.position, region.rotation, region.entityId]),
+  events: event => JSON.stringify([event.type, event.name, event.eventId])
+});
+
+// Line-by-line port of SoulsFormatsNEXT ee1dd619 SoulsFormats/Formats/MSB/MSB.cs:48-76 DisambiguateNames, over a list of
+// names in entry order. Repeats whole passes until one pass renames nothing; "" is pre-counted (nameCounts[""] = 0, :58),
+// so every blank name is renamed " {n}". A non-string name fails, as the C# dictionary lookup would.
+export function msbDisambiguateNames(input, className = '') {
+  const names = [...input];
+  let ambiguous;
+  do {
+    ambiguous = false;
+    const nameCounts = new Map();
+    nameCounts.set('', 0);
+    for (let i = 0; i < names.length; i++) {
+      const name = names[i];
+      if (typeof name !== 'string') throw new Error(`MSB entry name is not a string: ${JSON.stringify(name)}`);
+      if (!nameCounts.has(name) && name !== '') {
+        nameCounts.set(name, 1);
+      } else {
+        ambiguous = true;
+        nameCounts.set(name, nameCounts.get(name) + 1);
+        names[i] = `${className}${name} {${nameCounts.get(name)}}`;
+      }
+    }
+  } while (ambiguous);
+  return names;
+}
+
+// Bridge read-msb-document envelope -> the same shape. A truncated or self-inconsistent envelope throws; an unregistered
+// type id or shape is kept as a visible "<unknown ...>" value so it shows up as a difference rather than being dropped.
+export function msbFromBridge(envelope) {
+  if (envelope?.format !== 'MSB') throw new Error(`expected a Bridge MSB envelope, got ${envelope?.format}`);
+  for (const [key] of MSB_FAMILIES) {
+    if (envelope[`${key}Truncated`] !== false) throw new Error(`Bridge MSB ${key} are truncated`);
+    const count = envelope[`${key.slice(0, -1)}Count`];
+    if (!Array.isArray(envelope[key]) || envelope[key].length !== count) throw new Error(`Bridge MSB ${key} length does not match its count`);
+  }
+  const typed = (family, entry) => {
+    if (!Number.isInteger(entry.typeId)) throw new Error(`Bridge MSB ${family} typeId is not an integer: ${JSON.stringify(entry.typeId)}`);
+    const type = msbTypeById(family).get(entry.typeId >>> 0);
+    return type ? { typeOrder: type.order, type: type.name } : { typeOrder: MSBS_TYPES[family].length, type: `<unknown typeId ${entry.typeId}>` };
+  };
+  const vector = (entry, prefix) => ['X', 'Y', 'Z'].map(axis => float32Bits(entry[`${prefix}${axis}`])).join(',');
+  // SoulsFormats renames duplicate and blank names after reading (MSBS/MSBS.cs:112-114: Models, Regions, Parts; not Events),
+  // before parts resolve ModelName (MSBS.cs:120). The Bridge arrays follow each param's entry offset table, the same order
+  // SoulsFormats reads (MSBS.cs:193-213 Param.Read; MsbNativeDocument.cs ReadModels/ReadRegions/ReadParts), so the same
+  // forward transform is applied to them here; reference names are never stripped.
+  const names = key => msbDisambiguateNames(envelope[key].map(entry => entry.name));
+  const modelNames = names('models'), partNames = names('parts'), regionNames = names('regions');
+  // SoulsFormats MSB.FindName (MSB/MSB.cs:83-91): index -1 or past the end resolves to no model name.
+  const modelName = index => {
+    if (!Number.isInteger(index)) throw new Error(`Bridge MSB modelIndex is not an integer: ${JSON.stringify(index)}`);
+    if (index === -1 || index >= modelNames.length) return null;
+    return index < 0 ? `<invalid modelIndex ${index}>` : modelNames[index];
+  };
+  const shape = value => msbTypeById('shape').get(value)?.name ?? `<unknown shapeType ${value}>`;
+  return {
+    models: orderByType(envelope.models.map((model, i) => ({ ...typed('model', model), name: modelNames[i], sibPath: model.sibPath ?? null }))),
+    parts: orderByType(envelope.parts.map((part, i) => ({ ...typed('part', part), name: partNames[i], model: modelName(part.modelIndex),
+      position: vector(part, 'pos'), rotation: vector(part, 'rot'), scale: vector(part, 'scale'), entityId: integerText(part.entityId) }))),
+    regions: orderByType(envelope.regions.map((region, i) => ({ ...typed('region', region), name: regionNames[i], shape: shape(region.shapeType),
+      position: vector(region, 'pos'), rotation: vector(region, 'rot'), entityId: integerText(region.entityId) }))),
+    events: orderByType(envelope.events.map(event => ({ ...typed('event', event), name: event.name, eventId: integerText(event.eventId) })))
   };
 }
 
