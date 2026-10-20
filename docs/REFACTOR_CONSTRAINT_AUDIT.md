@@ -53,7 +53,7 @@
 
 ```powershell
 node scripts/check.mjs --list --tier all --json-out .local-validation/closeout/check-discovery.json
-node scripts/testing/check-migration-inventory.mjs D:/Repository/SoulForge .local-validation/closeout/check-migration.json
+node scripts/testing/check-migration-inventory.mjs <repo-root> .local-validation/closeout/check-migration.json
 ```
 
 该快照逐项列出旧登记名、入口、新发现候选和实际命令。标记 `requires-semantic-mapping` 的条目不能自动认定被覆盖或可删除。旧 main 完整运行集合尚无同环境成功证据，因此**不声称新旧实际执行集合已证明等价**。当前运行结果必须读 `check` 报告的每个 step；根 `npm test` 的 `&&` 在失败后留下的尾项仍是未运行，不能由静态可达推断通过。

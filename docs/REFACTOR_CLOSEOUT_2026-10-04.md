@@ -523,7 +523,7 @@ Windows `bridge:publish`、typecheck、build 均退出 0；C# 为 **156 passed /
 
 ## 证据位置与重跑规则
 
-本地工作树：`C:\Users\ASUS\.codex\worktrees\52bc\SoulForge`。本轮原始回执在 `.local-validation/closeout/`，真实 MAP 在 `output/playwright/`；不将私有语料、凭据、第三方 DLL 或原始模型会话上传到仓库。
+本地工作树：`<CODEX_HOME>\worktrees\52bc\SoulForge`。本轮原始回执在 `.local-validation/closeout/`，真实 MAP 在 `output/playwright/`；不将私有语料、凭据、第三方 DLL 或原始模型会话上传到仓库。
 
 当前冻结源码的 71 份关键回执、原始日志和输入 manifest 已建立只读索引：`final-evidence-index-d150312a-20261005.json`，SHA256 为 `7073a8b5a489c5997236f070ef731d4e276300d5dae278a9e0776021c47562ab`。索引不替代测试，也不覆盖全部历史产物；每条记录保留实际路径、长度和 hash。之后的收尾文档提交只改变这两份报告，产品验收仍绑定 `d150312a`，不把旧安装 manifest 的 HEAD 改写成文档提交。
 
