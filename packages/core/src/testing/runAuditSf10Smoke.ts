@@ -37,7 +37,7 @@ import {
 } from '../editing/luabndEdit.js';
 import { openNativeEditSession } from '../editing/nativeEditSession.js';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
-import { resolveNativeFixture } from './nativeFixtureRegistry.js';
+import { nativeOodleRuntimeRoot, resolveNativeFixture } from './nativeFixtureRegistry.js';
 import { assertSekiroBytecodeSnapshot } from './staleValidationAssertions.js';
 
 function fail(message: string): never {
@@ -413,9 +413,9 @@ async function runNativeLayer(): Promise<void> {
     '../../mods/script/aicommon.luabnd.dcx'
   );
 
+  const oodleRuntimeRoot = nativeOodleRuntimeRoot();
   const root = await mkdtemp(join(tmpdir(), 'soulforge-sf10-native-'));
   const staging = join(root, 'staging');
-  const oodleRuntimeRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT || 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
 
   try {
     await mkdir(staging, { recursive: true });

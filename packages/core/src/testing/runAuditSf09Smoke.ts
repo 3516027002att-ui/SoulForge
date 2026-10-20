@@ -25,7 +25,7 @@ import { commitEmevdBatchViaBridge } from '../editing/emevdBridgeCommit.js';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { encodeInstructionArgs, createSekiroFixtureEmedf } from '../emevd/emedfSchema.js';
 import { buildSyntheticEmevd, sha256Hex } from './syntheticEmevdBytes.js';
-import { resolveNativeFixture } from './nativeFixtureRegistry.js';
+import { nativeOodleRuntimeRoot, resolveNativeFixture } from './nativeFixtureRegistry.js';
 import { readEmevdEvent } from '../editing/emevdEdit.js';
 import { openNativeEditSession } from '../editing/nativeEditSession.js';
 
@@ -490,11 +490,11 @@ async function runNativeLayer(): Promise<void> {
     '../../mods/event/common.emevd.dcx'
   );
 
+  const oodleRuntimeRoot = nativeOodleRuntimeRoot();
   const root = await mkdtemp(join(tmpdir(), 'soulforge-sf09-native-'));
   const staging = join(root, 'staging');
   const backup = join(root, 'backup');
   const recovery = join(root, 'recovery');
-  const oodleRuntimeRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT || 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
 
   try {
     await mkdir(staging, { recursive: true });

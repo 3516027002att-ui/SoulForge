@@ -187,3 +187,13 @@ async function sha256File(path: string): Promise<string> {
   for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
   return hash.digest('hex');
 }
+
+/**
+ * Oodle runtime root for native smokes: SOULFORGE_OODLE_RUNTIME_ROOT, else the game root. Game data never ships
+ * with the repository, so a missing root is a configuration error rather than a reason to guess a local folder.
+ */
+export function nativeOodleRuntimeRoot(): string {
+  const root = process.env.SOULFORGE_OODLE_RUNTIME_ROOT?.trim() || process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+  if (!root) throw new Error('NATIVE_OODLE_ROOT_MISSING: set SOULFORGE_OODLE_RUNTIME_ROOT or SOULFORGE_SEKIRO_GAME_ROOT.');
+  return root;
+}
