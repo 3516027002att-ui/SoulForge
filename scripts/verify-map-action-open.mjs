@@ -3,8 +3,14 @@ import { existsSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { disposeBridgeDaemonPool, runBridge } from '../packages/core/dist/bridge/runBridge.js';
 import { classifyNativeRead, summarizeNativeReads, verifyFileCoverage } from './native-read-acceptance.mjs';
-const MODS_ROOT = 'D:/mystream/Sekiro Shadows Die Twice/Sekiro/mods';
-const GAME_ROOT = 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
+// Real game data never ships with the repository; without both roots the check honestly skips.
+const GAME_ROOT = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim().replaceAll('\\', '/') || '';
+const MODS_ROOT = (process.env.SOULFORGE_SEKIRO_MOD_ROOT?.trim() || (GAME_ROOT ? join(GAME_ROOT, 'mods') : '')).replaceAll('\\', '/');
+if (!GAME_ROOT || !existsSync(MODS_ROOT)) {
+  console.log(JSON.stringify({ ok: null, status: 'skipped', skipped: true, gate: 'verify-map-action-open',
+    reason: 'SOULFORGE_SEKIRO_GAME_ROOT (and an existing mods root) is required' }));
+  process.exit(0);
+}
 function collectFiles(root){const out=[],stack=[root];while(stack.length){const dir=stack.pop();let e=[];try{e=readdirSync(dir,{withFileTypes:true});}catch(error){if(error.code==='ENOENT'&&dir===root)continue;throw error;}for(const x of e){const p=join(dir,x.name);if(x.isDirectory())stack.push(p);else if(x.isFile())out.push(p)}}return out;}
 function pick(files,pats,n=2){return files.filter(f=>pats.some(p=>f.toLowerCase().includes(p.toLowerCase()))).slice(0,n);}
 function relative(file){return file.replaceAll('\\','/').slice(MODS_ROOT.length+1);}
