@@ -177,7 +177,7 @@ describe('跨 sender token/handle 拒绝', () => {
 
 describe('renderer 安全白名单：绝对路径 / raw parser / Hex 不进入 DTO', () => {
   it('绝对路径进入任一字符串字段即拒绝', () => {
-    const drive = selection({ documentId: 'D:\\mystream\\Sekiro\\param\\gameparam.parambnd.dcx' });
+    const drive = selection({ documentId: 'D:\\GameLibrary\\Sekiro\\param\\gameparam.parambnd.dcx' });
     assert.ok(selectionRendererSafetyIssues(drive).some((issue) => issue.code === 'AGENT_SELECTION_ABSOLUTE_PATH'));
     assert.ok(!isSelectionRendererSafe(drive));
 

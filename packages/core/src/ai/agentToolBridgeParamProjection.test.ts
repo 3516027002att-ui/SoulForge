@@ -128,7 +128,7 @@ describe('Agent bridge resource identity redaction', () => {
         {
           score: 170,
           item: {
-            id: 'file:///D:/mystream/Sekiro%20Shadows%20Die%20Twice/Sekiro/mods:chr/c0000.anibnd.dcx',
+            id: 'file:///D:/GameLibrary/Sekiro%20Shadows%20Die%20Twice/Sekiro/mods:chr/c0000.anibnd.dcx',
             sourceUri: 'file://chr/c0000.anibnd.dcx',
             relativePath: 'chr/c0000.anibnd.dcx',
             resourceKind: 'chr'
@@ -160,7 +160,7 @@ describe('Agent bridge resource identity redaction', () => {
     });
     assert.equal(result.ok, true);
     const raw = result.content;
-    assert.equal(raw.includes('mystream'), false);
+    assert.equal(raw.includes('GameLibrary'), false);
     assert.equal(raw.includes('file:///D:'), false);
     const envelope = JSON.parse(raw) as { data?: { record?: any } };
     const items = envelope.data?.record?.matches?.map((match: any) => match.item ?? match);

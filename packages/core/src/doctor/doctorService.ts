@@ -121,7 +121,7 @@ export async function runDoctorAutoFix(options: DoctorOptions = {}): Promise<Aut
 
 function fallbackNodeDiagnosis(options: DoctorOptions): DoctorReport {
   const items: DoctorItem[] = [];
-  const defaultSekiro = options.sekiroPath || 'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro';
+  const defaultSekiro = options.sekiroPath || 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Sekiro';
   const sekiroExists = existsSync(join(defaultSekiro, 'sekiro.exe'));
 
   items.push({

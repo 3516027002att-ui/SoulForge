@@ -133,7 +133,7 @@ test('缺失必填字段被拒绝', () => {
 
 test('绝对路径进入 renderer DTO 被拒绝', () => {
   const bad = structuredClone(summaryFixture) as any;
-  bad.domains[0].defaultTarget.resourceId = 'D:\\mystream\\Sekiro\\gameparam.parambnd.dcx';
+  bad.domains[0].defaultTarget.resourceId = 'D:\\GameLibrary\\Sekiro\\gameparam.parambnd.dcx';
   assert.throws(() => decodeEditorCatalogSummary(bad), EditorCatalogDecodeError);
   const badPosix = structuredClone(summaryFixture) as any;
   badPosix.libraries[0].libraryId = '/var/soulforge/game-parameters';

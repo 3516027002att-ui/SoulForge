@@ -193,7 +193,7 @@ const SENSITIVE_PROBE = {
   sourceUri: 'file://chr/c0000.anibnd.dcx',
   relativePath: 'chr/c0000.anibnd.dcx',
   documentation: 'https://example.com/resources/chr',
-  absolutePath: 'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro\\a.fmg',
+  absolutePath: 'D:\\GameLibrary\\Sekiro Shadows Die Twice\\Sekiro\\a.fmg',
   sourcePath: 'D:\\workspace\\mod\\a.fmg',
   workspaceRoot: 'D:\\workspace\\mod',
   apiKey: 'sk-should-never-cross-the-bridge',
@@ -220,7 +220,7 @@ if (typeof sanitizeRendererValue === 'function') {
   const leakedValues = [
     'sk-should-never-cross-the-bridge',
     'bearer-should-never-cross',
-    'D:\\\\mystream',
+    'D:\\\\GameLibrary',
     'D:\\\\workspace',
     '/home/user/mod/file',
     '/tmp/sf/a.fmg',

@@ -505,10 +505,10 @@ describe('§12.8/§12.11 上下文、资源引用与消息流（AGENT-60C）', (
   it('绝对路径选区回退空态，不进入 DOM', () => {
     const leaking = {
       ...selection0('param'),
-      documentId: 'D:\\mystream\\Sekiro\\param\\gameparam.parambnd.dcx'
+      documentId: 'D:\\GameLibrary\\Sekiro\\param\\gameparam.parambnd.dcx'
     };
     const html = render({ selection: leaking });
-    assert.ok(!html.includes('D:\\mystream'), 'DOM 不应包含绝对路径');
+    assert.ok(!html.includes('D:\\GameLibrary'), 'DOM 不应包含绝对路径');
     assert.ok(!html.includes('gameparam.parambnd.dcx'), '泄漏的 documentId 不应进入 DOM');
     assert.ok(!html.includes('data-testid="agent-context-picker"'), '空的上下文 chip 已从输入区移除');
   });

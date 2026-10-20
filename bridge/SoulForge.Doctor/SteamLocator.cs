@@ -24,7 +24,6 @@ public static class SteamLocator
         // 1. 扫描已知特定与常见路径
         var defaultCandidates = new[]
         {
-            @"D:\mystream\Sekiro Shadows Die Twice\Sekiro",
             @"C:\Program Files (x86)\Steam\steamapps\common\Sekiro",
             @"C:\Program Files\Steam\steamapps\common\Sekiro",
             @"D:\SteamLibrary\steamapps\common\Sekiro",
