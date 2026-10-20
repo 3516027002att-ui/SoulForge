@@ -25,7 +25,7 @@ function main(): Promise<void> {
 
 async function mainInWorkspace(root: string): Promise<void> {
   // 语料根解析：此前硬编码 `../../mods/param/...`，从仓库根跑时 resolve 落到
-  // D:\Repository\SoulForge\mods\param\... —— 一个不存在的路径，于是 copyFile 直接
+  // <仓库根>\mods\param\... —— 一个不存在的路径，于是 copyFile 直接
   // ENOENT 崩溃。而同目录的 runNativeInspectSmoke:27-35 早已修过同一个坑并留了
   // 注释，本文件是那次改造的漏改点（2026-08-08 native 全量跑实测 FAIL 才暴露）。
   //

@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
   ActionContinuousSampler,
@@ -17,9 +18,10 @@ import { disposeBridgeDaemonPool, runBridge } from '../bridge/runBridge.js';
 
 const execFileAsync = promisify(execFile);
 
-const DEFAULT_GAME_ROOT = 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
-const DEFAULT_BRIDGE = 'D:/Repository/SoulForge/bridge/SoulForge.Bridge/bin/Debug/net10.0/win-x64/SoulForge.Bridge.exe';
-const DEFAULT_ORACLE_ROOT = 'D:/mystream/Sekiro Shadows Die Twice/tools/DSAnimStudio-4.9.9[Build 4999]';
+// The game corpus and the oracle runtime are local installs and must be configured;
+// only the Debug Bridge has a repository-relative default.
+const DEFAULT_BRIDGE = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..',
+  'bridge/SoulForge.Bridge/bin/Debug/net10.0/win-x64/SoulForge.Bridge.exe');
 const ORACLE_REPOSITORY = 'Meowmaritus/SoulsAssetPipeline';
 const ORACLE_COMMIT = 'd11caf989c917c7a43e2c7559915b1c5af218153';
 const ORACLE_LICENSE = 'GPL-3.0 (external runtime only; no GPL source or binary is committed)';
@@ -182,13 +184,21 @@ class MatureOracleBlockedError extends Error {
  * The repository contains no oracle source, DLL, or game bytes.
  */
 export async function runActionMatureOracleDifferentialSmoke(): Promise<void> {
-  const gameRoot = resolve(process.env.SOULFORGE_SEKIRO_GAME_ROOT ?? DEFAULT_GAME_ROOT);
-  const bridgeExecutablePath = resolve(process.env.SOULFORGE_BRIDGE_EXE ?? DEFAULT_BRIDGE);
-  const oracleRoot = resolve(process.env.SOULFORGE_ACTION_ORACLE_ROOT ?? DEFAULT_ORACLE_ROOT);
+  const configuredGameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() ?? '';
+  const configuredOracleRoot = process.env.SOULFORGE_ACTION_ORACLE_ROOT?.trim() ?? '';
+  const gameRoot = configuredGameRoot ? resolve(configuredGameRoot) : '';
+  const bridgeExecutablePath = resolve(process.env.SOULFORGE_BRIDGE_EXE?.trim() || DEFAULT_BRIDGE);
+  const oracleRoot = configuredOracleRoot ? resolve(configuredOracleRoot) : '';
   const sourceFilePath = join(gameRoot, 'chr', 'c0000.anibnd.dcx');
   const baseReport = createBaseReport(sourceFilePath);
 
   try {
+    if (!gameRoot) {
+      throw new MatureOracleBlockedError('SOULFORGE_SEKIRO_GAME_ROOT 未设置：需要真实 Sekiro 游戏根。');
+    }
+    if (!oracleRoot) {
+      throw new MatureOracleBlockedError('SOULFORGE_ACTION_ORACLE_ROOT 未设置：需要本机 DSAnimStudio 运行时目录。');
+    }
     if (!existsSync(sourceFilePath)) {
       throw new MatureOracleBlockedError(`真实 Sekiro source 不存在：${sourceFilePath}`);
     }

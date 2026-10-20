@@ -10,10 +10,6 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-export const DS_LUA_DECOMPILER_FIXED_CANDIDATES = [
-  'D:\\mystream\\Sekiro Shadows Die Twice\\tools\\DSLuaDecompiler\\DSLuaDecompiler.exe'
-];
-
 export const DS_LUA_DECOMPILER_RELATIVE_CANDIDATES = [
   'DSLuaDecompiler\\DSLuaDecompiler.exe',
   'hks解码\\DSLuaDecompiler.exe',
@@ -22,7 +18,7 @@ export const DS_LUA_DECOMPILER_RELATIVE_CANDIDATES = [
 
 export interface DsLuaDecompilerProbe {
   exePath: string | null;
-  origin: 'explicit' | 'v1.1.5' | 'tools-scan' | 'legacy' | 'none';
+  origin: 'explicit' | 'tools-scan' | 'legacy' | 'none';
 }
 
 function pushToolsSubdirs(roots: string[], gameRoot: string | undefined): void {
@@ -52,9 +48,6 @@ export function locateDsLuaDecompilerSync(
   };
   const explicit = process.env.SOULFORGE_DSLUADECOMPILER_PATH?.trim();
   if (explicit && probe(explicit)) return { exePath: explicit, origin: 'explicit' };
-  for (const candidate of DS_LUA_DECOMPILER_FIXED_CANDIDATES) {
-    if (probe(candidate)) return { exePath: candidate, origin: 'v1.1.5' };
-  }
   const roots: string[] = [];
   pushToolsSubdirs(roots, context.baseRoot ?? undefined);
   const overlay = context.overlayRoot?.trim();

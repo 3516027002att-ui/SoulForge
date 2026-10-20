@@ -42,7 +42,7 @@ const REAL_EMEDF_CANDIDATE_PATHS = [
  * 实测（2026-08-08）：本机 EMEDF 落在
  * `<X>/tools/事件编辑器3.4.1/Resources/sekiro-common.emedf.json`，
  * 而游戏根是 `<X>/Sekiro` —— tools 是游戏根的**兄弟目录**。原先 11 个候选
- * 根全是 `D:/Repository/DarkScript3` 这类猜测，一个都没命中，于是四条
+ * 根全是固定盘符下工具目录这类猜测，一个都没命中，于是四条
  * smoke（multi-corpus-matrix / corpus-matrix / imported-coverage /
  * imported-registry-production）的真实 EMEDF leg **从未执行过**，一直诚实跳过。
  *
@@ -79,8 +79,6 @@ export async function searchRealEmedf(
   // 拿它当交叉验证的权威语料，验证的就不再是「与上游 EMEDF 一致」。
   const roots = [
     ...(gameRoot ? await toolsSiblingRoots(gameRoot) : []),
-    'D:/Repository/DarkScript3',
-    'D:/Repository/Smithbox',
     'D:/Smithbox',
     'C:/Tools/Smithbox',
     'C:/DarkScript3',
