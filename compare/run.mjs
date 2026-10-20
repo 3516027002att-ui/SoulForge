@@ -6,8 +6,8 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { classify, compareOrdered, failedComparison, fmgEntriesFromBridge, fmgEntriesFromReferenceGraph,
-  groupStatus, staleKnownDiffs, taeAnimationsFromBridge, taeAnimationsFromReferenceGraph } from './lib.mjs';
+import { classify, compareOrdered, emevdFromBridgePages, emevdFromReferenceGraph, emevdKeys, failedComparison, fmgEntriesFromBridge,
+  fmgEntriesFromReferenceGraph, groupStatus, staleKnownDiffs, taeAnimationsFromBridge, taeAnimationsFromReferenceGraph } from './lib.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const readJson = path => JSON.parse(readFileSync(path, 'utf8').replace(/^﻿/u, ''));
@@ -133,7 +133,45 @@ async function compareTae(testCase, input, items) {
   }
 }
 
-const RULES = { fmg: compareFmg, tae: compareTae };
+// The Bridge's read-emevd-document page-size ceiling (BridgeCommandService MaxInstructionPageSize); a larger request
+// silently falls back to 256. Pages after the first reuse its document session, so every page comes from one parse.
+const EMEVD_INSTRUCTION_PAGE_SIZE = 65536;
+async function bridgeEmevd(file) {
+  const pages = [];
+  let documentSession;
+  for (let page = 0; ; page++) {
+    const result = await runBridge({ command: 'read-emevd-document', filePath: file, allowedRoots: [gameRoot], oodleRuntimeRoot: gameRoot,
+      timeoutMs: 300_000, commandOptions: { instructionPage: page, instructionPageSize: EMEVD_INSTRUCTION_PAGE_SIZE,
+        ...(documentSession ? { documentSession } : {}) } });
+    if (result.parseStatus === 'failed' || !result.data) return { error: result.diagnostics?.[0]?.code ?? 'BRIDGE_READ_FAILED' };
+    documentSession ??= result.data.documentSession;
+    pages.push(result.data);
+    if (!(page + 1 < result.data.instructionPageCount)) break;
+  }
+  try { return { data: emevdFromBridgePages(pages) }; }
+  catch (error) { return { error: `BRIDGE_EMEVD_INCONSISTENT: ${error.message}` }; }
+}
+
+// EMEVD: per file, the ordered events (id, rest behavior, instruction and parameter counts), the flat instructions
+// (event/index, bank, id, args length + sha256, has layer) and the flat parameters. Layer values are not compared.
+async function compareEmevd(testCase, input, items) {
+  const file = join(gameRoot, ...input.split('/'));
+  if (!existsSync(file)) throw new Error(`corpus input is missing from the game root: ${input}`);
+  const key = `${testCase.game}/${testCase.format}/${testCase.operation}/${input}`;
+  const inputSha256 = createHash('sha256').update(readFileSync(file)).digest('hex');
+  const add = (suffix, reference, comparison) => items.push({ key: `${key}#${suffix}`, group: testCase, input, inputSha256,
+    reference: reference.status, referenceReason: reference.reason, comparison });
+
+  const decoded = referenceCall(testCase.reference, 'decode', { input: file, format: 'SoulsFormats.EMEVD' });
+  if (decoded.status !== 'ok') { add('events', decoded, null); return; }
+  const reference = emevdFromReferenceGraph(referenceArtifact(decoded.response, 'structure.json'));
+  const bridge = await bridgeEmevd(file);
+  for (const part of ['events', 'instructions', 'parameters']) {
+    add(part, decoded, bridge.error ? failedComparison(bridge.error) : compareOrdered(reference[part], bridge.data[part], emevdKeys[part]));
+  }
+}
+
+const RULES = { fmg: compareFmg, tae: compareTae, emevd: compareEmevd };
 let exitCode = 2;
 try {
   const items = [];

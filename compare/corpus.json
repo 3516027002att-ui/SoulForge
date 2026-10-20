@@ -24,6 +24,17 @@
         "chr/c0000.anibnd.dcx",
         "chr/c1000.anibnd.dcx"
       ]
+    },
+    {
+      "game": "sekiro",
+      "format": "emevd",
+      "operation": "read-events",
+      "reference": "soulsformats",
+      "inputs": [
+        "event/m13_00_00_00.emevd.dcx",
+        "event/common.emevd.dcx",
+        "mods/event/common.emevd.dcx"
+      ]
     }
   ]
 }
