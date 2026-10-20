@@ -1,8 +1,7 @@
 import { BoundedEventHistory } from '../../../../../packages/agent/src/eventHistory.mjs';
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { createAgentToolBridge, createConfirmationReceipt, createUnifiedDiff, CoreToolSession, openAgentCoreToolSession, createAgentToolContextProvider, createAgentRagSearch, listRolloutSessions, loadRolloutSession, createAgentRunAssembly, type AgentEvent, type ApprovalDecision, type ApprovalDiff, type ResumedRollout, type AgentSessionRunParams, type ToolContext, type ToolRegistry, type WorkspaceIndex, type WorkspaceSession } from '@soulforge/core';
 import type { ConfirmationReceipt } from '@soulforge/shared';
 import type { AiAgentRunRequest, AiAgentRunIpcResult, AiAgentCancelIpcResult, AiAgentEventEnvelope, AiAgentSessionLifecycleEvent, AiAgentEventReplayIpcResult, AiAgentSessionListIpcResult, AiAgentSessionLoadIpcResult } from '../../ipc/publicTypes.js';
@@ -13,6 +12,7 @@ import { sanitizeRendererValue } from '../rendererDto.js';
 import { agentSessionOutcomeEvents } from '../agentSessionOutcome.js';
 import { createAgentBridgeBaseContext } from '../ipc/agentBridgeContext.js';
 import { countGeneratedTextDiffLines } from '../ipc/generatedTextDiffCounts.js';
+import { resolveAgentSessionPath, type AgentSessionPathResolution } from './agentSessionPaths.js';
 
 type AgentAssembly = ReturnType<typeof createAgentRunAssembly>;
 type AdmittedInvocation = Pick<AgentSessionRunParams, 'sessionsDir' | 'sessionId' | 'prompt' | 'systemPrompt' | 'permissionMode' | 'signal' | 'requestApproval' | 'resolveApprovalDiff' | 'approvalRequiredLevels' | 'resumeFrom' | 'onEvent'>;
@@ -135,53 +135,9 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
     }
   };
 
-  function findRolloutInSessions(base: string, targetFileName: string): string | null {
-    const root = join(base, 'sessions');
-    if (!existsSync(root)) return null;
-    try {
-      const years = readdirSync(root);
-      for (const year of years) {
-        const yearPath = join(root, year);
-        const months = readdirSync(yearPath);
-        for (const month of months) {
-          const monthPath = join(yearPath, month);
-          const days = readdirSync(monthPath);
-          for (const day of days) {
-            const candidate = join(monthPath, day, targetFileName);
-            if (existsSync(candidate)) return candidate;
-          }
-        }
-      }
-    } catch {
-      // 目录并发或权限异常静默跳过
-    }
-    return null;
-  }
-
-  const resolveSessionPath = (sessionPath: string): { ok: true; absolute: string } | { ok: false; error: { code: string; message: string } } => {
-    const base = resolve(agentSessionsBaseDir);
-    const normalized = sessionPath.replace(/^[\\/]+/, '');
-    const absolute = resolve(base, normalized);
-    if (absolute !== base && !absolute.startsWith(base + sep)) {
-      return { ok: false, error: { code: 'ROLLOUT_PATH_FORBIDDEN', message: '会话路径必须位于会话目录内。' } };
-    }
-    if (existsSync(absolute)) return { ok: true, absolute };
-
-    // 兼容直接传入纯文件名（如 rollout-2026-09-06T...jsonl）：优先按时间戳解析 sessions/YYYY/MM/DD/ 子目录
-    const fileName = basename(normalized);
-    const match = /^rollout-(\d{4})-(\d{2})-(\d{2})T/i.exec(fileName);
-    if (match) {
-      const candidate = join(base, 'sessions', match[1]!, match[2]!, match[3]!, fileName);
-      if (existsSync(candidate)) return { ok: true, absolute: candidate };
-    }
-    const candidateDirect = join(base, 'sessions', fileName);
-    if (existsSync(candidateDirect)) return { ok: true, absolute: candidateDirect };
-
-    const searched = findRolloutInSessions(base, fileName);
-    if (searched && existsSync(searched)) return { ok: true, absolute: searched };
-
-    return { ok: true, absolute };
-  };
+  // Load/resume read the checked physical path; agentSessionPaths.ts owns the boundary.
+  const resolveSessionPath = (sessionPath: string): AgentSessionPathResolution =>
+    resolveAgentSessionPath(agentSessionsBaseDir, sessionPath);
 
   function freezeOwnedEvent(value: unknown): void {
     if (!value || typeof value !== 'object' || Object.isFrozen(value)) return;
