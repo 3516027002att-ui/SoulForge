@@ -24,8 +24,11 @@ A red `main` stops the line: fixing it comes before any other merge.
 
 ## Merge gate
 
-`npm run gate` = typecheck, tests, synthetic Bridge verification, build, trust-zone check.
+`npm run gate` = typecheck, tests, synthetic Bridge verification, build, trust-zone check, no added local paths.
 
+- Machine paths (game, mods, tools, corpora) come from `SOULFORGE_*` environment variables, never from the repository.
+  The gate compares added lines with this machine's real paths, so run it locally before pushing: CI only knows its
+  own runner paths.
 - It must be green to merge. It must not depend on game files, private corpora, GPUs or network models.
 - A check that needs the game belongs in the comparison or native layer, not in the gate.
 - A new gate check must be shown to fail on the concrete bad case it targets, in the PR that adds it.

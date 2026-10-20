@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { delimiter, dirname, join } from 'node:path';
-import { CMD_PATH_LIMIT, GATE_STEPS, findMissingDocumentedCommands, gateEnvironment, overlongCmdPath } from './gate.mjs';
+import {
+  CMD_PATH_LIMIT, GATE_STEPS, findLocalPathLeaks, findMissingDocumentedCommands, gateEnvironment, localPathNeedles,
+  overlongCmdPath, parseAddedLines
+} from './gate.mjs';
 import { TRUST_ZONE } from './trust-zone-check.mjs';
 
 test('documented commands that do not exist are reported', () => {
@@ -56,6 +59,69 @@ test('a PATH cmd.exe cannot search is reported before any step runs', () => {
   assert.equal(overlongCmdPath({ Path: path(CMD_PATH_LIMIT + 1) }, 'win32'), CMD_PATH_LIMIT + 1);
   assert.equal(overlongCmdPath({ PATH: path(20000) }, 'linux'), undefined);
   assert.equal(GATE_STEPS[0][0], 'PATH fits cmd.exe');
+});
+
+test('added diff lines keep their new-file line numbers; headers and removals are not added lines', () => {
+  const diff = [
+    'diff --git a/a.mjs b/a.mjs',
+    '--- a/a.mjs',
+    '+++ b/a.mjs',
+    '@@ -3,0 +4,2 @@ context',
+    '+first',
+    '+++ starts like a header',
+    '@@ -9 +10,0 @@',
+    '-removed',
+    '\\ No newline at end of file',
+    'diff --git a/gone.mjs b/gone.mjs',
+    '--- a/gone.mjs',
+    '+++ /dev/null',
+    '@@ -1 +0,0 @@',
+    '-x',
+    'diff --git "a/sp ace.md" "b/sp ace.md"',
+    '+++ "b/sp ace.md"',
+    '@@ -0,0 +1 @@',
+    '+text\r'
+  ].join('\n');
+  assert.deepEqual(parseAddedLines(diff), [
+    { path: 'a.mjs', line: 4, text: 'first' },
+    { path: 'a.mjs', line: 5, text: '++ starts like a header' },
+    { path: 'sp ace.md', line: 1, text: 'text' }
+  ]);
+});
+
+test('a machine path is found in every spelling source code gives it', () => {
+  const needles = ['D:/Games/Sekiro Root', 'C:/Users/dev'];
+  const added = [
+    { path: 'a.mjs', line: 1, text: "const root = 'd:\\\\games\\\\sekiro root';" },
+    { path: 'b.ts', line: 2, text: 'see D:\\Games\\Sekiro Root\\mods' },
+    { path: 'c.json', line: 3, text: '"uri": "file:///D:/Games/Sekiro%20Root/x"' },
+    { path: 'd.mjs', line: 4, text: "join('C:/Users/dev', 'x')" },
+    { path: 'docs/ai-logs/s.md', line: 5, text: 'C:/Users/dev' },
+    { path: 'e.mjs', line: 6, text: "process.env.SOULFORGE_SEKIRO_GAME_ROOT ?? ''" },
+    // JSON inside a JS string: four backslashes, then two, then a forward slash.
+    { path: 'f.mjs', line: 7, text: String.raw`"D:\\\\Games\\Sekiro Root/mods"` },
+    { path: 'g.mjs', line: 8, text: 'C:/Users/developer/x' }
+  ];
+  assert.deepEqual(findLocalPathLeaks(added, needles, { platform: 'win32' }).map(leak => `${leak.path}:${leak.line}`),
+    ['a.mjs:1', 'b.ts:2', 'c.json:3', 'd.mjs:4', 'f.mjs:7']);
+  // Case is significant off Windows: the lower-case spelling is a different path there.
+  assert.deepEqual(findLocalPathLeaks(added, needles, { platform: 'linux' }).map(leak => leak.path),
+    ['b.ts', 'c.json', 'd.mjs', 'f.mjs']);
+});
+
+test('needles are this machine\'s real paths, never a bare root or a non-path setting', () => {
+  const env = {
+    SOULFORGE_SEKIRO_GAME_ROOT: 'D:\\Games\\Sekiro\\',
+    soulforge_refcli: 'D:\\Tools\\refcli.mjs',
+    SOULFORGE_MODE: 'strict',
+    SOULFORGE_GONE: 'D:\\Gone\\Path',
+    SOULFORGE_DRIVE: 'D:\\',
+    OTHER_ROOT: 'D:\\Other\\Root'
+  };
+  const present = new Set(['D:\\Games\\Sekiro\\', 'D:\\Tools\\refcli.mjs', 'D:\\', 'D:\\Other\\Root', '/home/dev', 'D:/Repo/X']);
+  assert.deepEqual(localPathNeedles(env, { home: '/home/dev', roots: ['D:/Repo/X'], exists: path => present.has(path) }).sort(),
+    ['/home/dev', 'D:/Games/Sekiro', 'D:/Repo/X', 'D:/Tools/refcli.mjs']);
+  assert.deepEqual(GATE_STEPS.slice(2, 4).map(([name]) => name), ['trust-zone isolation', 'no added local paths']);
 });
 
 test('CI runs the gate and nothing weaker', () => {
