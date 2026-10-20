@@ -12,7 +12,7 @@
     "prebuild": "npm run prepare:database-native",
     "build": "npm run typecheck && electron-vite build",
     "prepare:database-native": "node ../../scripts/prepare-electron-sqlite-binding.mjs",
-    "test:database-utility": "node ../../scripts/run-database-utility-smoke.mjs",
+    "test:database-utility": "node ../../scripts/run-database-utility-smoke.mjs --production-binding",
     "test:me3-runtime-gateway": "node ../../scripts/run-me3-runtime-gateway-smoke.mjs",
     "test:renderer-playwright": "playwright test -c e2e/playwright/playwright.config.mjs",
     "test:three-scene-functional": "node ../../scripts/run-three-scene-functional-smoke.mjs",
