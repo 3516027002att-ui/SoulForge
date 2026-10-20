@@ -78,8 +78,7 @@ interface SmokeResult {
   nonClaims: string[];
 }
 
-const MOD_WORKSPACE = process.env.SOULFORGE_SEKIRO_ROOT
-  ?? 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
+const MOD_WORKSPACE = process.env.SOULFORGE_SEKIRO_ROOT?.trim() ?? '';
 
 function sha256(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
@@ -673,10 +672,11 @@ export async function runPlaintextScriptEditSmoke(): Promise<SmokeResult> {
 
   /* --- Case 14: 真实语料(有则跑,无则结构化跳过) --- */
   {
-    const actionDir = join(MOD_WORKSPACE, 'mods', 'action');
+    const actionDir = MOD_WORKSPACE ? join(MOD_WORKSPACE, 'mods', 'action') : '';
     const targets = ['eventnameid.txt', 'statenameid.txt', 'variablenameid.txt'];
     let available = false;
     try {
+      if (!actionDir) throw new Error('SOULFORGE_SEKIRO_ROOT is not set');
       await stat(join(actionDir, targets[0]!));
       available = true;
     } catch {
