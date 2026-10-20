@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { disposeBridgeDaemonPool, runBridge } from '../packages/core/dist/bridge/runBridge.js';
 import { classifyNativeRead, summarizeNativeReads, verifyFileCoverage } from './native-read-acceptance.mjs';
 // Real game data never ships with the repository; without both roots the check honestly skips.
@@ -12,7 +12,7 @@ if (!GAME_ROOT || !existsSync(MODS_ROOT)) {
   process.exit(0);
 }
 function collectFiles(root){const out=[],stack=[root];while(stack.length){const dir=stack.pop();let e=[];try{e=readdirSync(dir,{withFileTypes:true});}catch(error){if(error.code==='ENOENT'&&dir===root)continue;throw error;}for(const x of e){const p=join(dir,x.name);if(x.isDirectory())stack.push(p);else if(x.isFile())out.push(p)}}return out;}
-function pick(files,pats,n=2){return files.filter(f=>pats.some(p=>f.toLowerCase().includes(p.toLowerCase()))).slice(0,n);}
+function pick(files,pats,n=2,name){return files.filter(f=>pats.some(p=>f.toLowerCase().includes(p.toLowerCase()))&&(!name||name.test(basename(f)))).slice(0,n);}
 function relative(file){return file.replaceAll('\\','/').slice(MODS_ROOT.length+1);}
 async function tryBridge(cmd,file,opts={}){
   const abs=resolve(file);
@@ -30,7 +30,9 @@ async function main(){
     {label:'MAP mapbnd.dcx',pats:['.mapbnd.dcx'],cmd:'read-dcx-document',n:1},
     {label:'MAP btl.dcx',pats:['.btl.dcx'],cmd:'read-dcx-document',n:1},
     {label:'MAP gparam.dcx',pats:['.gparam.dcx'],cmd:'read-gparam-document',n:3},
-    {label:'ACTION anibnd',pats:['.anibnd.dcx'],cmd:'read-tae-document',n:3},
+    // Main character packs only: supplementary packs (c0000_a000_lo, c0000_a05x, ...) hold no TAE, and whether
+    // they should is the comparison oracle's call (compare/), not this open smoke's.
+    {label:'ACTION anibnd',pats:['.anibnd.dcx'],name:/^c\d{4}\.anibnd\.dcx$/i,cmd:'read-tae-document',n:3},
     {label:'ACTION chrbnd (FLVER preview)',pats:['.chrbnd.dcx'],cmd:'read-chrbnd-flver-preview',n:3},
     {label:'ACTION behbnd',pats:['.behbnd.dcx'],cmd:'read-dcx-document',n:2},
     {label:'ACTION hks',pats:['.hks'],cmd:'inspect',n:2},
@@ -41,7 +43,7 @@ async function main(){
     {label:'SFX ffxbnd list',pats:['.ffxbnd.dcx'],cmd:'list-ffxbnd-entries',n:1},
     {label:'ESD talkesdbnd',pats:['.talkesdbnd.dcx'],cmd:'read-esd-document',n:1},
   ];
-  const plan=families.map(fam=>({...fam,samples:pick(files,fam.pats,fam.n)}));
+  const plan=families.map(fam=>({...fam,samples:pick(files,fam.pats,fam.n,fam.name)}));
   const rows=[],expected=plan.flatMap(fam=>fam.samples.map(file=>`${fam.label}|${fam.cmd}|${relative(file)}`)),processed=[];
   for(const fam of plan){
     const samples=fam.samples;
