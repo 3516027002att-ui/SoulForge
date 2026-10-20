@@ -46,6 +46,10 @@ only the stdout summary in PRs and issues.
 | format | SoulForge | reference | compared |
 |---|---|---|---|
 | `fmg` | Bridge `read-text-catalog` | SoulsFormats `entries` + `decode` (FMG) | msgbnd FMG table list (ordinal, entry name); every table's ordered (id, text) |
+| `tae` | Bridge `read-tae-document` | SoulsFormatsNEXT `entries` + `decode` (TAE) | anibnd TAE entry list (ordinal, id, name); every TAE's ordered (animation id, hkx name, event count) |
+
+Original SoulsFormats does not read Sekiro TAE, so the TAE rule uses SoulsFormatsNEXT. An animation without an hkx
+is `""` in SoulsFormats and `null` in the Bridge; both are compared as "no file name".
 
 To add a format, add a rule to `run.mjs`, its extraction to `lib.mjs` with a test that fails on a wrong
 extraction, and its inputs to `corpus.json`.

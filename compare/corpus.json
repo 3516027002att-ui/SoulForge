@@ -14,6 +14,16 @@
         "msg/jpnjp/item.msgbnd.dcx",
         "msg/jpnjp/menu.msgbnd.dcx"
       ]
+    },
+    {
+      "game": "sekiro",
+      "format": "tae",
+      "operation": "read-animations",
+      "reference": "soulsformats-next",
+      "inputs": [
+        "chr/c0000.anibnd.dcx",
+        "chr/c1000.anibnd.dcx"
+      ]
     }
   ]
 }

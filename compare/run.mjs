@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { classify, compareOrdered, failedComparison, fmgEntriesFromBridge, fmgEntriesFromReferenceGraph,
-  groupStatus, staleKnownDiffs } from './lib.mjs';
+  groupStatus, staleKnownDiffs, taeAnimationsFromBridge, taeAnimationsFromReferenceGraph } from './lib.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const readJson = path => JSON.parse(readFileSync(path, 'utf8').replace(/^﻿/u, ''));
@@ -97,7 +97,43 @@ async function compareFmg(testCase, input, items) {
   }
 }
 
-const RULES = { fmg: compareFmg };
+// TAE: the anibnd's TAE entry list (ordinal, id, name), then every TAE's ordered (animation id, hkx name, event count).
+async function compareTae(testCase, input, items) {
+  const file = join(gameRoot, ...input.split('/'));
+  if (!existsSync(file)) throw new Error(`corpus input is missing from the game root: ${input}`);
+  const key = `${testCase.game}/${testCase.format}/${testCase.operation}/${input}`;
+  const inputSha256 = createHash('sha256').update(readFileSync(file)).digest('hex');
+  const add = (suffix, reference, comparison) => items.push({ key: `${key}#${suffix}`, group: testCase, input, inputSha256,
+    reference: reference.status, referenceReason: reference.reason, comparison });
+
+  const listing = referenceCall(testCase.reference, 'entries', { input: file });
+  if (listing.status !== 'ok') { add('tae-entries', listing, null); return; }
+  const baseName = name => name.split(/[\\/]/u).pop();
+  const referenceTae = referenceArtifact(listing.response, 'entries.json').entries
+    .filter(entry => entry.name.toLowerCase().endsWith('.tae'))
+    .map(entry => ({ ordinal: entry.ordinal, id: entry.id, name: entry.name }));
+  const result = await runBridge({ command: 'read-tae-document', filePath: file, allowedRoots: [gameRoot],
+    oodleRuntimeRoot: gameRoot, timeoutMs: 300_000 });
+  const code = result.diagnostics?.[0]?.code ?? 'BRIDGE_READ_FAILED';
+  const bridge = result.parseStatus === 'failed' || !result.data
+    // Both sides agree there is no TAE in this container: an empty list, not a failure.
+    ? (referenceTae.length === 0 && code === 'TAE_ANIBND_NO_TAE_ENTRY' ? { taeEntries: [], animations: [] } : { error: code })
+    : result.data.animationsTruncated ? { error: 'BRIDGE_TAE_ANIMATIONS_TRUNCATED' } : result.data;
+  const entryKey = entry => `${entry.ordinal ?? entry.entryIndex} ${entry.id ?? entry.entryId} ${baseName(entry.name ?? entry.entryName)}`;
+  add('tae-entries', listing, bridge.error ? failedComparison(bridge.error) : compareOrdered(referenceTae, bridge.taeEntries, entryKey));
+  if (bridge.error) return;
+
+  for (const tae of referenceTae) {
+    const decoded = referenceCall(testCase.reference, 'decode',
+      { input: file, format: 'SoulsFormats.TAE', entryChain: [{ ordinal: tae.ordinal, id: tae.id, name: tae.name }] });
+    if (decoded.status !== 'ok') { add(tae.ordinal, decoded, null); continue; }
+    const referenceAnimations = taeAnimationsFromReferenceGraph(referenceArtifact(decoded.response, 'structure.json'));
+    add(tae.ordinal, decoded, compareOrdered(referenceAnimations, taeAnimationsFromBridge(bridge.animations, tae.ordinal),
+      animation => `${animation.id} ${animation.file} ${animation.events}`));
+  }
+}
+
+const RULES = { fmg: compareFmg, tae: compareTae };
 let exitCode = 2;
 try {
   const items = [];

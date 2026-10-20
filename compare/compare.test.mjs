@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { classify, compareOrdered, failedComparison, fmgEntriesFromBridge, fmgEntriesFromReferenceGraph,
-  groupStatus, staleKnownDiffs } from './lib.mjs';
+  groupStatus, staleKnownDiffs, taeAnimationsFromBridge, taeAnimationsFromReferenceGraph } from './lib.mjs';
 
 const graph = entries => ({ $type: 'SoulsFormats.FMG', $members: [{ name: 'Entries', value: { $items: entries.map(([id, text]) => ({
   $type: 'SoulsFormats.FMG+Entry', $members: [{ name: 'ID', value: id }, { name: 'Text', value: text }] })) } }] });
@@ -11,6 +11,31 @@ test('reference FMG graph and Bridge entries normalise to the same shape', () =>
   assert.deepEqual(fmgEntriesFromReferenceGraph(graph([[60, null], [61, '刀']])), [{ id: 60, text: null }, { id: 61, text: '刀' }]);
   assert.deepEqual(fmgEntriesFromBridge([{ id: 60 }, { id: 61, text: '刀' }]), [{ id: 60, text: null }, { id: 61, text: '刀' }]);
   assert.throws(() => fmgEntriesFromReferenceGraph({ $type: 'SoulsFormats.MSBS' }), /expected SoulsFormats\.FMG/u);
+});
+
+const taeGraph = animations => ({ $type: 'SoulsFormats.TAE', $members: [{ name: 'Animations', value: { $items: animations.map(([id, file, events]) => ({
+  $type: 'SoulsFormats.TAE+Animation', $members: [{ name: 'ID', value: { $type: 'System.Int64', value: String(id) } },
+    { name: 'AnimFileName', value: file }, { name: 'Events', value: { $items: Array.from({ length: events }, () => ({})) } }] })) } }] });
+
+test('TAE animations normalise to (id, file, events) and a one-slot ID shift is a difference', () => {
+  const reference = taeAnimationsFromReferenceGraph(taeGraph([[0, 'a000_000000.hkt', 4], [10, 'a000_000010.hkt', 24], [11, 'a000_000011.hkt', 24]]));
+  assert.deepEqual(reference[0], { id: '0', file: 'a000_000000.hkt', events: 4 });
+  const bridge = [
+    { taeEntryIndex: 1, animId: 0, hkxName: 'a000_000000.hkt', eventCount: 4 },
+    { taeEntryIndex: 1, animId: 10, hkxName: 'a000_000010.hkt', eventCount: 24 },
+    { taeEntryIndex: 1, animId: 11, hkxName: 'a000_000011.hkt', eventCount: 24 },
+    { taeEntryIndex: 2, animId: 0, hkxName: 'a010_000000.hkt', eventCount: 1 }
+  ];
+  const keyOf = animation => `${animation.id} ${animation.file} ${animation.events}`;
+  assert.equal(compareOrdered(reference, taeAnimationsFromBridge(bridge, 1), keyOf).equal, true);
+  // Issue #51 shape: every animation carries the next animation's ID.
+  const shifted = bridge.slice(0, 3).map((animation, index, all) => ({ ...animation, animId: all[index + 1]?.animId ?? 22 }));
+  assert.equal(compareOrdered(reference, taeAnimationsFromBridge(shifted, 1), keyOf).differenceCount, 3);
+  assert.throws(() => taeAnimationsFromReferenceGraph({ $type: 'SoulsFormats.FMG' }), /expected SoulsFormats\.TAE/u);
+  // No hkx: "" on the reference side and null in the Bridge are the same; a different name is not.
+  const noFile = taeAnimationsFromReferenceGraph(taeGraph([[1150, '', 0]]));
+  assert.equal(compareOrdered(noFile, taeAnimationsFromBridge([{ taeEntryIndex: 1, animId: 1150, eventCount: 0 }], 1), keyOf).equal, true);
+  assert.equal(compareOrdered(noFile, taeAnimationsFromBridge([{ taeEntryIndex: 1, animId: 1150, hkxName: 'a000_001150.hkt', eventCount: 0 }], 1), keyOf).equal, false);
 });
 
 test('one changed text, a missing entry or a reordering is a difference', () => {
