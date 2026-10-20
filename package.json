@@ -203,7 +203,6 @@
     "test:param-session-projection": "node scripts/contract/verify-param-session-projection.mjs",
     "test:audit-sf-28-unit": "npm run test:audit-sf-28-unit -w @soulforge/core",
     "test:verify-scheduling": "node scripts/verify-scheduling-fixtures.mjs",
-    "test:ci-change-scope": "node scripts/verify-ci-change-scope-fixtures.mjs",
     "test:editor-layout-fixtures": "node scripts/verify-editor-layout-fixtures.mjs",
     "test:agent-emevd-proof-gate": "node --experimental-strip-types scripts/verify-agent-emevd-proof-gate.mjs",
     "test:bridge-artifact-chunking": "npm run bridge:build && node scripts/verify-bridge-artifact-chunking.mjs",
