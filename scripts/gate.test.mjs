@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { findMissingDocumentedCommands } from './gate.mjs';
+import { delimiter, dirname, join } from 'node:path';
+import { findMissingDocumentedCommands, gateEnvironment } from './gate.mjs';
 import { TRUST_ZONE } from './trust-zone-check.mjs';
 
 test('documented commands that do not exist are reported', () => {
@@ -26,6 +27,22 @@ test('CODEOWNERS and AGENTS.md list exactly the trust zone', () => {
   for (const path of listed.filter(path => path !== '.github/CODEOWNERS')) {
     assert.ok(TRUST_ZONE.includes(path), `AGENTS.md trust zone section lists ${path}, which TRUST_ZONE does not`);
   }
+});
+
+test('gate pins the repository-local .NET SDK ahead of PATH and leaves CI PATH alone', () => {
+  const local = join('owned-local', 'SoulForge', 'dotnet', 'dotnet.exe');
+  const pinned = gateEnvironment({ LOCALAPPDATA: 'owned-local', Path: 'machine-dotnet' }, path => path === local);
+  assert.equal(pinned.Path, [dirname(local), 'machine-dotnet'].join(delimiter));
+  assert.equal(Object.keys(pinned).filter(key => key.toUpperCase() === 'PATH').length, 1, 'no second PATH key');
+  assert.equal(pinned.SOULFORGE_CONTRACT_REQUIRE_BUNDLES, '1');
+
+  const explicit = join('owned-sdk', 'dotnet.exe');
+  const chosen = gateEnvironment({ SOULFORGE_DOTNET: explicit, LOCALAPPDATA: 'owned-local', PATH: 'p' }, () => true);
+  assert.equal(chosen.PATH, [dirname(explicit), 'p'].join(delimiter), 'SOULFORGE_DOTNET wins over the local SDK');
+
+  // CI: no override exists, so the setup-dotnet SDK on PATH is used as is.
+  const ci = gateEnvironment({ LOCALAPPDATA: 'runner-local', PATH: 'setup-dotnet' }, () => false);
+  assert.equal(ci.PATH, 'setup-dotnet');
 });
 
 test('CI runs the gate and nothing weaker', () => {

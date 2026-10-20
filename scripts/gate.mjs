@@ -2,7 +2,7 @@
 // It must not need game files, private corpora, GPUs or network models.
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runTrustZoneCheck } from './trust-zone-check.mjs';
 
@@ -33,10 +33,24 @@ function trustZone(root) {
   }
 }
 
+// One .NET SDK for the whole gate. `npm run bridge:publish` already prefers SOULFORGE_DOTNET or the
+// repository-local SDK (scripts/run-dotnet.mjs), but fixtures spawn bare `dotnet`; on a machine whose
+// PATH dotnet cannot satisfy global.json they fail with 0x80008091 while publish succeeds. CI has
+// neither override, so its setup-dotnet SDK on PATH is used unchanged.
+export function gateEnvironment(env, fileExists = existsSync) {
+  const local = env.LOCALAPPDATA ? join(env.LOCALAPPDATA, 'SoulForge', 'dotnet', 'dotnet.exe') : undefined;
+  const sdk = [env.SOULFORGE_DOTNET, local].find(candidate => candidate && fileExists(candidate));
+  const result = { ...env, SOULFORGE_CONTRACT_REQUIRE_BUNDLES: '1' };
+  if (!sdk) return result;
+  // Windows environment keys are case-insensitive; reuse the existing key instead of adding a second PATH.
+  const pathKey = Object.keys(result).find(key => key.toUpperCase() === 'PATH') ?? 'PATH';
+  result[pathKey] = [dirname(sdk), result[pathKey]].filter(Boolean).join(delimiter);
+  return result;
+}
+
 function run(root, command) {
   // shell: npm is a .cmd shim on Windows. Commands are fixed strings, not input.
-  const result = spawnSync(command, { cwd: root, stdio: 'inherit', shell: true,
-    env: { ...process.env, SOULFORGE_CONTRACT_REQUIRE_BUNDLES: '1' } });
+  const result = spawnSync(command, { cwd: root, stdio: 'inherit', shell: true, env: gateEnvironment(process.env) });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`exit ${result.status ?? result.signal}`);
 }
