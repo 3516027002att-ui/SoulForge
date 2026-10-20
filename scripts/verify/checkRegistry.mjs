@@ -111,7 +111,8 @@ function testFiles(root) {
         || /^run.*Smoke\.ts$/u.test(item.name)) files.push(path);
     }
   };
-  for (const dir of ['scripts','packages','apps']) walk(resolve(root,dir));
+  // compare/ holds the comparison oracle; its own tests run in the gate like any other.
+  for (const dir of ['scripts','packages','apps','compare']) walk(resolve(root,dir));
   return files.sort();
 }
 

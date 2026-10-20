@@ -13,7 +13,7 @@ export function findMissingDocumentedCommands(text, scripts, fileExists) {
   for (const [, command] of text.matchAll(/`([^`\n]+)`/gu)) {
     const npm = /^npm run ([\w:.-]+)/u.exec(command);
     if (npm && !Object.hasOwn(scripts, npm[1])) missing.push(command);
-    const node = /^node ((?:scripts|tools)\/[\w./-]+\.m?js)/u.exec(command);
+    const node = /^node ((?:scripts|tools|compare)\/[\w./-]+\.m?js)/u.exec(command);
     if (node && !fileExists(node[1])) missing.push(command);
   }
   return missing;

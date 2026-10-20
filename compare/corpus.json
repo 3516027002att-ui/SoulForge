@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "game": "sekiro",
+      "format": "fmg",
+      "operation": "read-text",
+      "reference": "soulsformats",
+      "inputs": [
+        "msg/zhocn/item.msgbnd.dcx",
+        "msg/zhocn/menu.msgbnd.dcx",
+        "msg/engus/item.msgbnd.dcx",
+        "msg/engus/menu.msgbnd.dcx",
+        "msg/jpnjp/item.msgbnd.dcx",
+        "msg/jpnjp/menu.msgbnd.dcx"
+      ]
+    }
+  ]
+}

@@ -51,10 +51,11 @@ Correctness of reads is protected by the external comparison, not by self-writte
 
 ## Completion
 
-- Read/decode: compare SoulForge output with the mature reference tools on the same input. Each
+- Read/decode: compare SoulForge output with the mature reference tools on the same input
+  (`node compare/run.mjs`; setup and formats in `compare/README.md`). Each
   game x format x operation gets one status: `match`, `diff`, `known-diff`, `reference-unsupported` or
   `reference-unavailable`. A `known-diff` needs a recorded reason and an issue. When two reference tools disagree,
-  report a reference conflict; the owner decides game facts.
+  report a reference conflict; the owner decides game facts. A format with no comparison rule is `unverified`.
 - Writes: the Patch Engine invariants (staging, backup, journal, rollback, unknown-byte preservation) are tested in
   the gate with synthetic fixtures. Real writes are validated by round trip: write to a temporary copy, read it back
   with a reference tool, and only the intended fields may differ. Never write into the game or mod directories.

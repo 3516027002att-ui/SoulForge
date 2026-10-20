@@ -6,9 +6,9 @@ import { findMissingDocumentedCommands, gateEnvironment } from './gate.mjs';
 import { TRUST_ZONE } from './trust-zone-check.mjs';
 
 test('documented commands that do not exist are reported', () => {
-  const text = 'Run `npm run gate` and `npm run gone:script --x`, then `node scripts/missing.mjs` and `node scripts/here.mjs`.';
+  const text = 'Run `npm run gate` and `npm run gone:script --x`, then `node scripts/missing.mjs`, `node compare/gone.mjs` and `node scripts/here.mjs`.';
   const missing = findMissingDocumentedCommands(text, { gate: 'node scripts/gate.mjs' }, path => path === 'scripts/here.mjs');
-  assert.deepEqual(missing, ['npm run gone:script --x', 'node scripts/missing.mjs']);
+  assert.deepEqual(missing, ['npm run gone:script --x', 'node scripts/missing.mjs', 'node compare/gone.mjs']);
 });
 
 test('AGENTS.md names only commands that exist', () => {
