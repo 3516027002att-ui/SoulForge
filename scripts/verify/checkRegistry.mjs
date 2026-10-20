@@ -92,7 +92,7 @@ export function selectCheckTier(name, sources, requirements) {
   // Installed/all update suites run real owned NSIS installers, so they are release checks.
   if (/^(?:test:)?(?:release|installer|portable-packaging|cross-machine|update:(?:installed|all)$)/u.test(name)
     || paths.some(path => /\/(?:verify-(?:release|installer|portable-packaging|cross-machine)|run(?:Release|Installer))[^/]*\./u.test(path))) return 'release';
-  if (paths.some(path => /\/scripts\/(?:check\.fixture|verify-(?:verify-entrypoint|scheduling|ci-change-scope)-fixtures)\.mjs$/u.test(path))) return 'governance';
+  if (paths.some(path => /\/scripts\/(?:check\.fixture|verify-(?:verify-entrypoint|scheduling)-fixtures)\.mjs$/u.test(path))) return 'governance';
   if (requirements.includes('packaged-app')) return 'release';
   if (requirements.includes('native-env')) return 'native';
   if (requirements.includes('dotnet')) return 'synthetic';
