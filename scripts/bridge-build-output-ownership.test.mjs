@@ -411,7 +411,7 @@ async function sdkFixture(body) {
       setInterval(async () => { try { await access(${JSON.stringify(join(root, 'release-writer'))}); process.exit(0); } catch {} }, 20);
     `);
     await writeFile(join(root, 'NuGet.Config'), '<configuration><packageSources><clear /></packageSources></configuration>');
-    const env = { ...process.env, DOTNET_CLI_HOME: join(root, 'dotnet-home'), NUGET_PACKAGES: join(root, 'nuget'),
+    const env = { ...process.env, DOTNET_CLI_HOME: join(root, 'dotnet-home'), DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: 'false', NUGET_PACKAGES: join(root, 'nuget'),
       DOTNET_CLI_TELEMETRY_OPTOUT: '1', DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1', DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false' };
     const args = more => ['msbuild', project, '-nologo', '-v:minimal', '-m:1', ...more];
     const run = more => {

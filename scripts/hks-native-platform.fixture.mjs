@@ -55,7 +55,7 @@ test('Windows native build creates a fresh x64 DLL when the caller PATH nearly f
 test('managed production ABI compiles both wire formats and rejects malformed source', { skip: !['linux', 'win32'].includes(process.platform) }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'sf-linux-hks-runtime-'));
   const dotnet = process.env.SOULFORGE_DOTNET || 'dotnet';
-  const env = { ...process.env, DOTNET_CLI_HOME: join(root, 'dotnet-home'),
+  const env = { ...process.env, DOTNET_CLI_HOME: join(root, 'dotnet-home'), DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: 'false',
     NUGET_PACKAGES: join(root, 'nuget-packages'), NUGET_HTTP_CACHE_PATH: join(root, 'nuget-http'),
     NUGET_PLUGINS_CACHE_PATH: join(root, 'nuget-plugins') };
   try {

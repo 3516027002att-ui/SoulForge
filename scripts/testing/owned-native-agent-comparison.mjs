@@ -99,7 +99,7 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const fileHash = async path => hash(await readFile(path));
 const save = async (path, value) => writeFile(path, JSON.stringify(value, null, 2) + '\n');
 const dotnetEnv = () => {const {SOULFORGE_AGENT_API_KEY:_hostCredential,...environment}=process.env;return ({ ...environment, DOTNET_ROOT: dirname(DOTNET),
-  DOTNET_CLI_HOME: join(OUT, 'dotnet-home'), DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1',
+  DOTNET_CLI_HOME: join(OUT, 'dotnet-home'), DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: 'false', DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1',
   DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false', DOTNET_CLI_TELEMETRY_OPTOUT: '1' });};
 
 const ORACLE_SOURCE = `using SoulsFormats;

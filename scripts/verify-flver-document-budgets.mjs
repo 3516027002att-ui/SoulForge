@@ -10,7 +10,7 @@ const dotnet = process.env.SOULFORGE_DOTNET ?? 'dotnet';
 const directory = await mkdtemp(join(tmpdir(), 'sf-flver-document-budget-'));
 try {
   await mkdir(join(directory, 'empty-source'));
-  const env = { ...process.env, DOTNET_CLI_HOME: join(directory, 'dotnet-home'), NUGET_PACKAGES: join(directory, 'packages'), DOTNET_CLI_TELEMETRY_OPTOUT: '1', DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1', DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false' };
+  const env = { ...process.env, DOTNET_CLI_HOME: join(directory, 'dotnet-home'), DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: 'false', NUGET_PACKAGES: join(directory, 'packages'), DOTNET_CLI_TELEMETRY_OPTOUT: '1', DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1', DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false' };
   await writeFile(join(directory, 'Probe.csproj'), '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup></Project>');
   await writeFile(join(directory, 'Program.cs'), String.raw`
 using System.Buffers.Binary;

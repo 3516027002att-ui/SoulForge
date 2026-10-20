@@ -109,7 +109,7 @@ export async function compareTaeInternalFields({ oraclePath, productRoot, assemb
   const probeRoot = join(outputRoot, 'probe-source'), probeOutput = join(outputRoot, 'probe-bin');
   await mkdir(probeRoot);
   for (const [name, bytes] of probeSources) { const target = join(probeRoot, name); await writeFile(target, bytes); await bind(target); }
-  const env = { ...process.env, DOTNET_CLI_HOME: join(outputRoot, 'dotnet-home'), NUGET_PACKAGES: join(outputRoot, 'nuget-packages'), DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false', DOTNET_CLI_TELEMETRY_OPTOUT: '1', DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1' };
+  const env = { ...process.env, DOTNET_CLI_HOME: join(outputRoot, 'dotnet-home'), DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: 'false', NUGET_PACKAGES: join(outputRoot, 'nuget-packages'), DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false', DOTNET_CLI_TELEMETRY_OPTOUT: '1', DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1' };
   const run = (args, maxBuffer = 2 * 1024 * 1024) => {
     const result = spawnSync(resolve(dotnetPath), args, { cwd: probeRoot, env, encoding: 'utf8', timeout: 60_000, maxBuffer });
     if (result.error || result.status !== 0 || result.signal) throw result.error ?? new Error(`TAE_INTERNAL_PROBE_FAILED:${result.status}:${result.stderr || result.stdout}`);

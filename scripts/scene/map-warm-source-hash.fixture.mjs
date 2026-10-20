@@ -27,7 +27,7 @@ test('warm MAP hashes every current byte with bounded allocation and safe cancel
       await writeFile(join(root, 'Program.cs'), await readFile(new URL('./mapWarmSourceHashProbe.cs', import.meta.url)));
       await writeFile(join(root, 'Probe.csproj'), '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><UseAppHost>false</UseAppHost><SelfContained>false</SelfContained><NuGetAudit>false</NuGetAudit><UseSharedCompilation>false</UseSharedCompilation></PropertyGroup></Project>');
       const build = spawnSync(dotnet, ['build', join(root, 'Probe.csproj'), '-c', 'Release', '--nologo'],
-        { encoding: 'utf8', timeout: 60_000, env: { ...process.env, DOTNET_CLI_HOME: join(root, 'dotnet-home'),
+        { encoding: 'utf8', timeout: 60_000, env: { ...process.env, DOTNET_CLI_HOME: join(root, 'dotnet-home'), DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: 'false',
           DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false', DOTNET_CLI_TELEMETRY_OPTOUT: '1' } });
       assert.equal(build.status, 0, build.stdout + build.stderr);
       const run = spawnSync(dotnet, [join(root, 'bin/Release/net10.0/Probe.dll'), resolve(dll), join(root, 'source.flver')],

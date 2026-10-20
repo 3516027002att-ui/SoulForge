@@ -7,7 +7,7 @@ const cache = join(root, '.local-validation');
 const result = spawnSync(process.execPath, [join(root, 'scripts/run-dotnet.mjs'), 'test',
   join(root, 'bridge/SoulForge.Bridge.Tests/SoulForge.Bridge.Tests.csproj'),
   `-p:RuntimeIdentifier=${runtime}`, '-p:SelfContained=false', '-p:PublishSingleFile=false', '--nologo'], {
-  cwd: root, stdio: 'inherit', env: { ...process.env, DOTNET_CLI_HOME: join(cache, 'dotnet-home'),
+  cwd: root, stdio: 'inherit', env: { ...process.env, DOTNET_CLI_HOME: join(cache, 'dotnet-home'), DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: 'false',
     DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false', NUGET_PACKAGES: join(cache, 'nuget'),
     NUGET_HTTP_CACHE_PATH: join(cache, 'nuget-http'), NUGET_PLUGINS_CACHE_PATH: join(cache, 'nuget-plugins') }
 });

@@ -73,7 +73,7 @@ async function observeRouteInternals(options, oracle, rawRecords, comparison) {
     await writeFile(join(probeRoot, name), bytes);
     await bind(join(probeRoot, name));
   }
-  const env = { ...process.env, DOTNET_CLI_HOME: join(outputRoot, 'dotnet-home'), NUGET_PACKAGES: join(outputRoot, 'nuget-packages'), DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false', DOTNET_CLI_TELEMETRY_OPTOUT: '1', DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1' };
+  const env = { ...process.env, DOTNET_CLI_HOME: join(outputRoot, 'dotnet-home'), DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: 'false', NUGET_PACKAGES: join(outputRoot, 'nuget-packages'), DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false', DOTNET_CLI_TELEMETRY_OPTOUT: '1', DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1' };
   const run = args => {
     const value = spawnSync(resolve(options.dotnetPath), args, { cwd: probeRoot, env, encoding: 'utf8', timeout: 60000, maxBuffer: 2 * 1024 * 1024 });
     if (value.error || value.status !== 0 || value.signal) throw value.error ?? new Error(`MSB_ROUTE_INTERNAL_PROBE_FAILED:${value.status}:${value.stderr || value.stdout}`);
