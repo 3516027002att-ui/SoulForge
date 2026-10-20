@@ -9,6 +9,9 @@ import { createAgentToolBridge } from '../ai/agentToolBridge.js';
 import { createDefaultToolRegistry } from '../ai/toolRegistry.js';
 import type { NativeEditSession } from '../editing/nativeEditSession.js';
 import type { TaeExport } from '@soulforge/shared';
+import { createOpaqueCursor, defaultReadSessionManager, parseOpaqueCursor } from '@soulforge/shared';
+import { pathToFileURL } from 'node:url';
+import { assertCursorPrivacy } from './harness/assertCursorPrivacy.js';
 
 const sourceUri = 'file://chr/c0000.anibnd.dcx';
 const events = Array.from({ length: 160 }, (_, index) => ({
@@ -57,7 +60,42 @@ const hooks = registerHooks({
 });
 try {
   const { readTaeEvents } = await import(new URL('../editing/taeEdit.js?group-test', import.meta.url).href) as typeof import('../editing/taeEdit.js');
-  const edit = { session: { layers: { overlayRoot: root }, meta: { workspaceId: 'group-read' }, resolveWritablePath: (absolutePath: string) => ({ ok: true, absolutePath, diagnostics: [] }) }, allowedRoots: () => [root] } as unknown as NativeEditSession;
+  const edit = { session: { layers: { overlayRoot: root }, meta: { workspaceId: pathToFileURL(root).href }, resolveWritablePath: (absolutePath: string) => ({ ok: true, absolutePath, diagnostics: [] }) }, allowedRoots: () => [root] } as unknown as NativeEditSession;
+  // d: exact-action cursors are bound to their host read session.
+  const initial = await readTaeEvents({ edit, file, addresses: ['c0000#A0010'], pageSize: 7 });
+  assert.equal(initial.ok, true, JSON.stringify(initial));
+  if (initial.ok) {
+    const firstCursor = initial.pagination.nextCursor!;
+    assert.ok(assertCursorPrivacy(initial, [root, pathToFileURL(root).href, root.split(/[\\/]/u).at(-1)!]) >= 1);
+    const payload = parseOpaqueCursor(firstCursor);
+    // Cross-workspace replay: same relative file, addresses and source hash in
+    // another workspace yields the identical queryScope; the live session must reject it.
+    const otherEdit = { ...edit, session: { ...edit.session, meta: { ...edit.session.meta, workspaceId: 'file:///home/bob/other-workspace' } } } as NativeEditSession;
+    const crossed = await readTaeEvents({ edit: otherEdit, file, addresses: ['c0000#A0010'], cursor: firstCursor });
+    assert.equal(crossed.ok, false, 'an exact-action host session must reject another workspace');
+    if (!crossed.ok) assert.equal(crossed.error.code, 'TAE_CURSOR_SCOPE_MISMATCH');
+    // Cross-session replay: keep this request's scope but point the sessionId at a
+    // different live session (other query, same workspace and source hash).
+    const decoy = defaultReadSessionManager.createSession({
+      workspaceId: edit.session.meta.workspaceId,
+      sourceVersion: { sourceUri: 'file://chr/c9999.anibnd.dcx', sourceHash: payload.sourceHash },
+      domain: 'tae', queryScope: 'tae-events:file://chr/c9999.anibnd.dcx:["c9999#A0001"]',
+      items: [{ ...events[0]!, eventIndex: 0, animId: 1, typeName: 'DecoyFromOtherSession' }]
+    });
+    const forged = await readTaeEvents({ edit, file, addresses: ['c0000#A0010'], cursor: createOpaqueCursor({ ...payload, sessionId: decoy.sessionId, offset: 0 }) });
+    assert.equal(forged.ok, false, 'a cursor must not read another read session through a matching scope string');
+    if (!forged.ok) assert.equal(forged.error.code, 'TAE_CURSOR_SCOPE_MISMATCH');
+    defaultReadSessionManager.invalidate(decoy.sessionId);
+    // Same session continues normally.
+    const continued = await readTaeEvents({ edit, file, addresses: ['c0000#A0010'], cursor: firstCursor });
+    assert.equal(continued.ok, true, JSON.stringify(continued));
+    // Expired session keeps the structured stale diagnostic.
+    const session = defaultReadSessionManager.getSession(payload.sessionId)!;
+    session.createdAt -= session.ttlMs + 1;
+    const expired = await readTaeEvents({ edit, file, addresses: ['c0000#A0010'], cursor: firstCursor });
+    assert.equal(expired.ok, false);
+    if (!expired.ok) assert.equal(expired.error.code, 'STALE_READ_CURSOR');
+  }
   let cursor: string | undefined; const ordinals: number[] = [];
   do {
     const read = await readTaeEvents({ edit, file, addresses: ['c0000#A0010'], pageSize: 7, ...(cursor ? { cursor } : {}) });

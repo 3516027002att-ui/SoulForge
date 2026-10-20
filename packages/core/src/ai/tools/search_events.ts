@@ -5,6 +5,7 @@ import { createOpaqueCursor, defaultReadSessionManager, parseOpaqueCursor } from
 import { isActiveSemanticSource } from '../../workspace/resourceKinds.js';
 import * as emevdEdit from '../../editing/emevdEdit.js';
 import { randomUUID } from 'node:crypto';
+import { cursorIdentity } from '../../workspace/cursorIdentity.js';
 /** search_events: one domain tool declaration, schema and handler. */
 export function createSearchEventsTool(): RegisteredTool {
     return {
@@ -66,7 +67,12 @@ export function createSearchEventsTool(): RegisteredTool {
                     try {
                         const scope = JSON.parse(payload.scope.slice('native-events:'.length)) as {
                             query?: unknown;
-                        };
+                            workspaceId?: unknown;
+                        } | null;
+                        // Unbound (pre-v2) cursors carry no workspace digest and are rejected:
+                        // a cursor is only a session-local paging token, the agent re-queries.
+                        if (!scope || scope.workspaceId !== cursorIdentity(ws.workspaceId))
+                            return fail('EVENT_SEARCH_CURSOR_SCOPE_MISMATCH', 'search_events cursor 不属于当前工作区，请重新执行 search_events。');
                         nativeQuery = typeof scope.query === 'string' ? scope.query : '';
                     }
                     catch {
@@ -124,7 +130,10 @@ export function createSearchEventsTool(): RegisteredTool {
                 try {
                     const scope = JSON.parse(payload.scope.slice('search-events:'.length)) as {
                         query?: unknown;
-                    };
+                        workspaceId?: unknown;
+                    } | null;
+                    if (!scope || scope.workspaceId !== cursorIdentity(ws.workspaceId))
+                        return fail('EVENT_SEARCH_CURSOR_SCOPE_MISMATCH', 'search_events cursor 不属于当前工作区，请重新执行 search_events。');
                     query = typeof scope.query === 'string' ? scope.query : '';
                 }
                 catch {
@@ -132,6 +141,11 @@ export function createSearchEventsTool(): RegisteredTool {
                 }
                 if (!query)
                     return fail('INVALID_READ_CURSOR', 'search_events cursor 缺少原始查询范围。');
+                // The session table is process-global; a forged or replayed sessionId
+                // must not read another workspace's or another query's session items.
+                const existing = defaultReadSessionManager.getSession(payload.sessionId);
+                if (existing && (existing.workspaceId !== ws.workspaceId || existing.domain !== 'emevd' || existing.queryScope !== payload.scope))
+                    return fail('EVENT_SEARCH_CURSOR_SCOPE_MISMATCH', 'search_events cursor 不属于当前读取会话，请重新执行 search_events。');
                 const all = ws.searchEventsPage(query, 0, Number.MAX_SAFE_INTEGER);
                 const sourceHash = eventSearchSnapshotHash(query, all.items);
                 try {
@@ -208,7 +222,7 @@ export function createSearchEventsTool(): RegisteredTool {
             const indexedPage = ws.searchEventsPage(query, 0, Number.MAX_SAFE_INTEGER);
             if (indexedPage.items.length > 0) {
                 const sourceHash = eventSearchSnapshotHash(query, indexedPage.items);
-                const scope = `search-events:${JSON.stringify({ query })}`;
+                const scope = `search-events:${JSON.stringify({ query, workspaceId: cursorIdentity(ws.workspaceId) })}`;
                 const session = defaultReadSessionManager.createSession({
                     workspaceId: ws.workspaceId,
                     sourceVersion: { sourceUri: `search://events/${encodeURIComponent(query)}`, sourceHash },
@@ -252,7 +266,7 @@ export function createSearchEventsTool(): RegisteredTool {
                     }
                     {
                         const sourceHash = nativeEventSearchSnapshotHash(query, ws.getFiles().filter(isActiveSemanticSource));
-                        const scope = `native-events:${JSON.stringify({ query })}`;
+                        const scope = `native-events:${JSON.stringify({ query, workspaceId: cursorIdentity(ws.workspaceId) })}`;
                         const nextCursor = nativeSearch.truncated
                             ? createOpaqueCursor({
                                 sessionId: randomUUID(),
