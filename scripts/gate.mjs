@@ -37,15 +37,36 @@ function trustZone(root) {
 // repository-local SDK (scripts/run-dotnet.mjs), but fixtures spawn bare `dotnet`; on a machine whose
 // PATH dotnet cannot satisfy global.json they fail with 0x80008091 while publish succeeds. CI has
 // neither override, so its setup-dotnet SDK on PATH is used unchanged.
+// DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: under a fresh DOTNET_CLI_HOME the SDK's first run otherwise appends
+// <home>\.dotnet\tools to the persistent user PATH. Fixtures set it too; this covers one that forgets.
 export function gateEnvironment(env, fileExists = existsSync) {
   const local = env.LOCALAPPDATA ? join(env.LOCALAPPDATA, 'SoulForge', 'dotnet', 'dotnet.exe') : undefined;
   const sdk = [env.SOULFORGE_DOTNET, local].find(candidate => candidate && fileExists(candidate));
-  const result = { ...env, SOULFORGE_CONTRACT_REQUIRE_BUNDLES: '1' };
+  const result = { ...env, SOULFORGE_CONTRACT_REQUIRE_BUNDLES: '1', DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: 'false' };
   if (!sdk) return result;
   // Windows environment keys are case-insensitive; reuse the existing key instead of adding a second PATH.
   const pathKey = Object.keys(result).find(key => key.toUpperCase() === 'PATH') ?? 'PATH';
   result[pathKey] = [dirname(sdk), result[pathKey]].filter(Boolean).join(delimiter);
   return result;
+}
+
+// On Windows every step runs through cmd.exe, which stops searching PATH once it is longer than
+// 8191 characters (measured: 8191 still resolves npm, 8192 reports "'npm' is not recognized").
+export const CMD_PATH_LIMIT = 8191;
+
+export function overlongCmdPath(env, platform = process.platform) {
+  if (platform !== 'win32') return undefined;
+  const pathKey = Object.keys(env).find(key => key.toUpperCase() === 'PATH');
+  const length = pathKey ? (env[pathKey] ?? '').length : 0;
+  return length > CMD_PATH_LIMIT ? length : undefined;
+}
+
+function cmdPath() {
+  const length = overlongCmdPath(gateEnvironment(process.env));
+  if (length) {
+    throw new Error(`GATE_PATH_TOO_LONG: PATH is ${length} characters and cmd.exe cannot search past ${CMD_PATH_LIMIT}. `
+      + 'Remove stale user PATH entries, such as <temp>\\dotnet-home\\.dotnet\\tools left by dotnet first runs.');
+  }
 }
 
 function run(root, command) {
@@ -56,6 +77,7 @@ function run(root, command) {
 }
 
 export const GATE_STEPS = Object.freeze([
+  ['PATH fits cmd.exe', () => cmdPath()],
   ['documented commands exist', root => documentedCommands(root)],
   ['trust-zone isolation', root => trustZone(root)],
   ['bridge publish', root => run(root, 'npm run bridge:publish')],

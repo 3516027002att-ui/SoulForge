@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { delimiter, dirname, join } from 'node:path';
-import { findMissingDocumentedCommands, gateEnvironment } from './gate.mjs';
+import { CMD_PATH_LIMIT, GATE_STEPS, findMissingDocumentedCommands, gateEnvironment, overlongCmdPath } from './gate.mjs';
 import { TRUST_ZONE } from './trust-zone-check.mjs';
 
 test('documented commands that do not exist are reported', () => {
@@ -43,6 +43,19 @@ test('gate pins the repository-local .NET SDK ahead of PATH and leaves CI PATH a
   // CI: no override exists, so the setup-dotnet SDK on PATH is used as is.
   const ci = gateEnvironment({ LOCALAPPDATA: 'runner-local', PATH: 'setup-dotnet' }, () => false);
   assert.equal(ci.PATH, 'setup-dotnet');
+});
+
+test('gate keeps dotnet first runs off the persistent user PATH', () => {
+  assert.equal(gateEnvironment({ PATH: 'p' }, () => false).DOTNET_ADD_GLOBAL_TOOLS_TO_PATH, 'false');
+  assert.equal(gateEnvironment({ LOCALAPPDATA: 'l', PATH: 'p' }, () => true).DOTNET_ADD_GLOBAL_TOOLS_TO_PATH, 'false');
+});
+
+test('a PATH cmd.exe cannot search is reported before any step runs', () => {
+  const path = length => 'x'.repeat(length);
+  assert.equal(overlongCmdPath({ Path: path(CMD_PATH_LIMIT) }, 'win32'), undefined);
+  assert.equal(overlongCmdPath({ Path: path(CMD_PATH_LIMIT + 1) }, 'win32'), CMD_PATH_LIMIT + 1);
+  assert.equal(overlongCmdPath({ PATH: path(20000) }, 'linux'), undefined);
+  assert.equal(GATE_STEPS[0][0], 'PATH fits cmd.exe');
 });
 
 test('CI runs the gate and nothing weaker', () => {
