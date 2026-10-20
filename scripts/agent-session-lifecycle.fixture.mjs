@@ -39,6 +39,7 @@ function harness(options = {}) {
       if (name === '../agentSessionOutcome.js') return { agentSessionOutcomeEvents: () => [{ type: 'session-done' }] };
       if (name === '../ipc/agentBridgeContext.js') return { createAgentBridgeBaseContext: () => ({}) };
       if (name === '../ipc/generatedTextDiffCounts.js') return {};
+      if (name === './agentSessionPaths.js') return { resolveAgentSessionPath: () => assert.fail('session path resolution is outside the lifecycle fixture') };
       throw new Error(`Unexpected lifecycle import ${name}`);
     }
   }, { filename: source.pathname });
