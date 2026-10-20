@@ -21,7 +21,6 @@ import { locateDsLuaDecompilerSync } from './dsLuaDecompilerLocator.js';
 import { searchRealEmedf } from './realEmedfLocator.js';
 import type { ParamDefDocument } from '@soulforge/shared';
 
-const DEFAULT_GAME = 'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro';
 
 interface CaseResult {
   id: string;
@@ -42,7 +41,13 @@ async function assertUnchanged(path: string, before: Buffer, label: string): Pro
 }
 
 function gameRoot(): string {
-  return process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() || DEFAULT_GAME;
+  const root = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+  // Real game data never ships with the repository; without the game root this smoke skips honestly.
+  if (!root) {
+    console.log(JSON.stringify({ status: 'skipped', skipped: true, reason: 'SOULFORGE_SEKIRO_GAME_ROOT is not set' }));
+    process.exit(0);
+  }
+  return root;
 }
 
 function modsRoot(): string {
