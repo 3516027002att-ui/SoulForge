@@ -6,8 +6,9 @@
  * Electron userData, never at the Mod workspace (hard constraint 3).
  */
 
-import { appendFile, mkdir, readFile, readdir, stat } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { isPathInside } from '../workspace/pathBoundary.js';
 import type { RolloutStorage } from './rolloutRecorder.js';
 import { parseRolloutLines, type ResumedRollout } from './rolloutRecorder.js';
 
@@ -79,16 +80,36 @@ export interface RolloutSessionSummary {
 /**
  * List rollout sessions under the base dir, newest first, bounded by `limit`.
  * Files are read fully for the summary; the bound keeps listing lazy.
+ *
+ * Every directory level and every file is resolved with realpath before use:
+ * a junction or symbolic link under sessions/ must not redirect the walk (or
+ * the later summary read) outside the physical sessions directory.
  */
 export async function listRolloutSessions(
   baseDir: string,
   limit = 50
 ): Promise<RolloutSessionSummary[]> {
   const root = join(baseDir, 'sessions');
+  let physicalRoot: string;
+  try {
+    const physicalBase = await realpath(baseDir);
+    physicalRoot = await realpath(root);
+    // sessions/ itself must not be an alias for a directory outside the base.
+    if (!isPathInside(physicalBase, physicalRoot)) return [];
+  } catch {
+    return [];
+  }
+  const checkedPath = async (candidate: string): Promise<string> => {
+    const physicalPath = await realpath(candidate);
+    if (!isPathInside(physicalRoot, physicalPath)) {
+      throw Object.assign(new Error('Rollout path must stay inside the sessions directory.'), { code: 'ROLLOUT_PATH_FORBIDDEN' });
+    }
+    return physicalPath;
+  };
   const files: Array<{ path: string; fileName: string; sizeBytes: number; modifiedAt: string }> = [];
   let yearDirs: string[] = [];
   try {
-    yearDirs = await readdir(root);
+    yearDirs = await readdir(physicalRoot);
   } catch {
     return [];
   }
@@ -96,7 +117,7 @@ export async function listRolloutSessions(
     const yearPath = join(root, year);
     let monthDirs: string[] = [];
     try {
-      monthDirs = await readdir(yearPath);
+      monthDirs = await readdir(await checkedPath(yearPath));
     } catch {
       continue;
     }
@@ -104,7 +125,7 @@ export async function listRolloutSessions(
       const monthPath = join(yearPath, month);
       let dayDirs: string[] = [];
       try {
-        dayDirs = await readdir(monthPath);
+        dayDirs = await readdir(await checkedPath(monthPath));
       } catch {
         continue;
       }
@@ -112,7 +133,7 @@ export async function listRolloutSessions(
         const dayPath = join(monthPath, day);
         let entries: string[] = [];
         try {
-          entries = await readdir(dayPath);
+          entries = await readdir(await checkedPath(dayPath));
         } catch {
           continue;
         }
@@ -120,7 +141,8 @@ export async function listRolloutSessions(
           if (!entry.endsWith('.jsonl')) continue;
           const filePath = join(dayPath, entry);
           try {
-            const info = await stat(filePath);
+            const info = await stat(await checkedPath(filePath));
+            if (!info.isFile()) continue;
             files.push({
               path: filePath,
               fileName: entry,
@@ -138,7 +160,10 @@ export async function listRolloutSessions(
   const summaries: RolloutSessionSummary[] = [];
   for (const file of files.slice(0, limit)) {
     try {
-      const storage = new FileRolloutStorage(file.path);
+      // Re-check at read time and read the checked target, so an alias that is
+      // retargeted after listing cannot redirect the summary read. The returned
+      // path stays lexical for existing consumers.
+      const storage = new FileRolloutStorage(await checkedPath(file.path));
       const lines = await storage.readLines();
       const resumed = parseRolloutLines(lines);
       summaries.push({

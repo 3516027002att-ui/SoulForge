@@ -162,6 +162,7 @@
     "test:rag": "tsc -b ../shared . && node dist/testing/runSoulAddressSmoke.js && node dist/testing/runRagRetrieveSmoke.js && node dist/testing/runAgentKnowledgeRefreshImmediateQuerySmoke.js && node dist/testing/runRagEmbeddingSmoke.js && node dist/testing/runRagSnapshotIdentitySmoke.js",
     "test:agent-knowledge-refresh": "tsc -b ../shared . && node dist/testing/runAgentKnowledgeRefreshImmediateQuerySmoke.js",
     "test:knowledge-refresh": "tsc -b ../shared . && node --test dist/indexing/knowledgeRefresh.test.js",
+    "test:rollout-storage": "tsc -b ../shared . && node --test dist/model-services/fileRolloutStorage.test.js",
     "test:native-projection-acceptance": "tsc -b ../shared . && node dist/testing/runNativeProjectionAcceptanceSmoke.js",
     "test:native-knowledge-refresh": "tsc -b ../shared . && node dist/testing/runNativeKnowledgeRefreshImmediateQuerySmoke.js",
     "test:rag-embedding": "tsc -b ../shared . && node dist/testing/runRagEmbeddingSmoke.js",
