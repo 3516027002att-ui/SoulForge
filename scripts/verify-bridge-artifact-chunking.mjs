@@ -58,34 +58,49 @@ try {
   const recovery = await readOneChunk(productionFrame, 0, productionFrame.descriptor.chunkSize);
   assert.ok(recovery.length > 0, 'valid artifact read must recover after rejected index');
 
-  const cancelRequestId = 'artifact-cancel-race';
-  productionFrame.send(requestFrame(
-    productionFrame.sessionId,
-    cancelRequestId,
-    eventPath,
-    productionFrame.descriptor.artifactToken,
-    0,
-    productionFrame.descriptor.chunkSize
-  ));
-  const cancelAccepted = await productionFrame.waitFor(
-    (frame) => frame.kind === 'request/accepted' && frame.requestId === cancelRequestId
-  );
-  assert.equal(cancelAccepted.requestId, cancelRequestId, 'cancel target must be accepted before cancellation');
-  productionFrame.send({
-    protocolVersion: '1.0.0',
-    kind: 'cancel',
-    requestId: 'artifact-cancel-control',
-    workspaceSessionId: productionFrame.sessionId,
-    payload: { targetRequestId: cancelRequestId }
-  });
-  const cancellationRace = await productionFrame.waitFor(
-    (frame) => frame.requestId === cancelRequestId && frame.kind === 'cancelled'
-  );
-  assert.equal(cancellationRace.requestId, cancelRequestId, 'cancellation terminal must belong to the accepted target');
+  // An accepted chunk read can finish before the cancel is processed. That lost race ends the target in
+  // `result` and is valid; waiting only for `cancelled` hung for the full timeout. Retry until cancellation
+  // wins once, and require every target to end in exactly one terminal frame of its own.
+  const terminalKinds = new Set(['result', 'cancelled', 'failed']);
+  const cancelAttempts = [];
+  let cancellationRace;
+  for (let attempt = 0; attempt < 10 && !cancellationRace; attempt += 1) {
+    const cancelRequestId = `artifact-cancel-race-${attempt}`;
+    productionFrame.send(requestFrame(
+      productionFrame.sessionId,
+      cancelRequestId,
+      eventPath,
+      productionFrame.descriptor.artifactToken,
+      0,
+      productionFrame.descriptor.chunkSize
+    ));
+    const cancelAccepted = await productionFrame.waitFor(
+      (frame) => frame.kind === 'request/accepted' && frame.requestId === cancelRequestId
+    );
+    assert.equal(cancelAccepted.requestId, cancelRequestId, 'cancel target must be accepted before cancellation');
+    productionFrame.send({
+      protocolVersion: '1.0.0',
+      kind: 'cancel',
+      requestId: `artifact-cancel-control-${attempt}`,
+      workspaceSessionId: productionFrame.sessionId,
+      payload: { targetRequestId: cancelRequestId }
+    });
+    const terminal = await productionFrame.waitFor(
+      (frame) => frame.requestId === cancelRequestId && terminalKinds.has(frame.kind)
+    );
+    cancelAttempts.push(cancelRequestId);
+    if (terminal.kind === 'cancelled') cancellationRace = terminal;
+    else assert.equal(terminal.kind, 'result', `a target that was not cancelled must complete: ${JSON.stringify(terminal.payload)}`);
+  }
+  assert.ok(cancellationRace, `cancellation never won the race in ${cancelAttempts.length} attempts`);
   assert.equal(cancellationRace.workspaceSessionId, productionFrame.sessionId);
   assert.equal(cancellationRace.payload?.code, 'BRIDGE_REQUEST_CANCELLED');
   const recoveryAfterCancel = await readOneChunk(productionFrame, 0, productionFrame.descriptor.chunkSize);
   assert.ok(recoveryAfterCancel.length > 0, 'artifact store must remain readable after cancellation race');
+  for (const requestId of cancelAttempts) {
+    const terminals = productionFrame.frames.filter((frame) => frame.requestId === requestId && terminalKinds.has(frame.kind));
+    assert.equal(terminals.length, 1, `cancel target ${requestId} must end in exactly one terminal frame`);
+  }
 
   console.log(JSON.stringify({
     ok: true,
@@ -105,7 +120,8 @@ try {
       requestCount: productionArtifact.requestCount
     },
     invalidLengthCode: invalid.payload.result.diagnostics?.[0]?.code,
-    cancellationRaceKind: cancellationRace.kind
+    cancellationRaceKind: cancellationRace.kind,
+    cancelAttempts: cancelAttempts.length
   }, null, 2));
 } finally {
   for (const session of sessions) await session.close();
