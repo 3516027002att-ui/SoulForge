@@ -1,5 +1,10 @@
 import {createOpaqueCursor,parseOpaqueCursor} from '@soulforge/shared';
 import {createHash} from 'node:crypto';
+import {cursorIdentity} from '../workspace/cursorIdentity.js';
+
+// v2: scope.workspaceId is cursorIdentity(workspaceId); v1 embedded the absolute
+// workspace URL and is rejected by the existing "旧搜索游标" diagnostic below.
+const BOUNDED_SESSION='bounded-content-search-v2';
 
 function invalid(message:string,code='SEARCH_CURSOR_SCOPE_MISMATCH'):never {throw Object.assign(new Error(message),{code});}
 
@@ -16,10 +21,10 @@ export function boundedContentSearchPage<T>(options:{
   if(input.cursor!==undefined){
     if(typeof input.cursor!=='string'||input.offset!==undefined)invalid('续页只传 cursor，不同时传 offset。');
     const cursor=parseOpaqueCursor(input.cursor as string);
-    if(cursor.sessionId!=='bounded-content-search-v1'||cursor.domain!=='tae')invalid('旧搜索游标或其他工具游标不能用于当前提供方，请重新搜索。');
+    if(cursor.sessionId!==BOUNDED_SESSION||cursor.domain!=='tae')invalid('旧搜索游标或其他工具游标不能用于当前提供方，请重新搜索。');
     let scope:{workspaceId:string;tool:string;provider:string;query:string;limit:number;continuation:string};
     try{scope=JSON.parse(cursor.scope);}catch{invalid('搜索游标范围无效。');}
-    if(!scope||scope.workspaceId!==options.workspaceId||scope.tool!==options.tool||scope.provider!==options.provider
+    if(!scope||scope.workspaceId!==cursorIdentity(options.workspaceId)||scope.tool!==options.tool||scope.provider!==options.provider
       ||typeof scope.query!=='string'||typeof scope.continuation!=='string'
       ||!Number.isSafeInteger(scope.limit)||scope.limit<1||scope.limit>6)invalid('搜索游标与工作区或提供方不匹配。');
     if(input.query!==undefined&&input.query!==scope.query)invalid('续页不能改变查询。');
@@ -33,8 +38,8 @@ export function boundedContentSearchPage<T>(options:{
   const snapshotHash=createHash('sha256').update(JSON.stringify([options.workspaceId,options.tool,options.provider,query,page.snapshotId])).digest('hex');
   if(expectedHash!==undefined&&expectedHash!==snapshotHash)invalid('搜索快照已变化，请重新搜索。','STALE_READ_CURSOR');
   const end=window.offset+page.matches.length;
-  const nextCursor=page.continuation===undefined?undefined:createOpaqueCursor({sessionId:'bounded-content-search-v1',domain:'tae',
-    sourceHash:snapshotHash,offset:end,scope:JSON.stringify({workspaceId:options.workspaceId,tool:options.tool,
+  const nextCursor=page.continuation===undefined?undefined:createOpaqueCursor({sessionId:BOUNDED_SESSION,domain:'tae',
+    sourceHash:snapshotHash,offset:end,scope:JSON.stringify({workspaceId:cursorIdentity(options.workspaceId),tool:options.tool,
       provider:options.provider,query,limit,continuation:page.continuation})});
   return {query,matches:page.matches,total:page.total,totalCount:page.total,offset:window.offset,limit:window.limit,
     returned:page.matches.length,returnedCount:page.matches.length,truncated:nextCursor!==undefined,

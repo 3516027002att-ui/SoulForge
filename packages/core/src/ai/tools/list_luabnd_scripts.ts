@@ -3,6 +3,7 @@ import { asNumber, asOptionalString, asRecord, asString, canonicalScriptSourceUr
 import { listLuabndScripts } from '../../editing/luabndEdit.js';
 import { createOpaqueCursor, defaultReadSessionManager, parseOpaqueCursor } from '@soulforge/shared';
 import type { ScriptSymbol } from '@soulforge/shared';
+import { cursorIdentity } from '../../workspace/cursorIdentity.js';
 /** list_luabnd_scripts: one domain tool declaration, schema and handler. */
 export function createListLuabndScriptsTool(): RegisteredTool {
     return {
@@ -33,7 +34,13 @@ export function createListLuabndScriptsTool(): RegisteredTool {
                 ? canonicalScriptSourceUri(context, result.containerPath, result.sourceUri)
                 : result.sourceUri;
             const catalogHash = scriptCatalogSnapshotHash(sourceUriForPaging, result.outerFileHash, result.scripts);
-            const catalogScope = `luabnd-scripts:${sourceUriForPaging}`;
+            // sourceUriForPaging falls back to the absolute container file:// URL when the
+            // container is not indexed (canonicalScriptSourceUri), and is workspace-relative
+            // otherwise. Bind the scope to [workspaceId, sourceUri] through a digest so the
+            // cursor neither discloses host paths nor replays across workspaces. Unhashed
+            // `luabnd-scripts:` scopes are rejected with LUABND_CURSOR_SCOPE_MISMATCH.
+            const workspaceId = context.workspaceIndex?.workspaceId ?? edit.session.session.meta.workspaceId;
+            const catalogScope = `luabnd-scripts-v2:${cursorIdentity(JSON.stringify([workspaceId, sourceUriForPaging]))}`;
             let page;
             if (cursor) {
                 let payload;
@@ -87,7 +94,7 @@ export function createListLuabndScriptsTool(): RegisteredTool {
             }
             else {
                 const session = defaultReadSessionManager.createSession({
-                    workspaceId: context.workspaceIndex?.workspaceId ?? edit.session.session.meta.workspaceId,
+                    workspaceId,
                     sourceVersion: { sourceUri: sourceUriForPaging, sourceHash: catalogHash },
                     domain: 'script',
                     queryScope: catalogScope,

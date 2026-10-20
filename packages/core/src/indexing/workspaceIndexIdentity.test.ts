@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { EventExport, IndexedFile } from '@soulforge/shared';
 import { WorkspaceIndex } from './workspaceIndex.js';
+import { assertCursorPrivacy } from '../testing/harness/assertCursorPrivacy.js';
+import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
 
 function file(
   sourceUri: string,
@@ -72,7 +74,8 @@ describe('WorkspaceIndex identity and resource search boundaries', () => {
   });
 
   it('resource search excludes recovery files by default and exposes an opaque, query-bound page cursor', () => {
-    const index = new WorkspaceIndex('fixture');
+    const workspaceId = 'file:///home/alice/private-mod-workspace';
+    const index = new WorkspaceIndex(workspaceId);
     index.setFiles([
       file('file:///event/a.emevd.dcx', 'event/a.emevd.dcx', 'event'),
       file('file:///event/b.emevd.dcx', 'event/b.emevd.dcx', 'event'),
@@ -88,6 +91,20 @@ describe('WorkspaceIndex identity and resource search boundaries', () => {
     assert.equal(first.truncated, true);
     assert.ok(first.nextCursor);
     const firstCursor = first.nextCursor;
+    // The workspace id is an absolute file:// URL; only its digest may reach the wire.
+    assert.ok(assertCursorPrivacy(first, [workspaceId, '/home/alice', 'private-mod-workspace']) >= 2);
+    assert.equal(parseOpaqueCursor(firstCursor).sessionId, 'workspace-resource-search-v2');
+    // Pre-hash v1 cursors (raw workspace id) are rejected, not migrated.
+    const legacy = createOpaqueCursor({ ...parseOpaqueCursor(firstCursor), sessionId: 'workspace-resource-search-v1',
+      scope: JSON.stringify({ workspaceId, query: '', kinds: [], limit: 2, sourceFilter: 'active' }) });
+    assert.throws(() => index.searchResourcesPage({ cursor: legacy }), (error: unknown) => {
+      assert.ok(!String(error).includes('private-mod-workspace'), 'rejection must not echo the decodable path');
+      return (error as { code?: string }).code === 'RESOURCE_SEARCH_CURSOR_SCOPE_MISMATCH';
+    });
+    // A v2 token that carries the raw workspace id instead of its digest is rejected too.
+    const rawV2 = createOpaqueCursor({ ...parseOpaqueCursor(firstCursor),
+      scope: JSON.stringify({ workspaceId, query: '', kinds: [], limit: 2, sourceFilter: 'active' }) });
+    assert.throws(() => index.searchResourcesPage({ cursor: rawV2 }), { code: 'RESOURCE_SEARCH_CURSOR_SCOPE_MISMATCH' });
     assert.equal(first.nextActions[0]?.args.cursor, firstCursor);
     assert.ok(first.items.every((item) => !item.item.relativePath.endsWith('.bak')));
 

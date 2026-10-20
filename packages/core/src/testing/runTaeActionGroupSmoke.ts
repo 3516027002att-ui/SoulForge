@@ -23,11 +23,21 @@ const events = Array.from({ length: 160 }, (_, index) => ({
 const bundle: TaeExport = { chrId: 'c0000', sourceUri, readerSchemaRevision: 2,
   animations: [{ animId: 10, code: 'A0010', taeEntryIndex: 2, eventCount: 160, eventsComplete: true, events },
     { animId: 20, code: 'A0020', taeEntryIndex: 2, eventCount: 1, eventsComplete: true, events: [{ ...events[0]!, uri: 'action://c0000/entry/2/A0020/e0', typeName: 'UniqueNeedle' }] }] };
-const index = new WorkspaceIndex('tae-group-test'); index.upsertTaeExport(bundle);
+const privateWorkspace = 'file:///home/alice/private-mod-workspace';
+const index = new WorkspaceIndex(privateWorkspace); index.upsertTaeExport(bundle);
 const registry = createDefaultToolRegistry();
 const found = await registry.run('search_tae_events', { query: 'UniqueNeedle', limit: 1, pageSize: 128 }, { workspaceIndex: index, mode: 'plan' });
 assert.equal(found.ok, true);
 const data = found.data as any;
+// bounded-content-search: workspace id is a digest on the wire (nextCursor + nextActions).
+assert.ok(assertCursorPrivacy(data, [privateWorkspace, '/home/alice', 'private-mod-workspace']) >= 2);
+assert.equal(parseOpaqueCursor(data.nextCursor).sessionId, 'bounded-content-search-v2');
+// Pre-hash v1 tokens (raw workspace id) are rejected with the existing structured error.
+const legacyBounded = await registry.run('search_tae_events', { cursor: createOpaqueCursor({ ...parseOpaqueCursor(data.nextCursor), sessionId: 'bounded-content-search-v1' }) }, { workspaceIndex: index, mode: 'plan' });
+assert.equal(legacyBounded.ok, false);
+assert.equal(legacyBounded.error?.code, 'SEARCH_CURSOR_SCOPE_MISMATCH');
+const crossedBounded = await registry.run('search_tae_events', { cursor: data.nextCursor }, { workspaceIndex: new WorkspaceIndex('file:///home/bob/other-workspace'), mode: 'plan' });
+assert.equal(crossedBounded.ok, false, 'bounded TAE search cursors must reject another workspace');
 assert.equal(data.total, 2, 'limit counts actions, not matching events');
 assert.equal(data.matches.length, 1);
 assert.equal(data.matches[0].item.animId, 10);

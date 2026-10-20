@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {searchTaeActionPage, type TaeActionSearchWindow} from './taeActionSearch.js';
 import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
+import { cursorIdentity } from '../workspace/cursorIdentity.js';
 import type {
   EventArg,
   EventExport,
@@ -1180,7 +1181,7 @@ export class WorkspaceIndex {
           code: 'RESOURCE_SEARCH_CURSOR_SCOPE_MISMATCH'
         });
       }
-      if (!isResourceSearchCursorScope(parsed) || parsed.workspaceId !== this.workspaceId) {
+      if (!isResourceSearchCursorScope(parsed) || parsed.workspaceId !== cursorIdentity(this.workspaceId)) {
         throw Object.assign(new Error('资源搜索 cursor 范围无效。'), {
           code: 'RESOURCE_SEARCH_CURSOR_SCOPE_MISMATCH'
         });
@@ -1193,7 +1194,8 @@ export class WorkspaceIndex {
           code: 'RESOURCE_SEARCH_CURSOR_SCOPE_MISMATCH'
         });
       }
-      scope = parsed;
+      // Restore the real workspace id in memory only; the wire carries its digest.
+      scope = { ...parsed, workspaceId: this.workspaceId };
       offset = payload.offset;
       expectedHash = payload.sourceHash;
     }
@@ -1220,7 +1222,7 @@ export class WorkspaceIndex {
       // is used as the existing opaque token domain without broadening the
       // native edit-domain contract.
       domain: RESOURCE_SEARCH_CURSOR_DOMAIN,
-      scope: JSON.stringify(scope),
+      scope: JSON.stringify({ ...scope, workspaceId: cursorIdentity(this.workspaceId) }),
       sourceHash,
       offset: nextOffset
     }) : undefined;
@@ -1595,7 +1597,9 @@ export class WorkspaceIndex {
   }
 }
 
-const RESOURCE_SEARCH_CURSOR_SESSION = 'workspace-resource-search-v1';
+// v2: scope.workspaceId is cursorIdentity(workspaceId). Unhashed v1 tokens
+// carried the absolute workspace URL and are rejected (session id mismatch).
+const RESOURCE_SEARCH_CURSOR_SESSION = 'workspace-resource-search-v2';
 // Native cursor payloads use the existing edit-domain union. The session id
 // and scope below make this a separate catalog-only cursor contract.
 const RESOURCE_SEARCH_CURSOR_DOMAIN = 'script' as const;
