@@ -36,6 +36,24 @@ async function runBridge(command, filePath, options = {}) {
   }
 }
 
+// Disk exports and writes take their output path only from a daemon request that stays inside a negotiated
+// writable root; standalone CLI options cannot grant a write path. Same Release executable as the CLI calls.
+let daemon;
+async function runBridgeWrite(command, filePath, writableRoot, options) {
+  daemon ??= await import('../packages/core/dist/bridge/runBridge.js');
+  const result = await daemon.runBridge({
+    command,
+    filePath,
+    bridgeExecutablePath: bridgeExe,
+    allowedRoots: [sekiroRoot, writableRoot],
+    writableRoots: [writableRoot],
+    oodleRuntimeRoot: sekiroRoot,
+    timeoutMs: 120_000,
+    commandOptions: options
+  });
+  return { ...result, ok: result.parseStatus === 'ok' || result.parseStatus === 'partial' };
+}
+
 async function main() {
   // Real game data never ships with the repository; without the game root this check skips honestly.
   if (!sekiroRoot) {
@@ -108,8 +126,8 @@ async function main() {
     // 5. export-luabnd 容器全量解包与 JSON 描述符生成
     console.log('5. 验证 export-luabnd 导出所有脚本与符号/目标清单...');
     const exportDir = join(tempRoot, 'export_out');
-    const exportRes = await runBridge('export-luabnd', modsAicommon, { outputDirectory: exportDir });
-    assert.strictEqual(exportRes.ok, true);
+    const exportRes = await runBridgeWrite('export-luabnd', modsAicommon, tempRoot, { outputPath: exportDir });
+    assert.strictEqual(exportRes.ok, true, `export-luabnd 应该成功: ${JSON.stringify(exportRes.diagnostics)}`);
     assert.strictEqual(exportRes.data.scriptCount, 104);
     assert(existsSync(join(exportDir, '000110_platoon.lua')), '000110_platoon.lua 必须存在');
     assert(existsSync(join(exportDir, 'goal_list.lua')), 'goal_list.lua 必须存在');
@@ -126,7 +144,7 @@ async function main() {
     console.log('6. 验证 write-luabnd-script 精确替换写回...');
     const writeOutPath = join(tempRoot, 'aicommon_modified.luabnd.dcx');
     const updatedContent = 'GOAL_COMMON_TopGoal = 0\n-- SoulForge Luabnd Writeback Verification\nGOAL_COMMON_Normal = 1\n';
-    const writeRes = await runBridge('write-luabnd-script', modsAicommon, {
+    const writeRes = await runBridgeWrite('write-luabnd-script', modsAicommon, tempRoot, {
       outputPath: writeOutPath,
       childPath: 'goal_list.lua',
       expectedContainerHash: doc.sourceHash,
@@ -180,7 +198,7 @@ async function main() {
   }
 }
 
-main().catch((err) => {
+main().finally(() => daemon?.disposeBridgeDaemonPool()).catch((err) => {
   console.error('Luabnd 验证失败:', err);
-  process.exit(1);
+  process.exitCode = 1;
 });
