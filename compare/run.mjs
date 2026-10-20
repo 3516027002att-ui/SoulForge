@@ -7,7 +7,8 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { classify, compareOrdered, emevdFromBridgePages, emevdFromReferenceGraph, emevdKeys, failedComparison, fmgEntriesFromBridge,
-  fmgEntriesFromReferenceGraph, groupStatus, staleKnownDiffs, taeAnimationsFromBridge, taeAnimationsFromReferenceGraph } from './lib.mjs';
+  fmgEntriesFromReferenceGraph, groupStatus, resolveReferenceResponse, staleKnownDiffs, taeAnimationsFromBridge,
+  taeAnimationsFromReferenceGraph } from './lib.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const readJson = path => JSON.parse(readFileSync(path, 'utf8').replace(/^﻿/u, ''));
@@ -40,6 +41,8 @@ function referenceCall(project, operation, args) {
   let response;
   try { response = JSON.parse(result.stdout.replace(/^﻿/u, '')); }
   catch { return { status: 'unavailable', reason: `reference CLI exited ${result.status} without JSON` }; }
+  try { response = resolveReferenceResponse(response, path => readFileSync(path)); }
+  catch (error) { return { status: 'unavailable', reason: error.message }; }
   const reason = (response.diagnostics ?? []).map(item => item.code ?? item.message).filter(Boolean).join(', ') || response.status;
   if (response.status === 'unsupported') return { status: 'unsupported', reason };
   if (response.status !== 'ok') return { status: 'unavailable', reason };

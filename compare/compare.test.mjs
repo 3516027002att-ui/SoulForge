@@ -3,8 +3,22 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { classify, compareOrdered, emevdFromBridgePages, emevdFromReferenceGraph, emevdKeys, failedComparison, fmgEntriesFromBridge,
-  fmgEntriesFromReferenceGraph, graphRefResolver, groupStatus, staleKnownDiffs, taeAnimationsFromBridge,
-  taeAnimationsFromReferenceGraph } from './lib.mjs';
+  fmgEntriesFromReferenceGraph, graphRefResolver, groupStatus, resolveReferenceResponse, staleKnownDiffs,
+  taeAnimationsFromBridge, taeAnimationsFromReferenceGraph } from './lib.mjs';
+
+test('a large reference result takes its identity only from the matching result manifest', () => {
+  const full = { requestId: 'r1', status: 'ok', source: { commit: 'c' }, artifacts: [] };
+  const bytes = Buffer.from(JSON.stringify(full));
+  const summary = sha => ({ requestId: 'r1', status: 'ok', fullResultInManifest: true, resultManifest: { path: 'm', sha256: sha } });
+  const good = createHash('sha256').update(bytes).digest('hex');
+  const small = { requestId: 'r1', status: 'ok', source: { commit: 'c' } };
+  assert.equal(resolveReferenceResponse(small, () => { throw new Error('must not read'); }), small);
+  assert.deepEqual(resolveReferenceResponse(summary(good), () => bytes), full);
+  assert.throws(() => resolveReferenceResponse(summary('0'.repeat(64)), () => bytes), /hash mismatch/u);
+  const other = Buffer.from(JSON.stringify({ ...full, requestId: 'r2' }));
+  assert.throws(() => resolveReferenceResponse(summary(createHash('sha256').update(other).digest('hex')), () => other), /another request/u);
+  assert.throws(() => resolveReferenceResponse({ ...summary(good), resultManifest: undefined }, () => bytes), /no result manifest/u);
+});
 
 const graph = entries => ({ $type: 'SoulsFormats.FMG', $members: [{ name: 'Entries', value: { $items: entries.map(([id, text]) => ({
   $type: 'SoulsFormats.FMG+Entry', $members: [{ name: 'ID', value: id }, { name: 'Text', value: text }] })) } }] });

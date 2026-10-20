@@ -28,6 +28,24 @@ export function failedComparison(code) {
   return { equal: false, differenceCount: 1, differences: [{ soulforge: code }], fingerprint };
 }
 
+// A large reference result does not fit refcli's stdout: it prints a summary with fullResultInManifest and moves the
+// full response, including source/identity, into the result manifest. Read it only when its sha256 and request id
+// match the summary, so a stale or swapped manifest cannot supply the identity. readManifest(path) returns bytes.
+export function resolveReferenceResponse(summary, readManifest) {
+  if (summary?.fullResultInManifest !== true) return summary;
+  const pointer = summary.resultManifest;
+  if (typeof pointer?.path !== 'string' || !/^[0-9a-f]{64}$/u.test(pointer.sha256 ?? '')) {
+    throw new Error('reference summary points at no result manifest');
+  }
+  const bytes = readManifest(pointer.path);
+  if (createHash('sha256').update(bytes).digest('hex') !== pointer.sha256) throw new Error('reference result manifest hash mismatch');
+  const full = JSON.parse(bytes.toString('utf8').replace(/^﻿/u, ''));
+  if (full.requestId !== summary.requestId || full.status !== summary.status) {
+    throw new Error('reference result manifest belongs to another request');
+  }
+  return full;
+}
+
 // A difference is only "known" while its exact fingerprint is recorded with a reason and an issue.
 export function classify(item, knownDiffs) {
   if (item.reference !== 'ok') return item.reference === 'unsupported' ? 'reference-unsupported' : 'reference-unavailable';
