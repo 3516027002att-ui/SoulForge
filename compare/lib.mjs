@@ -435,24 +435,6 @@ export function paramFromReferenceGraph(graph) {
   return { header: { paramType, rowCount: String(rows.length) }, rows };
 }
 
-// Trusted row width, composed exactly as the private loadTrustedDefinition (packages/core/src/param/containerParamEdit.ts:1322-1358)
-// does it from exported functions: loadFirstPartyParamMetadata (schema/sekiro/firstPartySchema.ts), then
-// resolveParamMetadataRowWidth and matchParamMetadataPackage (param/paramMetadata.ts) with the same descriptor
-// { game, gameBuild: '1.6', typeName, dataVersion }; the width is the matched definition's rowDataSize, which is what
-// containerParamEdit.ts:1115-1119 hands to the Bridge. api = { loadFirstPartyParamMetadata, resolveParamMetadataRowWidth,
-// matchParamMetadataPackage }. No match, no width: the caller reports the read as failed, never guesses a width.
-export function trustedParamRowWidth(api, header, game = 'sekiro') {
-  const loaded = api.loadFirstPartyParamMetadata();
-  if (!loaded?.ok) return undefined;
-  const descriptor = { game, gameBuild: '1.6', typeName: header.typeName, dataVersion: header.dataVersion ?? -1 };
-  const width = api.resolveParamMetadataRowWidth(loaded.package, descriptor);
-  if (width === undefined) return undefined;
-  const matched = api.matchParamMetadataPackage(loaded.package, { ...descriptor, rowDataSize: width }, undefined);
-  if (!matched?.ok) return undefined;
-  const size = matched.definition?.document?.rowDataSize;
-  return Number.isSafeInteger(size) && size > 0 ? size : undefined;
-}
-
 // One param through the production reader (paramBridgeCommit.ts readParamDocumentViaBridge): it asks the Bridge without a
 // width, and only on PARAM_ROW_SIZE_REQUIRED (single-row 32-bit params) reads the header and retries with
 // resolveRowDataSize's width. maxRows is lifted past its 500-row default so every row comes back; paramFromBridgeRead

@@ -72,8 +72,8 @@ PARAM field values are not compared yet. The reference decodes without a paramde
 `null` in SoulsFormats and has no `name` in the Bridge; `""` is folded into "no name" on both sides because the
 Bridge cannot return an empty name. The Bridge reads only loose .param files, so each entry is extracted to a
 private temporary directory that the run deletes afterwards. The Bridge read is the production one
-(`readParamDocumentViaBridge`): a single-row param needs a row width, taken from the trusted first-party metadata the
-same way the PARAM editor does; a param without a trusted width is a `diff` (`PARAM_METADATA_ROW_WIDTH_UNRESOLVED`),
+(`readParamDocumentViaBridge`): a single-row param needs a row width, taken from the trusted first-party metadata by
+the PARAM editor's own lookup (`resolveTrustedParamRowWidth`); a param without a trusted width is a `diff` (`PARAM_METADATA_ROW_WIDTH_UNRESOLVED`),
 not a skip. refcli runs one request per project at a time; the report records the reference call count and total
 time in `referenceCalls`.
 

@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { classify, compareOrdered, emevdFromBridgePages, emevdFromReferenceGraph, emevdKeys, failedComparison, fmgEntriesFromBridge,
   fmgEntriesFromReferenceGraph, fmgEntryKey, groupStatus, msbFromBridge, msbFromReferenceGraph, msbKeys, paramFromReferenceGraph, paramKeys,
   readBridgeParam, referenceBlockingDiagnostic, resolveReferenceResponse, staleKnownDiffs, taeAnimationsFromBridge,
-  taeAnimationsFromReferenceGraph, trustedParamRowWidth } from './lib.mjs';
+  taeAnimationsFromReferenceGraph } from './lib.mjs';
 import { fmgWriteRoundtrip } from './roundtrip.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -37,11 +37,9 @@ if (!existsSync(bridgeModule)) {
 }
 const coreModule = path => import(pathToFileURL(join(coreDist, path)).href);
 const { runBridge, disposeBridgeDaemonPool } = await coreModule('bridge/runBridge.js');
-// The PARAM rule reads through the production reader and trusted-width functions, not a copy of them.
+// The PARAM rule reads through the production reader and the editor's own row-width lookup, not a copy of them.
 const { readParamDocumentViaBridge } = await coreModule('editing/paramBridgeCommit.js');
-const { resolveParamMetadataRowWidth, matchParamMetadataPackage } = await coreModule('param/paramMetadata.js');
-const { loadFirstPartyParamMetadata } = await coreModule('schema/sekiro/firstPartySchema.js');
-const paramMetadataApi = { loadFirstPartyParamMetadata, resolveParamMetadataRowWidth, matchParamMetadataPackage };
+const { resolveTrustedParamRowWidth } = await coreModule('param/containerParamEdit.js');
 
 // Reference CLI cost, reported with the run: refcli runs one request per project at a time (a concurrent one is
 // status "blocked", PROJECT_BUSY), so the calls are sequential and their wall time adds up.
@@ -260,9 +258,9 @@ async function compareMsb(testCase, input, items) {
 // The Bridge reads PARAM from a loose .param only (read-param-document reads filePath directly; ParamDocumentSessionCache
 // GetOrOpen), so each parambnd entry is extracted to a run-private scratch directory first, as containerParamEdit.ts does.
 // The extracted entry must be the one the reference decoded (same index, id and name), or the read is a failure. The read
-// itself is the production chain: readParamDocumentViaBridge with a resolveRowDataSize backed by the trusted first-party
-// metadata (containerParamEdit.ts:1110-1119). A param with no trusted width fails as PARAM_METADATA_ROW_WIDTH_UNRESOLVED.
-async function bridgeParam(file, entry, scratch) {
+// itself is the production chain: readParamDocumentViaBridge with the editor's resolveTrustedParamRowWidth
+// (containerParamEdit.ts). A param with no trusted width fails as PARAM_METADATA_ROW_WIDTH_UNRESOLVED.
+async function bridgeParam(file, entry, scratch, game) {
   const out = join(scratch, `${entry.ordinal}.param`);
   const extracted = await runBridge({ command: 'extract-bnd4-child', filePath: file, allowedRoots: [gameRoot, scratch], writableRoots: [scratch],
     oodleRuntimeRoot: gameRoot, timeoutMs: 60_000, commandOptions: { entryIndex: entry.ordinal, outputPath: out } });
@@ -271,7 +269,7 @@ async function bridgeParam(file, entry, scratch) {
     return { error: 'BRIDGE_PARAM_ENTRY_MISMATCH' };
   }
   return readBridgeParam(readParamDocumentViaBridge, { sourcePath: out, allowedRoots: [gameRoot, scratch],
-    resolveRowDataSize: async header => trustedParamRowWidth(paramMetadataApi, header) });
+    resolveRowDataSize: header => resolveTrustedParamRowWidth(header, game) });
 }
 
 // PARAM: the parambnd entry list (ordinal, id, name), then every param's (ParamType, rowCount) and ordered row (id, name).
@@ -302,7 +300,7 @@ async function compareParam(testCase, input, items) {
       const decoded = referenceCall(testCase.reference, 'decode', { input: file, format: 'SoulsFormats.PARAM', entryChain: [entry] });
       if (decoded.status !== 'ok') { add(`${entry.ordinal}/header`, decoded, null); add(`${entry.ordinal}/rows`, decoded, null); continue; }
       const reference = paramFromReferenceGraph(referenceArtifact(decoded.response, 'structure.json'));
-      const bridge = await bridgeParam(file, entry, scratch);
+      const bridge = await bridgeParam(file, entry, scratch, testCase.game);
       add(`${entry.ordinal}/header`, decoded, bridge.error ? failedComparison(bridge.error)
         : compareOrdered([reference.header], [bridge.data.header], paramKeys.header));
       add(`${entry.ordinal}/rows`, decoded, bridge.error ? failedComparison(bridge.error)

@@ -6,7 +6,7 @@ import { classify, compareOrdered, emevdFromBridgePages, emevdFromReferenceGraph
   fmgEntriesFromReferenceGraph, graphRefResolver, groupStatus, int64Text, memberItems, msbDisambiguateNames, msbFromBridge, msbFromReferenceGraph, msbKeys,
   referenceFloatBits, resolveReferenceResponse, staleKnownDiffs, taeAnimationsFromBridge, taeAnimationsFromReferenceGraph,
   applyFmgTextEdit, fmgEntryKey, fmgRoundtripComparisons, pickFmgEditTarget,
-  paramFromBridgeRead, paramFromReferenceGraph, paramKeys, readBridgeParam, referenceBlockingDiagnostic, trustedParamRowWidth } from './lib.mjs';
+  paramFromBridgeRead, paramFromReferenceGraph, paramKeys, readBridgeParam, referenceBlockingDiagnostic } from './lib.mjs';
 
 // FMG write round trip: the expectation is the reference read of the source with the edit applied.
 const rtSource = () => ({ tables: [{ ordinal: 0, id: 1, name: 'a.fmg' }, { ordinal: 1, id: 2, name: 'b.fmg' }],
@@ -548,21 +548,4 @@ test('the Bridge PARAM read asks for every row: more than 500 rows come back who
   const read = await readBridgeParam(fakeParamReader(many), { sourcePath: 'm.param', allowedRoots: ['r'], resolveRowDataSize: async () => undefined });
   assert.equal(read.error, undefined);
   assert.equal(read.data.rows.length, 1201);
-});
-
-test('the trusted width comes from the matched first-party definition, with the editor descriptor; no match is no width', () => {
-  const seen = [];
-  const api = (overrides = {}) => ({
-    loadFirstPartyParamMetadata: () => ({ ok: true, package: { id: 'pkg' } }),
-    resolveParamMetadataRowWidth: (pkg, descriptor) => { seen.push(descriptor); return descriptor.typeName === 'GRAPHICS_PARAM_ST' ? 380 : undefined; },
-    matchParamMetadataPackage: (pkg, descriptor) => ({ ok: true, definition: { document: { rowDataSize: descriptor.rowDataSize } } }),
-    ...overrides
-  });
-  assert.equal(trustedParamRowWidth(api(), { typeName: 'GRAPHICS_PARAM_ST', dataVersion: 2 }), 380);
-  assert.deepEqual(seen[0], { game: 'sekiro', gameBuild: '1.6', typeName: 'GRAPHICS_PARAM_ST', dataVersion: 2 });
-  assert.equal(trustedParamRowWidth(api(), { typeName: 'UNKNOWN_ST', dataVersion: 1 }), undefined);
-  // The rejected match still carries a definition, so only the ok check (not a missing definition) can reject it.
-  assert.equal(trustedParamRowWidth(api({ matchParamMetadataPackage: () => ({ ok: false, definition: { document: { rowDataSize: 380 } }, diagnostics: [] }) }),
-    { typeName: 'GRAPHICS_PARAM_ST', dataVersion: 2 }), undefined, 'a width the definition match rejects is not used');
-  assert.equal(trustedParamRowWidth(api({ loadFirstPartyParamMetadata: () => ({ ok: false, diagnostics: [] }) }), { typeName: 'GRAPHICS_PARAM_ST', dataVersion: 2 }), undefined);
 });
