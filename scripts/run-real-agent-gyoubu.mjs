@@ -54,6 +54,7 @@ import { parseGoalContract, validateTaskContractGoals } from './real-agent-goal-
 import { captureAgentRunProvenance, decodeTaskInput, bindTestedArtifact, bindProviderConfiguration } from './testing/agent-run-provenance.mjs';
 import { spawn } from 'node:child_process';
 import { getFourTask } from './testing/real-agent-four-task-manifest.mjs';
+import { getFixedScenario } from './testing/real-agent-fixed-scenario-manifest.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(here, '..');
@@ -106,7 +107,9 @@ const AGENT_TEST_CONFIG_PATH = CLI_OPTIONS.testConfig ?? process.env.SOULFORGE_A
 const AGENT_RUNTIME = CLI_OPTIONS.runtime ?? process.env.SOULFORGE_AGENT_RUNTIME?.trim() ?? 'unpacked';
 const AGENT_EXE_PATH = CLI_OPTIONS.exe ?? process.env.SOULFORGE_AGENT_EXE?.trim() ?? null;
 const CANDIDATE_WRITE_MODE = CLI_OPTIONS.candidateWrite === true;
-const SELECTED_TEST_TASK = CLI_OPTIONS.testset ? getFourTask(CLI_OPTIONS.testset) : null;
+const SELECTED_TEST_TASK = CLI_OPTIONS.testset
+  ? (getFourTask(CLI_OPTIONS.testset) ?? getFixedScenario(CLI_OPTIONS.testset))
+  : null;
 const TASK_CONTRACT = CLI_OPTIONS.contractFile
   ? JSON.parse(decodeTaskInput(await readFile(CLI_OPTIONS.contractFile))) : SELECTED_TEST_TASK?.contract;
 if (TASK_CONTRACT?.intent !== undefined && !['read','ensure','modify','restore'].includes(TASK_CONTRACT.intent)) {
@@ -328,7 +331,7 @@ function printHelp() {
     '  --write                       显式启用隔离 overlay 写回闭环',
     '  --candidate-write             显式隔离候选实验；独立最终验证不充分时结果不会算通过',
     '  --apply-overlay               --write 的兼容别名',
-    '  --testset <名称>              使用机器可验证测试清单（four-1 到 four-4；four 由批处理入口展开）',
+    '  --testset <名称>              使用机器可验证测试清单（four-1 到 four-4，fixed-1 到 fixed-7；four 由批处理入口展开）',
     '  --label <名称>                报告文件名前缀',
     '  --provider test|vault          显式选择测试 provider 或隔离 vault provider',
     '  --config-id <id>              vault provider 的模型服务 ID',
@@ -1325,7 +1328,7 @@ async function run() {
     throw harnessError('REAL_AGENT_MODE_INVALID', '--observe 与 --write/--apply-overlay/--candidate-write 不能同时使用。');
   }
   if (CLI_OPTIONS.testset && !SELECTED_TEST_TASK) {
-    throw harnessError('REAL_AGENT_TESTSET_INVALID', `未知四题测试清单：${CLI_OPTIONS.testset}`);
+    throw harnessError('REAL_AGENT_TESTSET_INVALID', `未知测试清单：${CLI_OPTIONS.testset}`);
   }
   if (AGENT_RUNTIME !== 'unpacked' && AGENT_RUNTIME !== 'installed') {
     throw harnessError('REAL_AGENT_RUNTIME_INVALID', '--runtime 只能是 unpacked 或 installed。');
