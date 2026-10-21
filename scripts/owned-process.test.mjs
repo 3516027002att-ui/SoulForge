@@ -1264,3 +1264,23 @@ exit 0
       await rm(root, { recursive: true, force: true });
     }
   });
+
+test('Windows guardian keeps PowerShell progress records off its redirected stderr',
+  { skip: process.platform !== 'win32' && 'Windows job API unavailable', timeout: 60_000 }, async () => {
+    // A fresh module analysis cache (the desktop smoke sets one per run) makes the guardian's first cmdlet report
+    // "preparing modules for first use". On a redirected stderr Windows PowerShell writes that as CLIXML; an outer
+    // Windows PowerShell reading the run's native stderr fails to parse it and stops draining the pipe.
+    const root = await mkdtemp(join(tmpdir(), 'sf-owned-windows-progress-'));
+    try {
+      const owner = await createOwnedTemporaryDirectory('windows-progress', { parent: root });
+      const env = { ...process.env, PSModuleAnalysisCachePath: join(root, 'ModuleAnalysisCache') };
+      const result = await runProcess({ command: process.execPath, args: ['-e', "process.stdout.write('ok')"],
+        cwd: owner.root, env, owner });
+      assert.equal(result.code, 0, result.stderr);
+      assert.match(result.stdout, /ok/u);
+      assert.doesNotMatch(result.stderr, /#< CLIXML|<Objs /u, 'the guardian wrote PowerShell progress to stderr');
+      await owner.dispose();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });

@@ -1,3 +1,7 @@
+# Progress records reach a redirected stderr as CLIXML (for example "preparing modules for first use" with a fresh
+# module analysis cache). An outer Windows PowerShell reading that stderr fails to parse it and stops draining the
+# pipe, which freezes the whole owned run. The guardian never reports progress.
+$ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = New-Object Text.UTF8Encoding($false)
 $payload = [Console]::In.ReadToEnd() | ConvertFrom-Json
