@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
-import { listRolloutSessions } from '../model-services/fileRolloutStorage.js';
+import { listRolloutSessions, readRolloutFileWithinSessions } from '../model-services/fileRolloutStorage.js';
 
 export type SessionFeedbackRating = 'positive' | 'negative' | 'incomplete';
 
@@ -312,7 +311,10 @@ export class SessionFeedbackService {
   > {
     let raw: string;
     try {
-      raw = await readFile(path, 'utf8');
+      // listRolloutSessions returns a lexical path; re-check it at read time and
+      // bind the bytes to the checked file, so an alias swapped in after listing
+      // cannot redirect the upload outside sessions/ (ROLLOUT_PATH_FORBIDDEN).
+      raw = await readRolloutFileWithinSessions(this.rolloutBaseDir, path);
     } catch (error) {
       return {
         ok: false,

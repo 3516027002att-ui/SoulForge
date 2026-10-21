@@ -56,7 +56,13 @@ export function createListLuabndScriptsTool(): RegisteredTool {
                         }).code
                         : 'INVALID_READ_CURSOR', error instanceof Error ? error.message : 'LuaBND 目录 cursor 无效。');
                 }
-                if (payload.domain !== 'script' || payload.scope !== catalogScope) {
+                // The read-session table is process-global and resolvePage only checks the
+                // source hash, so the payload scope alone does not bind the session: a
+                // replayed or forged sessionId must belong to this workspace and catalog.
+                const existing = defaultReadSessionManager.getSession(payload.sessionId);
+                if (payload.domain !== 'script' || payload.scope !== catalogScope
+                    || (existing && (existing.domain !== 'script' || existing.queryScope !== catalogScope
+                        || existing.workspaceId !== workspaceId))) {
                     return fail('LUABND_CURSOR_SCOPE_MISMATCH', 'LuaBND 目录 cursor 与当前容器不匹配，请重新列出脚本。');
                 }
                 try {

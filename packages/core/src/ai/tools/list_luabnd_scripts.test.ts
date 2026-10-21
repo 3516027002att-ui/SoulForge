@@ -79,3 +79,55 @@ test('LuaBND catalog cursors conceal fallback paths and remain bound across a ho
     hooks.deregister(); delete (globalThis as any)[key];
   }
 });
+
+test('LuaBND catalog cursors cannot borrow a read session bound to another workspace, domain or catalog', async () => {
+  const workspaceId = 'workspace-a';
+  const containerPath = 'C:/mods/a/script/shared.luabnd.dcx';
+  const key = Symbol.for('sf.luabnd.session-binding');
+  const scripts = (prefix: string) => Array.from({ length: 4 }, (_, i) => ({ name: `${prefix}${i}.lua`, sanitizedName: `${prefix}${i}.lua`,
+    size: 10, isBytecode: false, contentKind: 'source', contentHash: 'd'.repeat(64) }));
+  (globalThis as any)[key] = async () => ({ ok: true, containerPath, sourceUri: 'script/shared.luabnd.dcx', outerFileHash: 'e'.repeat(64),
+    sourceRevision: 1, catalogComplete: true, entryCount: 4, scriptCount: 4, diagnostics: [], scripts: scripts('own') });
+  const hooks = registerHooks({
+    resolve(specifier, context, next) {
+      return specifier === '../../editing/luabndEdit.js' && context.parentURL?.includes('/ai/tools/list_luabnd_scripts.js?binding')
+        ? { url: 'sf:luabnd-session-binding', shortCircuit: true } : next(specifier, context);
+    },
+    load(url, context, next) {
+      return url === 'sf:luabnd-session-binding' ? { format: 'module', shortCircuit: true,
+        source: `export async function listLuabndScripts(input) { return globalThis[Symbol.for('sf.luabnd.session-binding')](input); }` }
+        : next(url, context);
+    }
+  });
+  try {
+    const { createListLuabndScriptsTool } = await import(new URL('./list_luabnd_scripts.js?binding', import.meta.url).href) as typeof import('./list_luabnd_scripts.js');
+    const session = { meta: { workspaceId }, layers: { overlayRoot: 'C:/mods/a' } } as ToolContext['session'];
+    const context = { session, editSession: { session }, mode: 'plan' } as ToolContext;
+    const registry = new ToolRegistry(); registry.register(createListLuabndScriptsTool());
+    const first = await registry.run('list_luabnd_scripts', { file: containerPath, pageSize: 2 }, context);
+    assert.equal(first.ok, true, JSON.stringify(first));
+    const own = parseOpaqueCursor((first.data as { nextCursor: string }).nextCursor);
+    // A session with the same catalog hash (same relative container and contents)
+    // can exist for another workspace or another domain in the process-global table.
+    const foreignSessions = [
+      { workspaceId: 'workspace-b', domain: 'script' as const, queryScope: 'luabnd-scripts-v2:other-workspace' },
+      { workspaceId, domain: 'emevd' as const, queryScope: own.scope },
+      { workspaceId, domain: 'script' as const, queryScope: 'luabnd-scripts-v2:other-catalog' }
+    ].map((binding) => defaultReadSessionManager.createSession({ ...binding,
+      sourceVersion: { sourceUri: 'script/shared.luabnd.dcx', sourceHash: own.sourceHash }, items: scripts('foreign-secret') }));
+    for (const foreign of foreignSessions) {
+      const forged = createOpaqueCursor({ ...own, sessionId: foreign.sessionId });
+      const result = await registry.run('list_luabnd_scripts', { file: containerPath, pageSize: 2, cursor: forged }, context);
+      assert.ok(!JSON.stringify(result).includes('foreign-secret'), `borrowed ${foreign.domain}/${foreign.workspaceId} session items: ${JSON.stringify(result)}`);
+      assert.equal(result.ok, false);
+      assert.equal(result.error?.code, 'LUABND_CURSOR_SCOPE_MISMATCH');
+      defaultReadSessionManager.invalidate(foreign.sessionId);
+    }
+    // The tool's own session still continues.
+    const continued = await registry.run('list_luabnd_scripts', { file: containerPath, pageSize: 2, cursor: (first.data as { nextCursor: string }).nextCursor }, context);
+    assert.equal(continued.ok, true, JSON.stringify(continued));
+    assert.deepEqual((continued.data as { scripts: Array<{ sanitizedName: string }> }).scripts.map((s) => s.sanitizedName), ['own2.lua', 'own3.lua']);
+  } finally {
+    hooks.deregister(); delete (globalThis as any)[key];
+  }
+});
