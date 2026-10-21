@@ -42,12 +42,22 @@ function git(cwd, args) {
 
 const absent = value => !value || /^0+$/u.test(value);
 
+const baseRef = explicit => absent(explicit) ? 'origin/main' : explicit;
+
 // An explicit base that cannot be resolved fails closed; only a missing base
 // (local run, or a push that created the branch) falls back to origin/main.
 export function resolveBase(cwd, explicit) {
-  const ref = absent(explicit) ? 'origin/main' : explicit;
+  const ref = baseRef(explicit);
   try { return git(cwd, ['merge-base', ref, 'HEAD']).trim(); }
   catch { throw new Error(`TRUST_ZONE_BASE_UNRESOLVED: cannot find merge-base of ${ref} and HEAD`); }
+}
+
+// The change that introduces the trust zone necessarily touches both sides. Until the target
+// branch carries this checker there is no judge to isolate, so isolation does not apply yet.
+// The target ref is asked, not the merge-base: a branch forked before the zone existed is still
+// judged once the target has it. Call after resolveBase, which rejects a ref git cannot resolve.
+export function targetHasTrustZone(cwd, explicit) {
+  return git(cwd, ['ls-tree', '--name-only', baseRef(explicit), '--', 'scripts/trust-zone-check.mjs']).trim() !== '';
 }
 
 export function changedPaths(cwd, base) {
@@ -61,7 +71,9 @@ export function changedPaths(cwd, base) {
 
 export function runTrustZoneCheck({ cwd = process.cwd(), base = process.env.TRUST_ZONE_BASE } = {}) {
   const resolved = resolveBase(cwd, base);
-  return { base: resolved, ...classifyChange(changedPaths(cwd, resolved)) };
+  const result = classifyChange(changedPaths(cwd, resolved));
+  if (!targetHasTrustZone(cwd, base)) return { base: resolved, bootstrap: true, ...result, ok: true };
+  return { base: resolved, bootstrap: false, ...result };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

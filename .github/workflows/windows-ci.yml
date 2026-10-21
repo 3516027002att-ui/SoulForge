@@ -21,7 +21,8 @@ jobs:
   gate:
     # Keep native Electron builds on the same verified MSVC baseline as desktop CI.
     runs-on: windows-2022
-    timeout-minutes: 60
+    # A local gate takes about 20 minutes; the hosted runner was 2-3x slower on the old pipeline.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:

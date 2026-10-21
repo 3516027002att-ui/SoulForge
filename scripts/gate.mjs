@@ -29,6 +29,7 @@ function documentedCommands(root) {
 
 function trustZone(root) {
   const result = runTrustZoneCheck({ cwd: root });
+  if (result.bootstrap) console.log('[gate] trust-zone isolation does not apply: the target branch has no trust-zone checker yet');
   if (!result.ok) {
     throw new Error(`TRUST_ZONE_MIXED against ${result.base}: zone [${result.zone.join(', ')}] with other [${result.other.slice(0, 20).join(', ')}${result.other.length > 20 ? ', ...' : ''}]`);
   }

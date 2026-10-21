@@ -39,6 +39,7 @@ A red `main` stops the line: fixing it comes before any other merge.
 
 These paths are the judge. A PR that touches any of them must touch nothing outside them
 (`node scripts/trust-zone-check.mjs` enforces this in the gate), and needs the owner's approval through CODEOWNERS.
+Isolation applies once the target branch carries the checker; the one change that first brings it to main is exempt.
 The list is `TRUST_ZONE` in that script; `.github/CODEOWNERS` and this section must match it (the gate tests this):
 
 - CI and entry documents: `.github/`, `AGENTS.md`, `CLAUDE.md`
