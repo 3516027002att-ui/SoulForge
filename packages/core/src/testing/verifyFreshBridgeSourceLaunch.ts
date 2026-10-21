@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { copyFile, lstat, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -21,6 +21,23 @@ try {
     await mkdir(dirname(target), { recursive: true });
     await copyFile(source, target);
   }
+  // The owned-process guardian is an explicitly prepared prerequisite
+  // (`npm run prepare:owned-process-guardian`), not a Bridge build output. The
+  // native hksc step of the Bridge build runs under it, so the fresh copy
+  // carries the prepared artifact exactly as a checkout would after that step.
+  const guardianRelative = '.local-validation/owned-process-guardian/linux-x64';
+  const manifestName = 'soulforge-owned-process-guardian.manifest.json';
+  let guardianManifest: { binaryFile?: unknown };
+  try { guardianManifest = JSON.parse(await readFile(join(repoRoot, guardianRelative, manifestName), 'utf8')); }
+  catch { throw new Error('Fresh Linux launch needs the prepared guardian: run npm run prepare:owned-process-guardian first.'); }
+  assert.ok(typeof guardianManifest.binaryFile === 'string' && /^[\w.-]+$/u.test(guardianManifest.binaryFile),
+    'guardian manifest names a binary in its own directory');
+  await mkdir(join(root, guardianRelative), { recursive: true });
+  for (const name of [manifestName, guardianManifest.binaryFile]) {
+    const from = join(repoRoot, guardianRelative, name), to = join(root, guardianRelative, name);
+    await copyFile(from, to);
+    await chmod(to, (await stat(from)).mode & 0o777);
+  }
   const source = join(root, 'sample.bin');
   await writeFile(source, 'fresh-source-inspection');
   const phases: unknown[] = [];
@@ -29,8 +46,10 @@ try {
     filePath: source, resourceUri: 'file://sample.bin', command: 'inspect',
     allowedRoots: [root], timeoutMs: 30_000, onProgress: value => phases.push(value)
   });
-  assert.equal(result.sourceUri, pathToFileURL(source).href);
+  // Diagnostics first: a failed launch returns the logical resourceUri, which
+  // would otherwise hide the Bridge failure behind a sourceUri mismatch.
   assert.ok(!result.diagnostics.some(item => item.code.startsWith('BRIDGE_')), JSON.stringify(result.diagnostics));
+  assert.equal(result.sourceUri, pathToFileURL(source).href);
   assert.deepEqual(phases.filter(value => (value as { phase?: string }).phase === 'bridge-source-build')
     .map(value => (value as { status: string }).status), ['started', 'completed']);
   console.log(JSON.stringify({ ok: true, status: 'verified', suite: 'fresh-linux-source-launch',
