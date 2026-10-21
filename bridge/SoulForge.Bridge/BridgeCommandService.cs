@@ -11,8 +11,8 @@ internal sealed class BridgeCommandService
 {
     private const int MaxPrefixBytes = 512 * 1024;
     private const long MaxLooseBnd4EnumerationBytes = 64L * 1024 * 1024;
-    // read-emevd-document 单页最大指令数。真实 common.emevd 有 33266 条，取 65536
-    // 可让常见事件文件一帧读完；再大的 EMEVD 仍需分页（帧上限 16 MiB）。
+    // read-emevd-document 单页最大指令数。取 65536 可让原版事件文件一帧读完（原版 common.emevd 4618 条）；
+    // mod 扩充后的事件文件可能超过一页，调用方必须分页读完（帧上限 16 MiB）。
     private const int MaxInstructionPageSize = 65536;
     // read-tpf-texture-preview 的预览边长上限。与 DdsCodec.DecodeDdsToPngPreview
     // 配合：全分辨率 PNG 的 base64 会超 bridge 帧上限，预览受界下采样到该边长。
@@ -1053,8 +1053,8 @@ internal sealed class BridgeCommandService
                 var roundTrip = cached.Entry.RoundTrip;
                 var requestedPage = OptionInt("instructionPage", 0);
                 var page = requestedPage >= 0 ? requestedPage : 0;
-                // 上限提到 MaxInstructionPageSize：一次拿完 33266 条指令只需一帧，
-                // 省掉 64 次 NDJSON 往返。分页能力保留（超大 EMEVD 仍会超帧上限）。
+                // 上限提到 MaxInstructionPageSize：原版事件文件一帧拿完，
+                // 省掉按默认 256 条一页的多次 NDJSON 往返。分页能力保留（mod 扩充后的 EMEVD 可能超过一页）。
                 var requestedPageSize = OptionInt("instructionPageSize", 256);
                 var pageSize = requestedPageSize >= 1 && requestedPageSize <= MaxInstructionPageSize
                     ? requestedPageSize
@@ -3732,7 +3732,7 @@ internal sealed class BridgeCommandService
             var exportDir = outputPath;
             if (string.IsNullOrWhiteSpace(exportDir))
             {
-                return BridgeResult<object>.Failed(file, "script", "BRIDGE_OUTPUT_PATH_REQUIRED", "export-luabnd 需要指定 outputPath 或 options.outputDirectory。");
+                return BridgeResult<object>.Failed(file, "script", "BRIDGE_OUTPUT_PATH_REQUIRED", "export-luabnd 需要宿主经 daemon 请求提供 options.outputPath，且路径须在协商的可写根内。");
             }
 
             try
