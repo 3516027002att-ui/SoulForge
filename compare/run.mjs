@@ -7,9 +7,10 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { classify, compareOrdered, emevdFromBridgePages, emevdFromReferenceGraph, emevdKeys, failedComparison, fmgEntriesFromBridge,
-  fmgEntriesFromReferenceGraph, groupStatus, msbFromBridge, msbFromReferenceGraph, msbKeys, resolveReferenceResponse, staleKnownDiffs,
+  fmgEntriesFromReferenceGraph, fmgEntryKey, groupStatus, msbFromBridge, msbFromReferenceGraph, msbKeys, resolveReferenceResponse, staleKnownDiffs,
   taeAnimationsFromBridge,
   taeAnimationsFromReferenceGraph } from './lib.mjs';
+import { fmgWriteRoundtrip } from './roundtrip.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const readJson = path => JSON.parse(readFileSync(path, 'utf8').replace(/^﻿/u, ''));
@@ -97,7 +98,43 @@ async function compareFmg(testCase, input, items) {
     const referenceEntries = fmgEntriesFromReferenceGraph(referenceArtifact(decoded.response, 'structure.json'));
     const soulforge = await bridgeCatalog(file, table.ordinal);
     add(table.ordinal, decoded, soulforge.error ? failedComparison(soulforge.error)
-      : compareOrdered(referenceEntries, fmgEntriesFromBridge(soulforge.data.entries ?? []), entry => `${entry.id} ${JSON.stringify(entry.text)}`));
+      : compareOrdered(referenceEntries, fmgEntriesFromBridge(soulforge.data.entries ?? []), fmgEntryKey));
+  }
+}
+
+// Reference read of a whole msgbnd: the FMG table list and every table's ordered (id, text).
+function readFmgTables(project, file) {
+  const listing = referenceCall(project, 'entries', { input: file });
+  if (listing.status !== 'ok') return listing;
+  const tables = referenceArtifact(listing.response, 'entries.json').entries
+    .filter(entry => entry.name.toLowerCase().endsWith('.fmg'))
+    .map(entry => ({ ordinal: entry.ordinal, id: entry.id, name: entry.name }));
+  const entries = new Map();
+  for (const table of tables) {
+    const decoded = referenceCall(project, 'decode',
+      { input: file, format: 'SoulsFormats.FMG', entryChain: [{ ordinal: table.ordinal, id: table.id, name: table.name }] });
+    if (decoded.status !== 'ok') return decoded;
+    entries.set(table.ordinal, fmgEntriesFromReferenceGraph(referenceArtifact(decoded.response, 'structure.json')));
+  }
+  return { status: 'ok', tables, entries };
+}
+
+// FMG write round trip: L0 identity write and L1 one-entry text edit into a temp staging root (compare/roundtrip.mjs).
+// byteIdentical (output sha256 == source sha256) is recorded only; it is not part of the status.
+async function compareFmgWriteRoundtrip(testCase, input, items) {
+  const file = join(gameRoot, ...input.split('/'));
+  if (!existsSync(file)) throw new Error(`corpus input is missing from the game root: ${input}`);
+  const key = `${testCase.game}/${testCase.format}/${testCase.operation}/${input}`;
+  const inputSha256 = createHash('sha256').update(readFileSync(file)).digest('hex');
+  const add = (suffix, reference, comparison, extra = {}) => items.push({ key: `${key}#${suffix}`, group: testCase, input, inputSha256,
+    reference: reference.status, referenceReason: reference.reason, comparison, ...extra });
+  const result = await fmgWriteRoundtrip({ file, gameRoot, runBridge, readTables: path => readFmgTables(testCase.reference, path) });
+  if (result.reference.status !== 'ok') { add('L0', result.reference, null); add('L1', result.reference, null); return; }
+  for (const level of result.levels) {
+    const extra = { target: result.target, outputSha256: level.outputSha256, byteIdentical: level.byteIdentical };
+    if (level.write.error) { add(level.level, { status: 'ok' }, failedComparison(level.write.error), extra); continue; }
+    if (level.reference.status !== 'ok') { add(level.level, level.reference, null, extra); continue; }
+    for (const [part, comparison] of Object.entries(level.comparisons)) add(`${level.level}/${part}`, level.reference, comparison, extra);
   }
 }
 
@@ -204,13 +241,14 @@ async function compareMsb(testCase, input, items) {
   }
 }
 
-const RULES = { fmg: compareFmg, tae: compareTae, emevd: compareEmevd, msb: compareMsb };
+const RULES = { 'fmg/read-text': compareFmg, 'fmg/write-roundtrip': compareFmgWriteRoundtrip, 'tae/read-animations': compareTae,
+  'emevd/read-events': compareEmevd, 'msb/read-map': compareMsb };
 let exitCode = 2;
 try {
   const items = [];
   for (const testCase of corpus.cases) {
-    const rule = RULES[testCase.format];
-    if (!rule) throw new Error(`no comparison rule for format ${testCase.format}`);
+    const rule = RULES[`${testCase.format}/${testCase.operation}`];
+    if (!rule) throw new Error(`no comparison rule for ${testCase.format}/${testCase.operation}`);
     for (const input of testCase.inputs) await rule(testCase, input, items);
   }
   for (const item of items) item.status = classify(item, knownDiffs);

@@ -4,7 +4,54 @@ import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { classify, compareOrdered, emevdFromBridgePages, emevdFromReferenceGraph, emevdKeys, failedComparison, float32Bits, fmgEntriesFromBridge,
   fmgEntriesFromReferenceGraph, graphRefResolver, groupStatus, int64Text, memberItems, msbDisambiguateNames, msbFromBridge, msbFromReferenceGraph, msbKeys,
-  referenceFloatBits, resolveReferenceResponse, staleKnownDiffs, taeAnimationsFromBridge, taeAnimationsFromReferenceGraph } from './lib.mjs';
+  referenceFloatBits, resolveReferenceResponse, staleKnownDiffs, taeAnimationsFromBridge, taeAnimationsFromReferenceGraph,
+  applyFmgTextEdit, fmgEntryKey, fmgRoundtripComparisons, pickFmgEditTarget } from './lib.mjs';
+
+// FMG write round trip: the expectation is the reference read of the source with the edit applied.
+const rtSource = () => ({ tables: [{ ordinal: 0, id: 1, name: 'a.fmg' }, { ordinal: 1, id: 2, name: 'b.fmg' }],
+  entries: new Map([[0, [{ id: 5, text: null }, { id: 6, text: 'x' }, { id: 6, text: 'y' }]], [1, [{ id: 7, text: '' }, { id: 8, text: '刀' }, { id: 9, text: 'z' }]]]) });
+const rtClone = value => ({ tables: structuredClone(value.tables), entries: new Map([...value.entries].map(([k, v]) => [k, structuredClone(v)])) });
+const rtDiffs = comparisons => Object.entries(comparisons).filter(([, c]) => !c.equal).map(([part, c]) => [part, c.differenceCount]);
+
+test('round trip edit target is the first unique-id entry with text; duplicates, null and empty text are skipped', () => {
+  const source = rtSource();
+  assert.deepEqual(pickFmgEditTarget(source.tables.map(t => ({ ordinal: t.ordinal, entries: source.entries.get(t.ordinal) }))),
+    { ordinal: 1, id: 8, text: '刀' });
+  assert.throws(() => pickFmgEditTarget([{ ordinal: 0, entries: [{ id: 1, text: null }, { id: 2, text: 'a' }, { id: 2, text: 'b' }] }]), /no FMG table/u);
+});
+
+test('the expected edit changes exactly the target text, leaves the input intact, and rejects ambiguous or no-op edits', () => {
+  const entries = [{ id: 1, text: 'a' }, { id: 2, text: 'b' }, { id: 3, text: null }];
+  const before = structuredClone(entries);
+  assert.deepEqual(applyFmgTextEdit(entries, 2, 'B'), [{ id: 1, text: 'a' }, { id: 2, text: 'B' }, { id: 3, text: null }]);
+  assert.deepEqual(entries, before);
+  assert.throws(() => applyFmgTextEdit(entries, 2, 'b'), /does not change/u);
+  assert.throws(() => applyFmgTextEdit(entries, 4, 'x'), /occurs 0 times/u);
+  assert.throws(() => applyFmgTextEdit([{ id: 1, text: 'a' }, { id: 1, text: 'b' }], 1, 'x'), /occurs 2 times/u);
+  assert.notEqual(fmgEntryKey({ id: 1, text: 'a' }), fmgEntryKey({ id: 1, text: 'b' }));
+  assert.notEqual(fmgEntryKey({ id: 1, text: null }), fmgEntryKey({ id: 1, text: 'null' }));
+});
+
+test('round trip: identity and the applied edit match; an extra change, an unapplied edit or a missing table is a diff', () => {
+  const source = rtSource();
+  const edit = { ordinal: 1, id: 8, text: '刀 [L1]' };
+  assert.deepEqual(rtDiffs(fmgRoundtripComparisons(source, rtClone(source), null)), []);
+  const edited = rtClone(source); edited.entries.get(1)[1].text = '刀 [L1]';
+  assert.deepEqual(rtDiffs(fmgRoundtripComparisons(source, edited, edit)), []);
+  // The edit did not take effect.
+  assert.deepEqual(rtDiffs(fmgRoundtripComparisons(source, rtClone(source), edit)), [['1', 1]]);
+  // One more entry changed, in the edited table and in another table.
+  const extra = rtClone(edited); extra.entries.get(1)[2].text = 'Z';
+  assert.deepEqual(rtDiffs(fmgRoundtripComparisons(source, extra, edit)), [['1', 1]]);
+  const other = rtClone(edited); other.entries.get(0)[0].text = '';
+  assert.deepEqual(rtDiffs(fmgRoundtripComparisons(source, other, edit)), [['0', 1]]);
+  // An identity write that changed text is a diff too.
+  assert.deepEqual(rtDiffs(fmgRoundtripComparisons(source, edited, null)), [['1', 1]]);
+  const renamed = rtClone(source); renamed.tables[1].name = 'c.fmg';
+  assert.deepEqual(rtDiffs(fmgRoundtripComparisons(source, renamed, null)), [['tables', 1]]);
+  const missing = rtClone(source); missing.entries.delete(0);
+  assert.deepEqual(rtDiffs(fmgRoundtripComparisons(source, missing, null)), [['0', 1]]);
+});
 
 test('a large reference result takes its identity only from the matching result manifest', () => {
   const full = { requestId: 'r1', status: 'ok', source: { commit: 'c' }, artifacts: [] };

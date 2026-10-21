@@ -17,6 +17,15 @@
     },
     {
       "game": "sekiro",
+      "format": "fmg",
+      "operation": "write-roundtrip",
+      "reference": "soulsformats",
+      "inputs": [
+        "msg/jpnjp/item.msgbnd.dcx"
+      ]
+    },
+    {
+      "game": "sekiro",
       "format": "tae",
       "operation": "read-animations",
       "reference": "soulsformats-next",

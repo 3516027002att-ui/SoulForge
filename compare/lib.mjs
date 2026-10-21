@@ -83,6 +83,49 @@ export function fmgEntriesFromBridge(entries) {
   return entries.map(entry => ({ id: entry.id, text: entry.text ?? null }));
 }
 
+// FMG comparison keys. The read rule and the write round trip use the same entry key, so both decide "equal" alike.
+export const fmgEntryKey = entry => `${entry.id} ${JSON.stringify(entry.text)}`;
+export const fmgTableKey = table => JSON.stringify([table.ordinal, table.id, table.name]);
+
+// Write round trip edit target: the first table (in listing order) holding an entry whose id occurs once in that table
+// and whose text is a non-empty string. An id-only upsert then touches exactly one slot. tables: [{ ordinal, entries }].
+export function pickFmgEditTarget(tables) {
+  for (const table of tables) {
+    const counts = new Map();
+    for (const entry of table.entries) counts.set(entry.id, (counts.get(entry.id) ?? 0) + 1);
+    const entry = table.entries.find(item => counts.get(item.id) === 1 && typeof item.text === 'string' && item.text !== '');
+    if (entry) return { ordinal: table.ordinal, id: entry.id, text: entry.text };
+  }
+  throw new Error('no FMG table has a unique-id entry with text');
+}
+
+// Expected entries after setting one entry's text, computed from the reference read of the source, never from the
+// writer. The id must occur exactly once, and the new text must differ, so an edit that changes nothing cannot pass.
+export function applyFmgTextEdit(entries, id, text) {
+  const slots = entries.flatMap((entry, index) => entry.id === id ? [index] : []);
+  if (slots.length !== 1) throw new Error(`FMG edit target id ${id} occurs ${slots.length} times`);
+  if (typeof text !== 'string') throw new Error('FMG edit text must be a string');
+  if (entries[slots[0]].text === text) throw new Error(`FMG edit of id ${id} does not change its text`);
+  return entries.map((entry, index) => index === slots[0] ? { id: entry.id, text } : { id: entry.id, text: entry.text });
+}
+
+// Write round trip, both sides read by the same reference build: the source (with the edit applied when there is one)
+// is the expectation, the writer's output is compared with it. source/output: { tables: [{ ordinal, id, name }],
+// entries: Map(ordinal -> [{ id, text }]) }; edit: null (L0 identity) or { ordinal, id, text } (L1). Every table is
+// compared, so a change outside the edited table, or in another entry of it, is a difference.
+export function fmgRoundtripComparisons(source, output, edit) {
+  const comparisons = { tables: compareOrdered(source.tables, output.tables, fmgTableKey) };
+  if (edit && !source.entries.has(edit.ordinal)) throw new Error(`FMG edit table ${edit.ordinal} is not in the source`);
+  for (const table of source.tables) {
+    const before = source.entries.get(table.ordinal);
+    if (!before) throw new Error(`FMG source table ${table.ordinal} was not read`);
+    const expected = edit && edit.ordinal === table.ordinal ? applyFmgTextEdit(before, edit.id, edit.text) : before;
+    const actual = output.entries.get(table.ordinal);
+    comparisons[table.ordinal] = actual ? compareOrdered(expected, actual, fmgEntryKey) : failedComparison('ROUNDTRIP_OUTPUT_TABLE_MISSING');
+  }
+  return comparisons;
+}
+
 // SoulsFormats.TAE graph -> ordered [{ id, file, events }]. IDs are Int64 graph values; keep their decimal text.
 export function taeAnimationsFromReferenceGraph(graph) {
   if (graph?.$type !== 'SoulsFormats.TAE') throw new Error(`expected SoulsFormats.TAE, got ${graph?.$type}`);
