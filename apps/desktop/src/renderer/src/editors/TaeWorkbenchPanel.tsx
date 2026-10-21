@@ -1551,25 +1551,30 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           minWidth: 240,
           children: (
             <div className="wb-list">
-              {detailsCollapsed ? (
+              {detailsCollapsed && (
                 <p className="wb-empty" data-testid="tae-details-collapsed">详情栏已收起，点击“展开”继续查看。</p>
-              ) : selected?.kind === 'event' && selectedEvent ? (
-                <TaeEventDetail
-                  event={selectedEvent}
-                  eventIndex={selectedEventIndex}
-                  eventTypeName={eventTypeNames.get(selectedEvent.eventTypeId) ?? '未命名'}
-                  eventParams={eventParams}
-                  timeDraft={timeDraft}
-                  saving={saving}
-                  writeNotice={writeNotice}
-                  onTimeDraftChange={(draft) => setTimeDraft(draft)}
-                  onSubmitTime={() => void submitTimeEdit()}
-                  onSubmitField={(field, value) => void submitFieldEdit(field, value)}
-                  onClose={closeEventDetail}
-                />
-              ) : (
-                <p className="wb-empty" data-testid="tae-details-empty">选中词条以编辑</p>
               )}
+              {/* 收起只隐藏不卸载：TaeEventDetail 的字段草稿（fieldDrafts）是组件内 state，
+                  卸载再挂载会被当前读回值覆盖。换事件 / 参数重读仍由其 effect 同步。 */}
+              <div hidden={detailsCollapsed}>
+                {selected?.kind === 'event' && selectedEvent ? (
+                  <TaeEventDetail
+                    event={selectedEvent}
+                    eventIndex={selectedEventIndex}
+                    eventTypeName={eventTypeNames.get(selectedEvent.eventTypeId) ?? '未命名'}
+                    eventParams={eventParams}
+                    timeDraft={timeDraft}
+                    saving={saving}
+                    writeNotice={writeNotice}
+                    onTimeDraftChange={(draft) => setTimeDraft(draft)}
+                    onSubmitTime={() => void submitTimeEdit()}
+                    onSubmitField={(field, value) => void submitFieldEdit(field, value)}
+                    onClose={closeEventDetail}
+                  />
+                ) : (
+                  <p className="wb-empty" data-testid="tae-details-empty">选中词条以编辑</p>
+                )}
+              </div>
             </div>
           )
         },

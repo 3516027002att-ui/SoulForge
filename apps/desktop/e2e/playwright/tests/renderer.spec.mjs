@@ -606,6 +606,85 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   await app.close();
 });
 
+// 移植自 PR #56 d3c6e0bb 的草稿回归用例，按 HEAD 的四栏布局改写（详情是独立栏，
+// 收起按钮在「详情」栏头，aria-label 为「收起详情栏 / 展开详情栏」）。
+test('TAE 详情栏收起保留数字、枚举和布尔字段草稿，切换事件仍重置字段', async ({}, testInfo) => {
+  const { app, window } = await launchApp();
+  await window.setViewportSize({ width: 1600, height: 1000 });
+  // 只替换自有 synthetic fixture 的参数读取；不覆盖 native 解码，也不授予写权限。
+  await app.evaluate(({ ipcMain }) => {
+    ipcMain.removeHandler('resource.readTaeEventParams');
+    ipcMain.handle('resource.readTaeEventParams', (_event, sourceUri, animId, eventIndex) => {
+      if (sourceUri !== 'fixture://action/c0000.tae' || animId !== 0 || ![0, 1].includes(eventIndex)) {
+        return { ok: false, diagnostics: [{ code: 'SYNTHETIC_TAE_PARAMS_OUT_OF_SCOPE', message: 'Unregistered synthetic event.' }] };
+      }
+      return {
+        ok: true,
+        data: {
+          eventTypeId: eventIndex + 1, templateName: 'synthetic-draft-regression',
+          fields: [
+            { index: 0, name: 'NumericDraft', type: 'f32', offset: 0, size: 4, value: eventIndex === 0 ? 1.5 : 9.5 },
+            { index: 1, name: 'EnumDraft', type: 'u8', offset: 4, size: 1, value: 0,
+              enumEntries: [{ value: 0, name: 'First' }, { value: 2, name: 'Second' }] },
+            { index: 2, name: 'BooleanDraft', type: 'b', offset: 5, size: 1, value: false },
+            { index: 3, name: 'Padding', type: 'u8', offset: 6, size: 1, value: 0, isPadding: true },
+            { index: 4, name: 'Constant', type: 'u8', offset: 7, size: 1, value: 7, assert: 7, assertValid: true }
+          ],
+          tailHex: null, undecodedHex: null
+        },
+        diagnostics: []
+      };
+    });
+  });
+  await openFixtureWorkspace(window);
+  await selectFileItem(window, 'action/c0000.tae');
+  await expandTaeAnimationGroup(window, 'a00');
+  await window.getByRole('region', { name: '动画' }).getByRole('row', { name: /a0000/ }).click();
+  const middle = window.getByRole('region', { name: '事件 / 词条' });
+  const detailsColumn = window.getByRole('region', { name: '详情' });
+  await middle.getByRole('row', { name: /1 未命名/ }).click();
+  const details = detailsColumn.getByTestId('tae-details');
+  const numeric = details.getByLabel('字段 NumericDraft');
+  const enumValue = details.getByLabel('字段 EnumDraft');
+  const booleanValue = details.getByLabel('字段 BooleanDraft');
+  await expect(numeric).toHaveValue('1.5');
+  await expect(enumValue).toHaveValue('0');
+  await expect(booleanValue).toHaveValue('false');
+  await expect(details.getByLabel('字段 Padding')).toBeDisabled();
+  await expect(details.getByLabel('字段 Constant')).toBeDisabled();
+  await numeric.fill('2.75');
+  await enumValue.selectOption('2');
+  await booleanValue.selectOption('true');
+  const fieldWrites = details.getByRole('button', { name: '写入', exact: true });
+  await expect(fieldWrites).toHaveCount(3);
+  for (const button of await fieldWrites.all()) await expect(button).toBeEnabled();
+
+  // 收起 → 展开：草稿必须还在（HEAD 上收起会卸载 TaeEventDetail，这三条断言在旧代码上红）。
+  await detailsColumn.getByRole('button', { name: '收起详情栏', exact: true }).click();
+  await expect(detailsColumn.getByTestId('tae-details-collapsed')).toBeVisible();
+  await expect(details).toBeHidden();
+  await detailsColumn.getByRole('button', { name: '展开详情栏', exact: true }).click();
+  await expect(details).toBeVisible();
+  await expect.soft(numeric).toHaveValue('2.75');
+  await expect.soft(enumValue).toHaveValue('2');
+  await expect.soft(booleanValue).toHaveValue('true');
+  await window.screenshot({ path: testInfo.outputPath('tae-field-drafts-preserved.png') });
+
+  // 收起状态下切到另一条事件：挂着的编辑器仍要按新事件的读回值同步，旧草稿不得串过去。
+  await detailsColumn.getByRole('button', { name: '收起详情栏', exact: true }).click();
+  await middle.getByRole('row', { name: /2 未命名/ }).click();
+  await detailsColumn.getByRole('button', { name: '展开详情栏', exact: true }).click();
+  await expect(numeric).toHaveValue('9.5');
+  await expect(enumValue).toHaveValue('0');
+  await expect(booleanValue).toHaveValue('false');
+  await expect(details.getByLabel('字段 Padding')).toBeDisabled();
+  await expect(details.getByLabel('字段 Constant')).toBeDisabled();
+  for (const button of await fieldWrites.all()) await expect(button).toBeDisabled();
+  expect((await ipcCalls(app))['resource.commitTaeEvent'] ?? 0).toBe(0);
+  await window.screenshot({ path: testInfo.outputPath('tae-field-drafts-event-reset.png') });
+  await app.close();
+});
+
 test('问题4-D：动作工作台动画长列表全量渲染，栏内可滚到最后一条', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
