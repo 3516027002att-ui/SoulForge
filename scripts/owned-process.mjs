@@ -8,6 +8,10 @@ import { runLinuxGuardianProcess } from './owned-process-linux-guardian.mjs';
 import { ownedTemporaryDirectoryObserver, prepareOwnedWindowsJob, recordOwnedProcess } from './owned-temporary-directory.mjs';
 
 const helperPath = fileURLToPath(import.meta.url);
+// The guardian exits only after TerminateJobObject and ActiveProcesses == 0.
+// A pipe still open after that belongs to a process outside the job; waiting
+// longer cannot make it owned. Bound the post-exit drain instead of hanging.
+export const WINDOWS_GUARDIAN_STDIO_DRAIN_MS = 5_000;
 
 function isCompleteProcessResult(value) {
   return value && typeof value === 'object' && Number.isSafeInteger(value.code)
@@ -197,6 +201,7 @@ if (process.argv[1] === helperPath && process.argv[2] === '--worker') {
       const result = process.platform === 'linux'
         ? await runLinuxGuardianProcess(guardedOptions)
         : await runProcess({ ...guardedOptions, detached: false,
+          stdioDrainMs: process.platform === 'win32' ? WINDOWS_GUARDIAN_STDIO_DRAIN_MS : undefined,
           terminationGroup: process.platform !== 'win32' ? process.pid : undefined });
       // Windows has no POSIX group observer. A killed/uncertain tree remains
       // marked rather than being inferred dead from its former cmd PID.

@@ -36,6 +36,34 @@ const treeProgram = `
   setInterval(() => {}, 1000);
 `;
 
+// A holder that outlives its driver while keeping the driver's inherited
+// stdout/stderr open. Its own heartbeat proves identity before any signal.
+const LINGER_MS = 15_000;
+const lingerProgram = `
+  // soulforge-owned-hang-linger
+  const { writeFileSync } = require('node:fs');
+  const sentinelPath = process.argv[1];
+  let tick = 0;
+  const beat = () => writeFileSync(sentinelPath, String(++tick), 'utf8');
+  beat();
+  const interval = setInterval(beat, 25);
+  setTimeout(() => { clearInterval(interval); process.exit(0); }, Number(process.argv[2]));
+`;
+const lingerDriverProgram = `
+  const { spawn } = require('node:child_process');
+  const { existsSync, writeFileSync } = require('node:fs');
+  const [pidPath, sentinelPath, lingerMs] = process.argv.slice(1);
+  const holder = spawn(process.execPath, ['-e', ${JSON.stringify(lingerProgram)}, sentinelPath, lingerMs], {
+    detached: true, stdio: ['ignore', 'inherit', 'inherit'], windowsHide: true
+  });
+  writeFileSync(pidPath, String(holder.pid), 'utf8');
+  const until = Date.now() + 5000;
+  while (!existsSync(sentinelPath) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  holder.unref();
+  process.stdout.write('driver-ready\\n');
+  process.exit(0);
+`;
+
 await main();
 
 async function main() {
@@ -216,6 +244,80 @@ async function main() {
     assert.match(oversized.stdout, /^o+$/u);
     assert.match(oversized.stderr, /^e+$/u);
 
+    // The driver exits at once; a detached holder keeps its inherited stdio
+    // open for LINGER_MS. Waiting only for 'close' would wait for that holder.
+    const lingerResults = [];
+    const runLingerCase = async (name, run) => {
+      const pidPath = join(fixtureRoot, `${name}.pid`);
+      const sentinelPath = join(fixtureRoot, `${name}.sentinel`);
+      const timing = { started: performance.now(), runElapsedMs: null };
+      let failure = null;
+      try {
+        await run(pidPath, sentinelPath, timing);
+      } catch (error) {
+        failure = error;
+      } finally {
+        try { await stopLingeringHolder(pidPath, sentinelPath, name); }
+        catch (error) { failure ??= error; }
+      }
+      lingerResults.push({ name, ok: failure === null, runElapsedMs: timing.runElapsedMs,
+        error: failure === null ? null : failure.message });
+    };
+
+    await runLingerCase('timeout-after-exit-releases-inherited-stdio', async (pidPath, sentinelPath, timing) => {
+      const result = await runProcess({
+        command: process.execPath,
+        args: ['-e', lingerDriverProgram, pidPath, sentinelPath, String(LINGER_MS)],
+        cwd: root,
+        timeoutMs: 1_000
+      });
+      timing.runElapsedMs = Math.round(performance.now() - timing.started);
+      assert.ok(timing.runElapsedMs < 8_000,
+        `timeout after driver exit waited ${timing.runElapsedMs}ms for an inherited stdio holder`);
+      assert.equal(result.timedOut, true);
+      assert.equal(result.cancelled, false);
+      assert.equal(result.terminationReason, 'timeout');
+      assert.notEqual(result.code, 0, 'an unowned stdio holder must not leave a success code');
+      assert.match(result.stdout, /driver-ready/u, 'output delivered before the timeout must be retained');
+      assert.equal(await sentinelIsChanging(sentinelPath), true, 'the holder must still be alive when the run resolves');
+    });
+
+    await runLingerCase('stdio-drain-bounds-inherited-stdio', async (pidPath, sentinelPath, timing) => {
+      const result = await runProcess({
+        command: process.execPath,
+        args: ['-e', lingerDriverProgram, pidPath, sentinelPath, String(LINGER_MS)],
+        cwd: root,
+        stdioDrainMs: 500
+      });
+      timing.runElapsedMs = Math.round(performance.now() - timing.started);
+      assert.ok(timing.runElapsedMs < 5_000,
+        `stdioDrainMs did not bound the post-exit drain: waited ${timing.runElapsedMs}ms`);
+      assert.equal(result.terminationReason, 'stdio-held-after-exit');
+      assert.equal(result.outputError, 'PROCESS_STDIO_HELD_AFTER_EXIT');
+      assert.equal(result.code, 1, 'held stdio after exit is a failure, matching descendant-leak');
+      assert.equal(result.childExitCode, 0);
+      assert.equal(result.timedOut, false);
+      assert.equal(result.cancelled, false);
+      assert.match(result.stdout, /driver-ready/u, 'output delivered before the drain bound must be retained');
+      assert.equal(await sentinelIsChanging(sentinelPath), true, 'the holder must still be alive when the run resolves');
+
+      const drained = await runProcess({
+        command: process.execPath,
+        args: ['-e', 'process.stdout.write("drain-ok")'],
+        cwd: root,
+        timeoutMs: 5_000,
+        stdioDrainMs: 500
+      });
+      assert.equal(drained.code, 0, 'a normal close must win over the drain bound');
+      assert.equal(drained.terminationReason, null);
+      assert.equal(drained.stdout, 'drain-ok');
+    });
+
+    console.error(JSON.stringify({ lingerResults }));
+    const lingerFailures = lingerResults.filter(item => !item.ok);
+    assert.equal(lingerFailures.length, 0,
+      `inherited stdio cases failed: ${lingerFailures.map(item => `${item.name} (${item.runElapsedMs}ms): ${item.error}`).join(' | ')}`);
+
     console.log(JSON.stringify({
       ok: true,
       status: 'passed',
@@ -227,7 +329,9 @@ async function main() {
         'abort-kills-child-grandchild',
         'normal-completion',
         'zero-exit-timeout-and-cancel-fail-success-predicate',
-        'default-output-limit'
+        'default-output-limit',
+        'timeout-after-exit-releases-inherited-stdio',
+        'stdio-drain-bounds-inherited-stdio'
       ],
       timeoutElapsedMs
     }, null, 2));
@@ -273,4 +377,29 @@ function isProcessRunning(pid) {
     if (error?.code === 'EPERM') return true;
     throw error;
   }
+}
+
+async function sentinelIsChanging(sentinelPath) {
+  let before;
+  try { before = await readFile(sentinelPath, 'utf8'); }
+  catch (error) { if (error?.code === 'ENOENT') return false; throw error; }
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
+  return (await readFile(sentinelPath, 'utf8')) !== before;
+}
+
+/** Stop only a holder whose own heartbeat still proves the PID is ours. */
+async function stopLingeringHolder(pidPath, sentinelPath, label) {
+  let pid;
+  try { pid = Number(await readFile(pidPath, 'utf8')); }
+  catch (error) { if (error?.code === 'ENOENT') return; throw error; }
+  if (!Number.isSafeInteger(pid) || pid <= 0) return;
+  if (await sentinelIsChanging(sentinelPath)) {
+    try { process.kill(pid, 'SIGKILL'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
+  }
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (!(await sentinelIsChanging(sentinelPath)) && !isProcessRunning(pid)) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  assert.fail(`${label} lingering stdio holder ${pid} did not exit`);
 }

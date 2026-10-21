@@ -2,6 +2,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 
 const DEFAULT_OUTPUT_LIMIT_BYTES = 2 * 1024 * 1024;
+// POSIX escalates SIGTERM to SIGKILL after 2s; leave a short drain after that.
+const TERMINATION_STDIO_DRAIN_MS = 3_000;
 
 /**
  * Decode a subprocess byte stream incrementally while retaining a UTF-8-safe
@@ -92,7 +94,11 @@ export async function runProcess({
   onSpawn,
   detached = process.platform !== 'win32',
   terminationGroup,
-  stdinData
+  stdinData,
+  // Optional bound between child 'exit' and stdio EOF. A pipe write end can be
+  // inherited/duplicated by a process outside the child's tree; without this
+  // bound 'close' (and therefore this promise) waits for that foreign holder.
+  stdioDrainMs
 }) {
   if (owner) {
     const { runOwnedProcess } = await import('./owned-process.mjs');
@@ -130,6 +136,9 @@ export async function runProcess({
     let treeTerminated = false;
     let settled = false;
     let cancelForcedTermination = () => {};
+    let exitInfo = null;
+    let drainTimer;
+    let terminationDrainTimer;
 
     child.stdout.on('data', (chunk) => {
       onStdout?.(chunk);
@@ -140,10 +149,56 @@ export async function runProcess({
       stderrOutput.write(chunk);
     });
 
+    const settle = (code, closeSignal, heldAfterExit = false) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(drainTimer);
+      clearTimeout(terminationDrainTimer);
+      cancelForcedTermination();
+      signal?.removeEventListener('abort', onAbort);
+      // Every chunk already delivered by 'data' is in the tails. Stop reading
+      // only after settling so the destroy-triggered 'close' cannot race this.
+      if (heldAfterExit) { child.stdout.destroy(); child.stderr.destroy(); }
+      // Process close is the fallback for streams destroyed before EOF.
+      stdoutOutput.end();
+      stderrOutput.end();
+      const reason = heldAfterExit && terminationReason === null ? 'stdio-held-after-exit' : terminationReason;
+      const stderr = spawnError ? `${stderrOutput.value}\n${spawnError}`.trim() : stderrOutput.value;
+      resolvePromise({
+        // A still-open pipe after exit means an unowned writer may remain. That
+        // is not a success receipt, even when the direct child returned 0.
+        code: heldAfterExit ? (code || 1) : (code ?? 1),
+        stdout: stdoutOutput.value,
+        stderr,
+        stdoutTruncated: stdoutOutput.truncated,
+        stderrTruncated: stderrOutput.truncated,
+        timedOut: reason === 'timeout',
+        cancelled: reason === 'cancelled',
+        terminationReason: reason,
+        treeTerminated,
+        signal: closeSignal ?? null,
+        timeoutMs,
+        ...(heldAfterExit ? { childExitCode: code ?? null, outputError: 'PROCESS_STDIO_HELD_AFTER_EXIT' } : {})
+      });
+    };
+
+    // Once termination is requested, an exited child cannot keep the result
+    // pending longer than the POSIX SIGKILL escalation plus a short drain.
+    const armTerminationDrain = () => {
+      if (settled || !exitInfo || terminationDrainTimer) return;
+      terminationDrainTimer = setTimeout(() => settle(exitInfo.code, exitInfo.signal, true), TERMINATION_STDIO_DRAIN_MS);
+    };
     const terminate = (reason) => {
-      if (terminationReason !== null) return;
+      if (terminationReason !== null || settled) return;
       terminationReason = reason;
+      // Windows: the exited child's PID may already be reused, and taskkill /T
+      // cannot reach descendants through a dead parent. Release the pipes now.
+      if (exitInfo && process.platform === 'win32') { settle(exitInfo.code, exitInfo.signal, true); return; }
+      // POSIX: a process group id cannot be reused while a member is alive, so
+      // group termination after the leader exited stays safe and is kept.
       cancelForcedTermination = terminateProcessTree(child, terminationGroup, () => { treeTerminated = true; });
+      armTerminationDrain();
     };
     const onAbort = () => terminate('cancelled');
     if (signal?.aborted) onAbort();
@@ -153,29 +208,15 @@ export async function runProcess({
     child.on('error', (error) => {
       spawnError = error instanceof Error ? error.message : String(error);
     });
-    child.on('close', (code, closeSignal) => {
+    child.on('exit', (code, exitSignal) => {
+      exitInfo = { code, signal: exitSignal };
       if (settled) return;
-      settled = true;
-      // Process close is the fallback for streams destroyed before EOF.
-      stdoutOutput.end();
-      stderrOutput.end();
-      clearTimeout(timer);
-      cancelForcedTermination();
-      signal?.removeEventListener('abort', onAbort);
-      resolvePromise({
-        code: code ?? 1,
-        stdout: stdoutOutput.value,
-        stderr: spawnError ? `${stderrOutput.value}\n${spawnError}`.trim() : stderrOutput.value,
-        stdoutTruncated: stdoutOutput.truncated,
-        stderrTruncated: stderrOutput.truncated,
-        timedOut: terminationReason === 'timeout',
-        cancelled: terminationReason === 'cancelled',
-        terminationReason,
-        treeTerminated,
-        signal: closeSignal ?? null,
-        timeoutMs
-      });
+      if (Number.isSafeInteger(stdioDrainMs) && stdioDrainMs >= 0) {
+        drainTimer = setTimeout(() => settle(code, exitSignal, true), stdioDrainMs);
+      }
+      if (terminationReason !== null) armTerminationDrain();
     });
+    child.on('close', (code, closeSignal) => settle(code, closeSignal));
   });
 }
 

@@ -1206,3 +1206,61 @@ test('Windows owner interruption preserves live writers and reclaims only a stop
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('Windows guardian result is bounded when a process outside the job holds its stdio pipes',
+  { skip: process.platform !== 'win32' && 'Windows job API unavailable', timeout: 60_000 }, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sf-owned-windows-stdio-holder-'));
+    // The holder is started by this test, outside the guardian's job object.
+    const holder = spawn(process.execPath, ['-e', '/* soulforge-owned-hang-holder */ setTimeout(() => {}, 20000)'],
+      { stdio: 'ignore', windowsHide: true });
+    const holderExited = once(holder, 'exit');
+    try {
+      const owner = await createOwnedTemporaryDirectory('windows-stdio-holder', { parent: root });
+      const driver = join(root, 'duplicate-std-handles.ps1');
+      // The in-job driver hands its inherited stdout/stderr (the guardian pipes)
+      // to the out-of-job holder, then exits. Job termination cannot reach it.
+      await writeFile(driver, `param([int] $HolderPid)
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class SoulForgeDuplicateStd {
+  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool DuplicateHandle(IntPtr sp, IntPtr sh, IntPtr tp, out IntPtr th, uint access, bool inherit, uint options);
+  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+  [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int kind);
+  public static string Run(int pid) {
+    IntPtr target = OpenProcess(0x40, false, pid);
+    if (target == IntPtr.Zero) return "open-failed";
+    IntPtr a, b;
+    bool okOut = DuplicateHandle(GetCurrentProcess(), GetStdHandle(-11), target, out a, 0, false, 2);
+    bool okErr = DuplicateHandle(GetCurrentProcess(), GetStdHandle(-12), target, out b, 0, false, 2);
+    return "dup stdout=" + okOut + " stderr=" + okErr;
+  }
+}
+'@
+[Console]::Out.WriteLine([SoulForgeDuplicateStd]::Run($HolderPid))
+exit 0
+`);
+      const started = Date.now();
+      const result = await runProcess({ command: 'powershell.exe',
+        args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', driver, '-HolderPid', String(holder.pid)],
+        cwd: owner.root, env: process.env, owner });
+      const elapsedMs = Date.now() - started;
+      assert.ok(elapsedMs < 12_000, `owned result waited ${elapsedMs}ms for an out-of-job stdio holder`);
+      assert.equal(holder.exitCode, null, 'the out-of-job holder must still be alive when the run resolves');
+      assert.match(result.stdout, /dup stdout=True stderr=True/u, 'the driver must have handed both pipes to the holder');
+      assert.equal(result.terminationReason, 'stdio-held-after-exit');
+      assert.equal(result.outputError, 'PROCESS_STDIO_HELD_AFTER_EXIT');
+      assert.equal(result.childExitCode, 0);
+      assert.equal(result.code, 1);
+      const marker = JSON.parse(await readFile(join(owner.root, '.soulforge-temporary-owner.json'), 'utf8'));
+      assert.equal(marker.windowsJobs.length, 1);
+      const proof = JSON.parse(await readFile(join(owner.root, `.soulforge-windows-job.${marker.windowsJobs[0].id}.json`), 'utf8'));
+      assert.equal(proof.state, 'finished', 'the job itself was stopped; only the foreign holder kept the pipes');
+      await owner.dispose(); await assert.rejects(lstat(owner.root), { code: 'ENOENT' });
+    } finally {
+      if (holder.exitCode === null && holder.signalCode === null) holder.kill('SIGKILL');
+      await holderExited;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
