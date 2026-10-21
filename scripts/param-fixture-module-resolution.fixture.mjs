@@ -43,7 +43,7 @@ test('the actual fixture plugin loads handler and cache-capturing service for ei
 // Controlled reproduction of the Windows CI build failure. This runs esbuild
 // locally; it does not claim that a Windows drive URL can execute on this host.
 test('virtual exports cannot resolve a Windows drive path through a POSIX-only absolute-path filter', async () => {
-  const windowsCore = String.raw`D:\a\SoulForge\SoulForge\packages\core\dist\index.js`;
+  const windowsCore = String.raw`D:\repo\packages\core\dist\index.js`;
   await assert.rejects(build({ stdin: { contents: 'import * as core from "fixture-core"; console.log(core);', loader: 'js' },
     write: false, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent',
     plugins: [{ name: 'legacy-fixture-resolution-reproduction', setup(builder) {
