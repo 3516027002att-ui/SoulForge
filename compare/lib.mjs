@@ -1,6 +1,7 @@
 // Pure comparison logic for compare/run.mjs. No environment, filesystem or process access here, so the
 // gate can test the oracle itself (compare/compare.test.mjs) without game files.
 import { createHash } from 'node:crypto';
+import { basename, dirname, isAbsolute } from 'node:path';
 
 export const STATUSES = Object.freeze(['match', 'diff', 'known-diff', 'reference-unsupported', 'reference-unavailable']);
 
@@ -44,6 +45,17 @@ export function resolveReferenceResponse(summary, readManifest) {
     throw new Error('reference result manifest belongs to another request');
   }
   return full;
+}
+
+// refcli writes one result directory per call, <ISO time>-<project>-<uuid>, and never deletes them. Only a clean run
+// (exit 0) may delete the ones it created; any other outcome keeps them to inspect, and keep:true keeps them always.
+// Paths are checked as strings only: absolute, refcli's name shape, one shared parent. Anything else is refused whole.
+const REFERENCE_RESULT_DIR = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[a-z0-9-]+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+export function referenceResultDirsToRemove(dirs, { exitCode, keep = false }) {
+  if (exitCode !== 0 || keep || dirs.length === 0) return [];
+  const parents = new Set(dirs.map(dir => dirname(dir)));
+  if (parents.size !== 1) return [];
+  return dirs.every(dir => typeof dir === 'string' && isAbsolute(dir) && REFERENCE_RESULT_DIR.test(basename(dir))) ? [...dirs] : [];
 }
 
 // A difference is only "known" while its exact fingerprint is recorded with a reason and an issue.

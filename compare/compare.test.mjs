@@ -2,11 +2,12 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
+import { basename, join, resolve } from 'node:path';
 import { classify, compareOrdered, emevdFromBridgePages, emevdFromReferenceGraph, emevdKeys, failedComparison, float32Bits, fmgEntriesFromBridge,
   fmgEntriesFromReferenceGraph, graphRefResolver, groupStatus, int64Text, memberItems, msbDisambiguateNames, msbFromBridge, msbFromReferenceGraph, msbKeys,
   referenceFloatBits, resolveReferenceResponse, staleKnownDiffs, taeAnimationsFromBridge, taeAnimationsFromReferenceGraph,
   applyFmgTextEdit, fmgEntryKey, fmgRoundtripComparisons, pickFmgEditTarget,
-  paramFromBridgeRead, paramFromReferenceGraph, paramKeys, readBridgeParam, referenceBlockingDiagnostic } from './lib.mjs';
+  paramFromBridgeRead, paramFromReferenceGraph, paramKeys, readBridgeParam, referenceBlockingDiagnostic, referenceResultDirsToRemove } from './lib.mjs';
 
 // FMG write round trip: the expectation is the reference read of the source with the edit applied.
 const rtSource = () => ({ tables: [{ ordinal: 0, id: 1, name: 'a.fmg' }, { ordinal: 1, id: 2, name: 'b.fmg' }],
@@ -66,6 +67,20 @@ test('a large reference result takes its identity only from the matching result 
   const other = Buffer.from(JSON.stringify({ ...full, requestId: 'r2' }));
   assert.throws(() => resolveReferenceResponse(summary(createHash('sha256').update(other).digest('hex')), () => other), /another request/u);
   assert.throws(() => resolveReferenceResponse({ ...summary(good), resultManifest: undefined }, () => bytes), /no result manifest/u);
+});
+
+test('a clean run deletes only the refcli result directories it created; any other outcome keeps them', () => {
+  const parent = resolve('reference-results');
+  const a = join(parent, '2026-10-21T12-50-03-671Z-soulsformats-6c6a5fd3-bb1a-4ef5-93f4-2820eadbc26d');
+  const b = join(parent, '2026-10-21T12-52-44-312Z-soulsformats-next-057499da-bb1a-4ef5-93f4-2820eadbc26d');
+  assert.deepEqual(referenceResultDirsToRemove([a, b], { exitCode: 0 }), [a, b]);
+  for (const exitCode of [1, 2, 3]) assert.deepEqual(referenceResultDirsToRemove([a, b], { exitCode }), [], `exit ${exitCode} keeps results`);
+  assert.deepEqual(referenceResultDirsToRemove([a, b], { exitCode: 0, keep: true }), []);
+  assert.deepEqual(referenceResultDirsToRemove([], { exitCode: 0 }), []);
+  // Refused whole: a name refcli does not write, a relative path, or directories under different parents.
+  assert.deepEqual(referenceResultDirsToRemove([a, join(parent, 'compare')], { exitCode: 0 }), []);
+  assert.deepEqual(referenceResultDirsToRemove([basename(a)], { exitCode: 0 }), []);
+  assert.deepEqual(referenceResultDirsToRemove([a, join(resolve('other-root'), basename(b))], { exitCode: 0 }), []);
 });
 
 const graph = entries => ({ $type: 'SoulsFormats.FMG', $members: [{ name: 'Entries', value: { $items: entries.map(([id, text]) => ({

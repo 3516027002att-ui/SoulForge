@@ -75,7 +75,9 @@ private temporary directory that the run deletes afterwards. The Bridge read is 
 (`readParamDocumentViaBridge`): a single-row param needs a row width, taken from the trusted first-party metadata by
 the PARAM editor's own lookup (`resolveTrustedParamRowWidth`); a param without a trusted width is a `diff` (`PARAM_METADATA_ROW_WIDTH_UNRESOLVED`),
 not a skip. refcli runs one request per project at a time; the report records the reference call count and total
-time in `referenceCalls`.
+time in `referenceCalls`. refcli writes one result directory per call and never deletes them; a clean run (exit 0)
+deletes the ones it created, any other outcome keeps them to inspect, and `SOULFORGE_COMPARE_KEEP_REFERENCE_RESULTS=1`
+keeps them always (`referenceResults` in stdout counts both).
 
 To add a format, add a rule to `run.mjs`, its extraction to `lib.mjs` with a test that fails on a wrong
 extraction, and its inputs to `corpus.json`.

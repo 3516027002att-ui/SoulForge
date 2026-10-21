@@ -9,7 +9,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { classify, compareOrdered, emevdFromBridgePages, emevdFromReferenceGraph, emevdKeys, failedComparison, fmgEntriesFromBridge,
   fmgEntriesFromReferenceGraph, fmgEntryKey, groupStatus, msbFromBridge, msbFromReferenceGraph, msbKeys, paramFromReferenceGraph, paramKeys,
-  readBridgeParam, referenceBlockingDiagnostic, resolveReferenceResponse, staleKnownDiffs, taeAnimationsFromBridge,
+  readBridgeParam, referenceBlockingDiagnostic, referenceResultDirsToRemove, resolveReferenceResponse, staleKnownDiffs, taeAnimationsFromBridge,
   taeAnimationsFromReferenceGraph } from './lib.mjs';
 import { fmgWriteRoundtrip } from './roundtrip.mjs';
 
@@ -44,6 +44,7 @@ const { resolveTrustedParamRowWidth } = await coreModule('param/containerParamEd
 // Reference CLI cost, reported with the run: refcli runs one request per project at a time (a concurrent one is
 // status "blocked", PROJECT_BUSY), so the calls are sequential and their wall time adds up.
 const referenceCalls = { count: 0, totalMs: 0 };
+const referenceResultDirs = new Set();
 function referenceCall(project, operation, args) {
   if (!refcli || !existsSync(refcli)) return { status: 'unavailable', reason: 'SOULFORGE_REFCLI must point at the reference CLI entry (refcli.mjs)' };
   const started = Date.now();
@@ -57,6 +58,7 @@ function referenceCall(project, operation, args) {
   catch { return { status: 'unavailable', reason: `reference CLI exited ${result.status} without JSON` }; }
   try { response = resolveReferenceResponse(response, path => readFileSync(path)); }
   catch (error) { return { status: 'unavailable', reason: error.message }; }
+  if (typeof response.resultDir === 'string') referenceResultDirs.add(response.resultDir);
   const reason = (response.diagnostics ?? []).map(item => item.code ?? item.message).filter(Boolean).join(', ') || response.status;
   // Checked before the status: a PARAMDEF_* diagnostic means the requested read did not happen, even if status is "ok".
   if (referenceBlockingDiagnostic(response)) return { status: 'unsupported', reason };
@@ -333,9 +335,14 @@ try {
   writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
   exitCode = items.some(item => item.status === 'diff') || stale.length ? 1
     : groups.every(group => ['match', 'known-diff'].includes(group.status)) ? 0 : 3;
+  // A clean run deletes the refcli result directories it created; anything else keeps them to inspect.
+  const removable = referenceResultDirsToRemove([...referenceResultDirs],
+    { exitCode, keep: process.env.SOULFORGE_COMPARE_KEEP_REFERENCE_RESULTS === '1' });
+  for (const dir of removable) rmSync(dir, { recursive: true, force: true });
+  const referenceResults = { created: referenceResultDirs.size, removed: removable.length };
   // stdout carries statuses and counts only; the report file also holds extracted game text and stays local.
   console.log(JSON.stringify({ status: ['match', 'diff', 'error', 'incomplete'][[0, 1, 2, 3].indexOf(exitCode)], groups,
-    staleKnownDiffs: stale, referenceCalls, report: 'output/compare/report.json' }, null, 2));
+    staleKnownDiffs: stale, referenceCalls, referenceResults, report: 'output/compare/report.json' }, null, 2));
 } catch (error) {
   console.log(JSON.stringify({ status: 'error', reason: error instanceof Error ? error.message : String(error) }));
 } finally {
