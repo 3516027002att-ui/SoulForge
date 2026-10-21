@@ -50,6 +50,7 @@ only the stdout summary in PRs and issues.
 | `emevd` | Bridge `read-emevd-document`, every instruction page | SoulsFormats `decode` (EMEVD) | events (id, rest behavior, instruction and parameter counts); flattened instructions (event, index, bank, id, ArgData length and sha256, layer present); flattened parameters |
 | `fmg` `write-roundtrip` | Bridge `write-fmg` into a temp staging root | SoulsFormats reads source and output | L0 identity upsert and L1 one-entry text edit; every table's ordered (id, text) against the reference read of the source with the same edit applied |
 | `msb` | Bridge `read-msb-document` | SoulsFormatsNEXT `decode` (MSBS) | per type, ordered: models (name, sib path); parts (name, model, position/rotation/scale float32 bits, entity id); regions (name, shape, position/rotation bits, entity id); events (name, event id) |
+| `param` `read-rows` | Bridge `read-dcx-document` entries; per entry `extract-bnd4-child` + `readParamDocumentViaBridge` (trusted row width) | SoulsFormats `entries` + `decode` (PARAM, no paramdef) | parambnd .param entry list (ordinal, id, name); every param's (ParamType, row count) and ordered row (id, name) |
 
 Original SoulsFormats does not read Sekiro TAE, so the TAE rule uses SoulsFormatsNEXT. An animation without an hkx
 is `""` in SoulsFormats and `null` in the Bridge; both are compared as "no file name".
@@ -65,6 +66,16 @@ per-type inner payloads, entity groups, gparam, event part/region references and
 `match` covers names, types, transforms and entity ids only. SoulsFormats renames duplicate and empty model,
 region and part names in memory (` {n}`, MSB.cs DisambiguateNames); the rule applies the same transform to the
 Bridge's raw names instead of stripping suffixes from the reference, so a truncated name is still a `diff`.
+
+PARAM field values are not compared yet. The reference decodes without a paramdef (header and row index only); a
+`PARAMDEF_*` diagnostic makes the item `reference-unsupported` whatever the status says. A row without a name is
+`null` in SoulsFormats and has no `name` in the Bridge; `""` is folded into "no name" on both sides because the
+Bridge cannot return an empty name. The Bridge reads only loose .param files, so each entry is extracted to a
+private temporary directory that the run deletes afterwards. The Bridge read is the production one
+(`readParamDocumentViaBridge`): a single-row param needs a row width, taken from the trusted first-party metadata the
+same way the PARAM editor does; a param without a trusted width is a `diff` (`PARAM_METADATA_ROW_WIDTH_UNRESOLVED`),
+not a skip. refcli runs one request per project at a time; the report records the reference call count and total
+time in `referenceCalls`.
 
 To add a format, add a rule to `run.mjs`, its extraction to `lib.mjs` with a test that fails on a wrong
 extraction, and its inputs to `corpus.json`.

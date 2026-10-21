@@ -5,7 +5,8 @@ import { test } from 'node:test';
 import { classify, compareOrdered, emevdFromBridgePages, emevdFromReferenceGraph, emevdKeys, failedComparison, float32Bits, fmgEntriesFromBridge,
   fmgEntriesFromReferenceGraph, graphRefResolver, groupStatus, int64Text, memberItems, msbDisambiguateNames, msbFromBridge, msbFromReferenceGraph, msbKeys,
   referenceFloatBits, resolveReferenceResponse, staleKnownDiffs, taeAnimationsFromBridge, taeAnimationsFromReferenceGraph,
-  applyFmgTextEdit, fmgEntryKey, fmgRoundtripComparisons, pickFmgEditTarget } from './lib.mjs';
+  applyFmgTextEdit, fmgEntryKey, fmgRoundtripComparisons, pickFmgEditTarget,
+  paramFromBridgeRead, paramFromReferenceGraph, paramKeys, readBridgeParam, referenceBlockingDiagnostic, trustedParamRowWidth } from './lib.mjs';
 
 // FMG write round trip: the expectation is the reference read of the source with the edit applied.
 const rtSource = () => ({ tables: [{ ordinal: 0, id: 1, name: 'a.fmg' }, { ordinal: 1, id: 2, name: 'b.fmg' }],
@@ -439,4 +440,129 @@ test('a Bridge name cut to a prefix of a unique reference name is still a diff, 
   const plain = structuredClone(MSB_ROWS); plain.regions[1][1] = 'route_long_name';
   const plainCut = msbFromBridge(msbEnvelope(rows => { rows.regions[1][1] = 'route_long'; return rows; }, plain));
   assert.equal(compareOrdered(msbFromReferenceGraph(msbGraph(plain)).regions, plainCut.regions, msbKeys.regions).differenceCount, 1);
+});
+
+// PARAM rows as [id, name]; null is a row without a name. Shapes copied from a measured refcli structure.json
+// (SoulsFormats.PARAM + Row with ID/Name/Cells) and a measured Bridge read (name omitted when null).
+const PARAM_ROWS = [[0, null], [1, null], [8801, '传送 堕落之谷洞穴'], [8802, '传送 白蛇']];
+function paramGraph(rows = PARAM_ROWS, paramType = 'ACTIONBUTTON_PARAM_ST') {
+  const field = (name, value) => ({ name, declaringType: 'SoulsFormats.PARAM+Row', kind: 'property', value });
+  return { $id: 1, $type: 'SoulsFormats.PARAM', $members: [{ name: 'ParamType', value: paramType }, { name: 'AppliedParamdef', value: null },
+    { name: 'Rows', value: { $id: 2, $type: 'List', $items: rows.map(([id, name], index) => ({ $id: 3 + index, $type: 'SoulsFormats.PARAM+Row',
+      $members: [field('ID', id), field('Name', name), field('Cells', null)] })) } }] };
+}
+function paramRead(rows = PARAM_ROWS, overrides = {}) {
+  return { sourceHash: 'h', typeName: 'ACTIONBUTTON_PARAM_ST', dataVersion: 1, rowCount: rows.length, rowDataSize: 112,
+    rows: rows.map(([id, name], rowIndex) => (name === null ? { rowIndex, id } : { rowIndex, id, name })), ...overrides };
+}
+const paramDiff = (reference, bridge) => ({
+  header: compareOrdered([reference.header], [bridge.header], paramKeys.header),
+  rows: compareOrdered(reference.rows, bridge.rows, paramKeys.rows)
+});
+
+test('PARAM reference graph and Bridge read normalise to the same header and rows; "" and a missing name are no name', () => {
+  const same = paramDiff(paramFromReferenceGraph(paramGraph()), paramFromBridgeRead(paramRead()));
+  assert.equal(same.header.equal, true);
+  assert.equal(same.rows.equal, true);
+  const blank = paramDiff(paramFromReferenceGraph(paramGraph([[0, ''], ...PARAM_ROWS.slice(1)])), paramFromBridgeRead(paramRead()));
+  assert.equal(blank.rows.equal, true, '"" on the reference side is folded into null');
+});
+
+test('a changed row id, row name, ParamType, a dropped or reordered row is a PARAM diff', () => {
+  const reference = paramFromReferenceGraph(paramGraph());
+  const id = structuredClone(PARAM_ROWS); id[2][0] = 8800;
+  assert.equal(paramDiff(reference, paramFromBridgeRead(paramRead(id))).rows.differenceCount, 1);
+  const name = structuredClone(PARAM_ROWS); name[3][1] = '传送 白';
+  assert.equal(paramDiff(reference, paramFromBridgeRead(paramRead(name))).rows.differenceCount, 1);
+  const named = structuredClone(PARAM_ROWS); named[0][1] = 'x';
+  assert.equal(paramDiff(reference, paramFromBridgeRead(paramRead(named))).rows.differenceCount, 1, 'a name where the reference has none');
+  assert.equal(paramDiff(reference, paramFromBridgeRead(paramRead(PARAM_ROWS, { typeName: 'ACTIONGUIDE_PARAM_ST' }))).header.equal, false);
+  const dropped = paramDiff(reference, paramFromBridgeRead(paramRead(PARAM_ROWS.slice(0, 3))));
+  assert.equal(dropped.header.equal, false, 'rowCount differs');
+  assert.equal(dropped.rows.equal, false);
+  const swapped = [PARAM_ROWS[0], PARAM_ROWS[2], PARAM_ROWS[1], PARAM_ROWS[3]];
+  assert.equal(paramDiff(reference, paramFromBridgeRead(paramRead(swapped))).rows.differenceCount, 2);
+});
+
+test('a short or reindexed Bridge PARAM read and a non-PARAM reference graph fail instead of comparing', () => {
+  assert.throws(() => paramFromBridgeRead(paramRead(PARAM_ROWS, { rowCount: 5 })), /rows/u);
+  assert.throws(() => paramFromBridgeRead({ ...paramRead(), rows: paramRead().rows.map((row, i) => ({ ...row, rowIndex: i === 1 ? 2 : row.rowIndex })) }), /rowIndex/u);
+  assert.throws(() => paramFromBridgeRead({ ...paramRead(), typeName: undefined }), /typeName/u);
+  assert.throws(() => paramFromReferenceGraph({ ...paramGraph(), $type: 'SoulsFormats.FMG' }), /SoulsFormats.PARAM/u);
+  assert.throws(() => paramFromReferenceGraph(paramGraph([[0, 7]])), /not a string/u);
+});
+
+test('a parambnd entry with a changed ordinal, id or name is a diff; refcli ordinal and Bridge index compare alike', () => {
+  const reference = [{ ordinal: 0, id: 0, name: 'A.param' }, { ordinal: 1, id: 1, name: 'B.param' }];
+  const bridge = [{ index: 0, id: 0, name: 'A.param', contentHash: 'x' }, { index: 1, id: 1, name: 'B.param', flags: 64 }];
+  assert.equal(compareOrdered(reference, bridge, paramKeys.entries).equal, true);
+  for (const [field, value] of [['index', 2], ['id', 7], ['name', 'C.param']]) {
+    const changed = structuredClone(bridge); changed[1][field] = value;
+    assert.equal(compareOrdered(reference, changed, paramKeys.entries).differenceCount, 1, field);
+  }
+});
+
+test('a PARAMDEF_* reference diagnostic blocks the comparison even when the status is ok', () => {
+  assert.equal(referenceBlockingDiagnostic({ status: 'partial', diagnostics: [{ code: 'PARAMDEF_REQUIRED_OR_MISMATCH' }] }), 'PARAMDEF_REQUIRED_OR_MISMATCH');
+  assert.equal(referenceBlockingDiagnostic({ status: 'ok', diagnostics: [{ code: 'PARAMDEF_AMBIGUOUS' }] }), 'PARAMDEF_AMBIGUOUS');
+  assert.equal(referenceBlockingDiagnostic({ status: 'ok', diagnostics: [] }), null);
+  assert.equal(referenceBlockingDiagnostic({ status: 'ok', diagnostics: [{ code: 'TEXTURE_EXPORT_FAILED' }] }), null);
+});
+
+// A stand-in for readParamDocumentViaBridge with the measured Bridge behaviour: a multi-row param reads without a width;
+// a single-row one fails with PARAM_ROW_SIZE_REQUIRED unless resolveRowDataSize yields a width, and an unresolved width
+// adds PARAM_METADATA_ROW_WIDTH_UNRESOLVED (paramBridgeCommit.ts). The default maxRows of 500 truncates the projection.
+function fakeParamReader(rows, calls = []) {
+  return async options => {
+    calls.push(options);
+    const header = { sourceHash: 'h', typeName: 'TENTATIVE_PLAYER_PARAM_ST', dataVersion: 3 };
+    let width;
+    if (rows.length === 1) {
+      const required = { severity: 'error', code: 'PARAM_ROW_SIZE_REQUIRED', message: 'needs width' };
+      if (!options.resolveRowDataSize) return { ok: false, diagnostics: [required] };
+      width = await options.resolveRowDataSize(header);
+      if (!Number.isSafeInteger(width) || width <= 0) {
+        return { ok: false, diagnostics: [required, { severity: 'error', code: 'PARAM_METADATA_ROW_WIDTH_UNRESOLVED', message: 'no width' }] };
+      }
+    }
+    const visible = rows.slice(0, options.maxRows ?? 500);
+    return { ok: true, diagnostics: [], data: { ...header, rowCount: rows.length, rowDataSize: width ?? 112,
+      rows: visible.map(([id, name], rowIndex) => (name === null ? { rowIndex, id } : { rowIndex, id, name })) } };
+  };
+}
+
+test('the Bridge PARAM read passes the trusted width resolver: a single-row param reads with it and fails without one', async () => {
+  const calls = [];
+  const single = await readBridgeParam(fakeParamReader([[0, null]], calls),
+    { sourcePath: 's.param', allowedRoots: ['r'], resolveRowDataSize: async header => (header.typeName === 'TENTATIVE_PLAYER_PARAM_ST' ? 396 : undefined) });
+  assert.deepEqual(single.data, { header: { paramType: 'TENTATIVE_PLAYER_PARAM_ST', rowCount: '1' }, rows: [{ id: '0', name: null }] });
+  assert.equal(typeof calls[0].resolveRowDataSize, 'function');
+  const unresolved = await readBridgeParam(fakeParamReader([[0, null]]), { sourcePath: 's.param', allowedRoots: ['r'], resolveRowDataSize: async () => undefined });
+  assert.equal(unresolved.error, 'PARAM_ROW_SIZE_REQUIRED+PARAM_METADATA_ROW_WIDTH_UNRESOLVED', 'no trusted width is a failure, not a skip');
+  const multi = await readBridgeParam(fakeParamReader(PARAM_ROWS), { sourcePath: 'm.param', allowedRoots: ['r'], resolveRowDataSize: async () => assert.fail('not asked') });
+  assert.equal(multi.data.rows.length, PARAM_ROWS.length, 'a multi-row param reads without asking for a width');
+});
+
+test('the Bridge PARAM read asks for every row: more than 500 rows come back whole', async () => {
+  const many = Array.from({ length: 1201 }, (_, index) => [index, null]);
+  const read = await readBridgeParam(fakeParamReader(many), { sourcePath: 'm.param', allowedRoots: ['r'], resolveRowDataSize: async () => undefined });
+  assert.equal(read.error, undefined);
+  assert.equal(read.data.rows.length, 1201);
+});
+
+test('the trusted width comes from the matched first-party definition, with the editor descriptor; no match is no width', () => {
+  const seen = [];
+  const api = (overrides = {}) => ({
+    loadFirstPartyParamMetadata: () => ({ ok: true, package: { id: 'pkg' } }),
+    resolveParamMetadataRowWidth: (pkg, descriptor) => { seen.push(descriptor); return descriptor.typeName === 'GRAPHICS_PARAM_ST' ? 380 : undefined; },
+    matchParamMetadataPackage: (pkg, descriptor) => ({ ok: true, definition: { document: { rowDataSize: descriptor.rowDataSize } } }),
+    ...overrides
+  });
+  assert.equal(trustedParamRowWidth(api(), { typeName: 'GRAPHICS_PARAM_ST', dataVersion: 2 }), 380);
+  assert.deepEqual(seen[0], { game: 'sekiro', gameBuild: '1.6', typeName: 'GRAPHICS_PARAM_ST', dataVersion: 2 });
+  assert.equal(trustedParamRowWidth(api(), { typeName: 'UNKNOWN_ST', dataVersion: 1 }), undefined);
+  // The rejected match still carries a definition, so only the ok check (not a missing definition) can reject it.
+  assert.equal(trustedParamRowWidth(api({ matchParamMetadataPackage: () => ({ ok: false, definition: { document: { rowDataSize: 380 } }, diagnostics: [] }) }),
+    { typeName: 'GRAPHICS_PARAM_ST', dataVersion: 2 }), undefined, 'a width the definition match rejects is not used');
+  assert.equal(trustedParamRowWidth(api({ loadFirstPartyParamMetadata: () => ({ ok: false, diagnostics: [] }) }), { typeName: 'GRAPHICS_PARAM_ST', dataVersion: 2 }), undefined);
 });

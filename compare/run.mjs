@@ -3,13 +3,14 @@
 // It needs the game and the reference CLI, so it is not part of the gate.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { classify, compareOrdered, emevdFromBridgePages, emevdFromReferenceGraph, emevdKeys, failedComparison, fmgEntriesFromBridge,
-  fmgEntriesFromReferenceGraph, fmgEntryKey, groupStatus, msbFromBridge, msbFromReferenceGraph, msbKeys, resolveReferenceResponse, staleKnownDiffs,
-  taeAnimationsFromBridge,
-  taeAnimationsFromReferenceGraph } from './lib.mjs';
+  fmgEntriesFromReferenceGraph, fmgEntryKey, groupStatus, msbFromBridge, msbFromReferenceGraph, msbKeys, paramFromReferenceGraph, paramKeys,
+  readBridgeParam, referenceBlockingDiagnostic, resolveReferenceResponse, staleKnownDiffs, taeAnimationsFromBridge,
+  taeAnimationsFromReferenceGraph, trustedParamRowWidth } from './lib.mjs';
 import { fmgWriteRoundtrip } from './roundtrip.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -28,17 +29,30 @@ if (!gameRoot || !existsSync(gameRoot)) {
   console.log(JSON.stringify({ status: 'not_run', reason: 'SOULFORGE_SEKIRO_GAME_ROOT must point at the game root' }));
   process.exit(3);
 }
-const bridgeModule = join(root, 'packages/core/dist/bridge/runBridge.js');
+const coreDist = join(root, 'packages/core/dist');
+const bridgeModule = join(coreDist, 'bridge/runBridge.js');
 if (!existsSync(bridgeModule)) {
   console.log(JSON.stringify({ status: 'error', reason: 'packages/core/dist is missing; run npm run build first' }));
   process.exit(2);
 }
-const { runBridge, disposeBridgeDaemonPool } = await import(pathToFileURL(bridgeModule).href);
+const coreModule = path => import(pathToFileURL(join(coreDist, path)).href);
+const { runBridge, disposeBridgeDaemonPool } = await coreModule('bridge/runBridge.js');
+// The PARAM rule reads through the production reader and trusted-width functions, not a copy of them.
+const { readParamDocumentViaBridge } = await coreModule('editing/paramBridgeCommit.js');
+const { resolveParamMetadataRowWidth, matchParamMetadataPackage } = await coreModule('param/paramMetadata.js');
+const { loadFirstPartyParamMetadata } = await coreModule('schema/sekiro/firstPartySchema.js');
+const paramMetadataApi = { loadFirstPartyParamMetadata, resolveParamMetadataRowWidth, matchParamMetadataPackage };
 
+// Reference CLI cost, reported with the run: refcli runs one request per project at a time (a concurrent one is
+// status "blocked", PROJECT_BUSY), so the calls are sequential and their wall time adds up.
+const referenceCalls = { count: 0, totalMs: 0 };
 function referenceCall(project, operation, args) {
   if (!refcli || !existsSync(refcli)) return { status: 'unavailable', reason: 'SOULFORGE_REFCLI must point at the reference CLI entry (refcli.mjs)' };
+  const started = Date.now();
   const result = spawnSync(process.execPath, [refcli, '--stdin'], { input: JSON.stringify({ project, operation, args }),
     encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 300_000, windowsHide: true });
+  referenceCalls.count++;
+  referenceCalls.totalMs += Date.now() - started;
   if (result.error) return { status: 'unavailable', reason: result.error.message };
   let response;
   try { response = JSON.parse(result.stdout.replace(/^﻿/u, '')); }
@@ -46,6 +60,8 @@ function referenceCall(project, operation, args) {
   try { response = resolveReferenceResponse(response, path => readFileSync(path)); }
   catch (error) { return { status: 'unavailable', reason: error.message }; }
   const reason = (response.diagnostics ?? []).map(item => item.code ?? item.message).filter(Boolean).join(', ') || response.status;
+  // Checked before the status: a PARAMDEF_* diagnostic means the requested read did not happen, even if status is "ok".
+  if (referenceBlockingDiagnostic(response)) return { status: 'unsupported', reason };
   if (response.status === 'unsupported') return { status: 'unsupported', reason };
   if (response.status !== 'ok') return { status: 'unavailable', reason };
   const pin = pins[project];
@@ -241,8 +257,62 @@ async function compareMsb(testCase, input, items) {
   }
 }
 
+// The Bridge reads PARAM from a loose .param only (read-param-document reads filePath directly; ParamDocumentSessionCache
+// GetOrOpen), so each parambnd entry is extracted to a run-private scratch directory first, as containerParamEdit.ts does.
+// The extracted entry must be the one the reference decoded (same index, id and name), or the read is a failure. The read
+// itself is the production chain: readParamDocumentViaBridge with a resolveRowDataSize backed by the trusted first-party
+// metadata (containerParamEdit.ts:1110-1119). A param with no trusted width fails as PARAM_METADATA_ROW_WIDTH_UNRESOLVED.
+async function bridgeParam(file, entry, scratch) {
+  const out = join(scratch, `${entry.ordinal}.param`);
+  const extracted = await runBridge({ command: 'extract-bnd4-child', filePath: file, allowedRoots: [gameRoot, scratch], writableRoots: [scratch],
+    oodleRuntimeRoot: gameRoot, timeoutMs: 60_000, commandOptions: { entryIndex: entry.ordinal, outputPath: out } });
+  if (extracted.parseStatus === 'failed' || !extracted.data) return { error: extracted.diagnostics?.[0]?.code ?? 'BRIDGE_EXTRACT_FAILED' };
+  if (extracted.data.index !== entry.ordinal || extracted.data.id !== entry.id || extracted.data.name !== entry.name) {
+    return { error: 'BRIDGE_PARAM_ENTRY_MISMATCH' };
+  }
+  return readBridgeParam(readParamDocumentViaBridge, { sourcePath: out, allowedRoots: [gameRoot, scratch],
+    resolveRowDataSize: async header => trustedParamRowWidth(paramMetadataApi, header) });
+}
+
+// PARAM: the parambnd entry list (ordinal, id, name), then every param's (ParamType, rowCount) and ordered row (id, name).
+// Field values are not compared. The reference decodes without a paramdef: format "SoulsFormats.PARAM" does not take the
+// refcli paramdef path, and the row index does not depend on it (measured; see the param-impl report).
+async function compareParam(testCase, input, items) {
+  const file = join(gameRoot, ...input.split('/'));
+  if (!existsSync(file)) throw new Error(`corpus input is missing from the game root: ${input}`);
+  const key = `${testCase.game}/${testCase.format}/${testCase.operation}/${input}`;
+  const inputSha256 = createHash('sha256').update(readFileSync(file)).digest('hex');
+  const add = (suffix, reference, comparison) => items.push({ key: `${key}#${suffix}`, group: testCase, input, inputSha256,
+    reference: reference.status, referenceReason: reference.reason, comparison });
+
+  const listing = referenceCall(testCase.reference, 'entries', { input: file });
+  if (listing.status !== 'ok') { add('entries', listing, null); return; }
+  const referenceEntries = referenceArtifact(listing.response, 'entries.json').entries
+    .filter(entry => entry.name.toLowerCase().endsWith('.param'))
+    .map(entry => ({ ordinal: entry.ordinal, id: entry.id, name: entry.name }));
+  const dcx = await runBridge({ command: 'read-dcx-document', filePath: file, allowedRoots: [gameRoot], oodleRuntimeRoot: gameRoot, timeoutMs: 120_000 });
+  const bridgeEntries = dcx.parseStatus === 'failed' || !Array.isArray(dcx.data?.nested?.entries) ? null
+    : dcx.data.nested.entries.filter(entry => String(entry.name ?? '').toLowerCase().endsWith('.param'));
+  add('entries', listing, bridgeEntries ? compareOrdered(referenceEntries, bridgeEntries, paramKeys.entries)
+    : failedComparison(dcx.diagnostics?.[0]?.code ?? 'BRIDGE_READ_FAILED'));
+
+  const scratch = mkdtempSync(join(tmpdir(), 'soulforge-compare-param-'));
+  try {
+    for (const entry of referenceEntries) {
+      const decoded = referenceCall(testCase.reference, 'decode', { input: file, format: 'SoulsFormats.PARAM', entryChain: [entry] });
+      if (decoded.status !== 'ok') { add(`${entry.ordinal}/header`, decoded, null); add(`${entry.ordinal}/rows`, decoded, null); continue; }
+      const reference = paramFromReferenceGraph(referenceArtifact(decoded.response, 'structure.json'));
+      const bridge = await bridgeParam(file, entry, scratch);
+      add(`${entry.ordinal}/header`, decoded, bridge.error ? failedComparison(bridge.error)
+        : compareOrdered([reference.header], [bridge.data.header], paramKeys.header));
+      add(`${entry.ordinal}/rows`, decoded, bridge.error ? failedComparison(bridge.error)
+        : compareOrdered(reference.rows, bridge.data.rows, paramKeys.rows));
+    }
+  } finally { rmSync(scratch, { recursive: true, force: true }); }
+}
+
 const RULES = { 'fmg/read-text': compareFmg, 'fmg/write-roundtrip': compareFmgWriteRoundtrip, 'tae/read-animations': compareTae,
-  'emevd/read-events': compareEmevd, 'msb/read-map': compareMsb };
+  'emevd/read-events': compareEmevd, 'msb/read-map': compareMsb, 'param/read-rows': compareParam };
 let exitCode = 2;
 try {
   const items = [];
@@ -259,7 +329,7 @@ try {
       status: groupStatus(statuses), counts };
   });
   const stale = staleKnownDiffs(items, knownDiffs);
-  const report = { schemaVersion: 1, generatedAt: new Date().toISOString(), references: pins, groups, staleKnownDiffs: stale,
+  const report = { schemaVersion: 1, generatedAt: new Date().toISOString(), references: pins, referenceCalls, groups, staleKnownDiffs: stale,
     items: items.map(({ group, ...item }) => item) };
   mkdirSync(dirname(reportPath), { recursive: true });
   writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
@@ -267,7 +337,7 @@ try {
     : groups.every(group => ['match', 'known-diff'].includes(group.status)) ? 0 : 3;
   // stdout carries statuses and counts only; the report file also holds extracted game text and stays local.
   console.log(JSON.stringify({ status: ['match', 'diff', 'error', 'incomplete'][[0, 1, 2, 3].indexOf(exitCode)], groups,
-    staleKnownDiffs: stale, report: 'output/compare/report.json' }, null, 2));
+    staleKnownDiffs: stale, referenceCalls, report: 'output/compare/report.json' }, null, 2));
 } catch (error) {
   console.log(JSON.stringify({ status: 'error', reason: error instanceof Error ? error.message : String(error) }));
 } finally {

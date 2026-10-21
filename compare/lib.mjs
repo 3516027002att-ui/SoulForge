@@ -408,6 +408,85 @@ export function msbFromBridge(envelope) {
   };
 }
 
+// A refcli diagnostic that means the reference did not read the document the way the rule asked, whatever the status says.
+// PARAMDEF_REQUIRED_OR_MISMATCH was measured with status "partial"; PARAMDEF_AMBIGUOUS has no measured status, so any
+// PARAMDEF_* code is treated as unsupported even next to status "ok" instead of letting the status alone decide.
+export function referenceBlockingDiagnostic(response) {
+  return (response?.diagnostics ?? []).map(item => item?.code).find(code => typeof code === 'string' && code.startsWith('PARAMDEF_')) ?? null;
+}
+
+// PARAM row names. SoulsFormats gives null for a row without a name; the Bridge omits the field. "" is folded into null on
+// both sides: the Bridge name decoders (ParamNativeIndex.cs DecodeStandardName / ScanZLength / TryDecodeUtf16LeName) return
+// null for a zero-length name, so the Bridge cannot express "" and an empty name vs no name is outside what v0 compares.
+// On the mods gameparam no reference row name is "" (measured), so the fold hides nothing there. Any other type fails.
+function paramRowName(name) {
+  if (name === undefined || name === null || name === '') return null;
+  if (typeof name !== 'string') throw new Error(`PARAM row name is not a string: ${JSON.stringify(name)}`);
+  return name;
+}
+
+// SoulsFormats.PARAM graph decoded without a paramdef (header and row index only; Cells stay null) -> { header, rows }.
+export function paramFromReferenceGraph(graph) {
+  if (graph?.$type !== 'SoulsFormats.PARAM') throw new Error(`expected SoulsFormats.PARAM, got ${graph?.$type}`);
+  const deref = graphRefResolver(graph);
+  const paramType = deref(member(graph, 'ParamType'));
+  if (typeof paramType !== 'string') throw new Error(`SoulsFormats.PARAM ParamType is not a string: ${JSON.stringify(paramType)}`);
+  const rows = memberItems(graph, 'Rows', deref).map(row => ({ id: integerText(member(row, 'ID')), name: paramRowName(member(row, 'Name')) }));
+  return { header: { paramType, rowCount: String(rows.length) }, rows };
+}
+
+// Trusted row width, composed exactly as the private loadTrustedDefinition (packages/core/src/param/containerParamEdit.ts:1322-1358)
+// does it from exported functions: loadFirstPartyParamMetadata (schema/sekiro/firstPartySchema.ts), then
+// resolveParamMetadataRowWidth and matchParamMetadataPackage (param/paramMetadata.ts) with the same descriptor
+// { game, gameBuild: '1.6', typeName, dataVersion }; the width is the matched definition's rowDataSize, which is what
+// containerParamEdit.ts:1115-1119 hands to the Bridge. api = { loadFirstPartyParamMetadata, resolveParamMetadataRowWidth,
+// matchParamMetadataPackage }. No match, no width: the caller reports the read as failed, never guesses a width.
+export function trustedParamRowWidth(api, header, game = 'sekiro') {
+  const loaded = api.loadFirstPartyParamMetadata();
+  if (!loaded?.ok) return undefined;
+  const descriptor = { game, gameBuild: '1.6', typeName: header.typeName, dataVersion: header.dataVersion ?? -1 };
+  const width = api.resolveParamMetadataRowWidth(loaded.package, descriptor);
+  if (width === undefined) return undefined;
+  const matched = api.matchParamMetadataPackage(loaded.package, { ...descriptor, rowDataSize: width }, undefined);
+  if (!matched?.ok) return undefined;
+  const size = matched.definition?.document?.rowDataSize;
+  return Number.isSafeInteger(size) && size > 0 ? size : undefined;
+}
+
+// One param through the production reader (paramBridgeCommit.ts readParamDocumentViaBridge): it asks the Bridge without a
+// width, and only on PARAM_ROW_SIZE_REQUIRED (single-row 32-bit params) reads the header and retries with
+// resolveRowDataSize's width. maxRows is lifted past its 500-row default so every row comes back; paramFromBridgeRead
+// still rejects a short result. readDocument is injected so the wiring is testable without the Bridge.
+export async function readBridgeParam(readDocument, { sourcePath, allowedRoots, resolveRowDataSize, timeoutMs = 120_000 }) {
+  const read = await readDocument({ sourcePath, allowedRoots, timeoutMs, maxRows: Number.MAX_SAFE_INTEGER,
+    maxFrameBytes: 32 * 1024 * 1024, resolveRowDataSize });
+  if (!read?.ok) {
+    const codes = [...new Set((read?.diagnostics ?? []).map(item => item?.code).filter(Boolean))];
+    return { error: codes.join('+') || 'BRIDGE_READ_FAILED' };
+  }
+  try { return { data: paramFromBridgeRead(read.data) }; }
+  catch (error) { return { error: `BRIDGE_PARAM_INCONSISTENT: ${error.message}` }; }
+}
+
+// readParamDocumentViaBridge data -> { header, rows }. A short, reordered or untyped result throws.
+export function paramFromBridgeRead(data) {
+  if (typeof data?.typeName !== 'string') throw new Error(`Bridge PARAM typeName is not a string: ${JSON.stringify(data?.typeName)}`);
+  const rows = data.rows;
+  if (!Array.isArray(rows) || !Number.isInteger(data.rowCount) || rows.length !== data.rowCount) {
+    throw new Error(`Bridge PARAM returned ${rows?.length} of ${data.rowCount} rows`);
+  }
+  rows.forEach((row, index) => { if (row.rowIndex !== index) throw new Error(`Bridge PARAM row ${index} has rowIndex ${row.rowIndex}`); });
+  return { header: { paramType: data.typeName, rowCount: String(data.rowCount) },
+    rows: rows.map(row => ({ id: integerText(row.id), name: paramRowName(row.name) })) };
+}
+
+export const paramKeys = Object.freeze({
+  // refcli entries.json has ordinal; Bridge read-dcx-document nested entries have index.
+  entries: entry => JSON.stringify([integerText(entry.ordinal ?? entry.index), integerText(entry.id), entry.name]),
+  header: header => JSON.stringify([header.paramType, header.rowCount]),
+  rows: row => JSON.stringify([row.id, row.name])
+});
+
 function integerText(value) {
   const raw = value && typeof value === 'object' ? value.value : value;
   if (typeof raw === 'number' ? !Number.isSafeInteger(raw) : !/^-?\d+$/u.test(String(raw))) throw new Error(`not an integer: ${JSON.stringify(value)}`);
