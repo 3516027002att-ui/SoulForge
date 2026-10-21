@@ -61,7 +61,8 @@
       "operation": "read-rows",
       "reference": "soulsformats",
       "inputs": [
-        "mods/param/gameparam/gameparam.parambnd.dcx"
+        "mods/param/gameparam/gameparam.parambnd.dcx",
+        "param/gameparam/gameparam.parambnd.dcx"
       ]
     }
   ]
