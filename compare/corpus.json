@@ -42,6 +42,7 @@
       "operation": "read-map",
       "reference": "soulsformats-next",
       "inputs": [
+        "map/mapstudio/m13_00_00_00.msb.dcx",
         "mods/map/mapstudio/m13_00_00_00.msb.dcx"
       ]
     }
