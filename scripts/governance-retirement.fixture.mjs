@@ -29,7 +29,9 @@ const retiredFiles = [
   'scripts/verify-orphan-smoke-gate.mjs', 'scripts/governance', 'docs/governance',
   'scripts/verify-mission1-acceptance.mjs', 'scripts/verify-mission1-a1.mjs',
   'scripts/hourly-mission1-check.mjs', 'testdata/mission1/runner-negative-fixtures.v1.json',
-  'packages/core/src/testing/runAuditSf29Smoke.ts', 'scripts/audit-execution/check-verify-summary.mjs'
+  'packages/core/src/testing/runAuditSf29Smoke.ts', 'scripts/audit-execution/check-verify-summary.mjs',
+  'docs/V0_5_IMPLEMENTATION_HANDOFF.md', 'docs/historical-governance-evidence.jsonl',
+  'SoulForge_Flash_Execution', 'docs/audit-execution', 'artifacts'
 ];
 
 test('retired governance operations cannot run through aliases or convention discovery', () => {
@@ -47,8 +49,7 @@ test('retired governance operations cannot run through aliases or convention dis
       }
     }
   }
-  for (const file of ['scripts/generate-mission1-corpus-v2.mjs',
-    'scripts/verify-mission1-corpus-v2.mjs', 'docs/historical-governance-evidence.jsonl']) {
+  for (const file of ['scripts/generate-mission1-corpus-v2.mjs', 'scripts/verify-mission1-corpus-v2.mjs']) {
     assert.equal(existsSync(file), true, file);
   }
   for (const name of ['test:release-editor-acceptance', 'test:release-content',

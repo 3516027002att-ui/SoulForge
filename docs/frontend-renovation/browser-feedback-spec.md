@@ -1,7 +1,6 @@
 # 浏览器批注前端改造与桌面桥接降级规格
 
 > 本文是供前端 Agent 实施的局部设计与验收规格，不是新的里程碑、进度或 authority 来源。
-> SoulForge V0.5 的范围、能力状态与完成声明仍以 `docs/V0_5_IMPLEMENTATION_HANDOFF.md` 为准。
 > 本文只定义前端信息架构、Agent 侧栏和浏览器预览降级行为，不授权扩大写入、权限或 native authority。
 
 ## 1. 用户目标
