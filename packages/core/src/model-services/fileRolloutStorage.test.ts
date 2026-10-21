@@ -7,7 +7,7 @@ import { mkdir, mkdtemp, rm, symlink, unlink, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { it } from 'node:test';
-import { listRolloutSessions } from './fileRolloutStorage.js';
+import { listRolloutSessions, loadRolloutSession } from './fileRolloutStorage.js';
 
 async function withFixture(run: (paths: { base: string; outside: string; links: string[] }) => Promise<void>): Promise<void> {
   const scratch = await mkdtemp(join(tmpdir(), 'sf-rollout-boundary-'));
@@ -55,6 +55,35 @@ it('does not follow a year-level junction out of the sessions directory', async 
     links.push(link);
     const listed = await listRolloutSessions(base);
     assert.deepEqual(listed.map((item) => item.fileName), ['rollout-inside.jsonl']);
+  });
+});
+
+it('loadRolloutSession bounded to the sessions root reads a session inside it', async () => {
+  await withFixture(async ({ base }) => {
+    const loaded = await loadRolloutSession(join(base, 'sessions', '2026', '10', '20', 'rollout-inside.jsonl'), { sessionsBaseDir: base });
+    assert.equal(loaded.ok, true);
+  });
+});
+
+it('loadRolloutSession bounded to the sessions root refuses a path that resolves outside it', async () => {
+  await withFixture(async ({ base, outside, links }) => {
+    const link = join(base, 'sessions', '2026', '10', '21');
+    await symlink(outside, link, 'junction');
+    links.push(link);
+    const path = join(link, 'rollout-outside.jsonl');
+    const bounded = await loadRolloutSession(path, { sessionsBaseDir: base });
+    assert.equal(bounded.ok ? 'ok' : bounded.code, 'ROLLOUT_PATH_FORBIDDEN');
+    // Unbounded, the path is read as given: CLI and tests pass their own files.
+    assert.equal((await loadRolloutSession(path)).ok, true);
+  });
+});
+
+it('loadRolloutSession reports a missing session as not found, bounded or not', async () => {
+  await withFixture(async ({ base }) => {
+    const missing = join(base, 'sessions', '2026', '10', '20', 'rollout-missing.jsonl');
+    for (const loaded of [await loadRolloutSession(missing), await loadRolloutSession(missing, { sessionsBaseDir: base })]) {
+      assert.equal(loaded.ok ? 'ok' : loaded.code, 'ROLLOUT_NOT_FOUND');
+    }
   });
 });
 

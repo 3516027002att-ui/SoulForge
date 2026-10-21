@@ -189,7 +189,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
         if (sessionPath !== undefined) {
           const resolved = resolveSessionPath(sessionPath);
           if (resolved.ok) {
-            const loaded = await loadRolloutSession(resolved.absolute);
+            const loaded = await loadRolloutSession(resolved.absolute, { sessionsBaseDir: agentSessionsBaseDir });
             if (loaded.ok) {
               const { ok: _ok, path: _path, ...resumed } = loaded;
               resumeFrom = resumed;
@@ -832,7 +832,7 @@ export function createAgentSessionService(input: AgentSessionServiceDeps) {
         }
         const resolved = resolveSessionPath(sessionPath);
         if (!resolved.ok) return { ok: false, error: resolved.error };
-        const loaded = await loadRolloutSession(resolved.absolute);
+        const loaded = await loadRolloutSession(resolved.absolute, { sessionsBaseDir: agentSessionsBaseDir });
         if (!loaded.ok) {
           return { ok: false, error: { code: loaded.code, message: loaded.message } };
         }

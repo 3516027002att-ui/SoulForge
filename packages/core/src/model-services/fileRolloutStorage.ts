@@ -31,8 +31,7 @@ export class FileRolloutStorage implements RolloutStorage {
   }
 
   async readLines(): Promise<string[]> {
-    const raw = await readFile(this.filePath, 'utf8');
-    return raw.split('\n').filter((line) => line.trim() !== '');
+    return splitRolloutLines(await readFile(this.filePath, 'utf8'));
   }
 
   async flush(): Promise<void> {
@@ -213,18 +212,32 @@ export async function readRolloutFileWithinSessions(baseDir: string, path: strin
   }
 }
 
+function splitRolloutLines(raw: string): string[] {
+  return raw.split('\n').filter((line) => line.trim() !== '');
+}
+
 export type LoadRolloutSessionResult =
   | ({ ok: true; path: string } & ResumedRollout)
-  | { ok: false; code: 'ROLLOUT_NOT_FOUND' | 'ROLLOUT_READ_FAILED'; message: string };
+  | { ok: false; code: 'ROLLOUT_NOT_FOUND' | 'ROLLOUT_READ_FAILED' | 'ROLLOUT_PATH_FORBIDDEN'; message: string };
 
-export async function loadRolloutSession(path: string): Promise<LoadRolloutSessionResult> {
+/**
+ * With sessionsBaseDir the file is read through readRolloutFileWithinSessions: the bytes come from the handle whose real
+ * path was checked to be inside the physical sessions root, so a path checked earlier and then swapped for a junction is
+ * not followed (ROLLOUT_PATH_FORBIDDEN). Without it the path is read as given (CLI and tests pass their own files).
+ */
+export async function loadRolloutSession(path: string, options: { sessionsBaseDir?: string } = {}): Promise<LoadRolloutSessionResult> {
   let lines: string[];
   try {
-    const storage = new FileRolloutStorage(path);
-    lines = await storage.readLines();
+    lines = options.sessionsBaseDir === undefined
+      ? await new FileRolloutStorage(path).readLines()
+      : splitRolloutLines(await readRolloutFileWithinSessions(options.sessionsBaseDir, path));
   } catch (error) {
-    if (typeof error === 'object' && error !== null && (error as { code?: string }).code === 'ENOENT') {
+    const code = typeof error === 'object' && error !== null ? (error as { code?: string }).code : undefined;
+    if (code === 'ENOENT') {
       return { ok: false, code: 'ROLLOUT_NOT_FOUND', message: '会话记录不存在。' };
+    }
+    if (code === 'ROLLOUT_PATH_FORBIDDEN') {
+      return { ok: false, code: 'ROLLOUT_PATH_FORBIDDEN', message: '会话记录不在会话目录内。' };
     }
     return {
       ok: false,
