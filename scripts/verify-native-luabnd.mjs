@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -54,6 +55,22 @@ async function runBridgeWrite(command, filePath, writableRoot, options) {
   return { ...result, ok: result.parseStatus === 'ok' || result.parseStatus === 'partial' };
 }
 
+const sha256File = async (path) => createHash('sha256').update(await readFile(path)).digest('hex');
+
+// 负向对照：daemon 可能返回 failed 结果，也可能在 core 侧直接抛错；两种都只认指定错误码。
+async function expectBridgeFailure(promise, code) {
+  let result;
+  try { result = await promise; }
+  catch (error) {
+    assert(String(error?.code ?? '').includes(code) || String(error?.message ?? '').includes(code),
+      `应以 ${code} 失败，实际抛出: ${error?.message ?? error}`);
+    return;
+  }
+  assert.strictEqual(result.ok, false, `应以 ${code} 失败，实际成功`);
+  assert(result.diagnostics?.some((item) => item.code === code),
+    `应以 ${code} 失败，实际诊断: ${JSON.stringify(result.diagnostics)}`);
+}
+
 async function main() {
   // Real game data never ships with the repository; without the game root this check skips honestly.
   if (!sekiroRoot) {
@@ -66,6 +83,8 @@ async function main() {
 
   const tempRoot = resolve('.tmp/luabnd-verify-' + Date.now());
   await mkdir(tempRoot, { recursive: true });
+  // 源容器在整个检查期间必须保持不变（导出和写回只能落在暂存根）。
+  const sourceHashBefore = await sha256File(modsAicommon);
 
   try {
     // 1. read-luabnd-document / inspect-luabnd
@@ -138,6 +157,11 @@ async function main() {
     const rawJson = await readFile(join(exportDir, 'luagnl.symbols.json'), 'utf8');
     const exportedSymbols = JSON.parse(rawJson.replace(/^\uFEFF/, ''));
     assert.strictEqual(exportedSymbols.symbolCount, 1739);
+    // 导出的每个脚本都必须与文档里登记的 contentHash 字节一致，不只是“文件存在”。
+    for (const script of doc.scripts) {
+      assert.strictEqual(await sha256File(join(exportDir, script.sanitizedName)), script.contentHash,
+        `导出脚本 ${script.sanitizedName} 与文档 contentHash 不一致`);
+    }
     console.log(`   ✓ 导出功能验证成功：解包了全部 104 个脚本及符号/目标 JSON 描述符。`);
 
     // 6. write-luabnd-script 精确替换写回机制与无损 DCX/BND4 封装
@@ -153,6 +177,15 @@ async function main() {
     });
     assert.strictEqual(writeRes.ok, true, `写入应成功: ${JSON.stringify(writeRes.diagnostics)}`);
     assert.strictEqual(writeRes.data.rereadVerified, true, '重读必须通过验证');
+    assert(writeRes.diagnostics.some((item) => item.code === 'BND4_STAGING_WRITE_VERIFIED'), '写回必须带暂存重读证明');
+    // Bridge 写回自带的逐条保存证明：除目标条目外，其余条目的存储字节全部保持。
+    const preservation = writeRes.data.bndWriteResult?.preservation;
+    assert.strictEqual(writeRes.data.bndWriteResult?.rereadVerified, true, 'BND4 写回必须重读验证');
+    assert.strictEqual(preservation?.allPreserved, true, `BND4 保存证明未通过: ${JSON.stringify(preservation)}`);
+    assert.strictEqual(preservation.matchedEntryCount, doc.entryCount);
+    assert.strictEqual(preservation.headerFieldsPreservedCount, doc.entryCount);
+    assert.strictEqual(preservation.storedBytesCheckedCount, doc.entryCount - 1);
+    assert.strictEqual(preservation.storedBytesPreservedCount, doc.entryCount - 1);
 
     // 重新打开修改后的容器，检验修改是否生效且其他条目是否无损
     const rereadRes = await runBridge('read-luabnd-script', writeOutPath, { childPath: 'goal_list.lua' });
@@ -188,7 +221,32 @@ async function main() {
     });
     assert.strictEqual(mismatchRes.ok, false, 'Container Hash 不匹配必须返回失败');
     assert.strictEqual(mismatchRes.diagnostics[0].code, 'LUABND_CONTAINER_HASH_MISMATCH');
-    console.log('   ✓ 结构化错误诊断与防篡改 Hash 检查生效。');
+
+    const childMismatchRes = await runBridge('read-luabnd-script', modsAicommon, {
+      childPath: 'goal_list.lua',
+      expectedContainerHash: doc.sourceHash,
+      expectedChildHash: '0000000000000000000000000000000000000000000000000000000000000000'
+    });
+    assert.strictEqual(childMismatchRes.ok, false, 'Child Hash 不匹配必须返回失败');
+    assert.strictEqual(childMismatchRes.diagnostics[0].code, 'LUABND_CHILD_HASH_MISMATCH');
+
+    // 写回出口边界：outputPath 落在 writable root 之外必须被 daemon 拒绝，且不落盘。
+    const blockedRoot = join(tempRoot, 'blocked');
+    const allowedStage = join(tempRoot, 'stage');
+    await mkdir(blockedRoot, { recursive: true });
+    await mkdir(allowedStage, { recursive: true });
+    const blockedOutput = join(blockedRoot, 'forbidden.luabnd.dcx');
+    await expectBridgeFailure(runBridgeWrite('write-luabnd-script', modsAicommon, allowedStage, {
+      outputPath: blockedOutput,
+      childPath: 'goal_list.lua',
+      expectedContainerHash: doc.sourceHash,
+      expectedChildHash: goal.contentHash,
+      text: updatedContent
+    }), 'BRIDGE_OUTPUT_OUTSIDE_WRITABLE_ROOTS');
+    assert.strictEqual(existsSync(blockedOutput), false, '被拒绝的写回不得落盘');
+
+    assert.strictEqual(await sha256File(modsAicommon), sourceHashBefore, '源容器在检查期间必须保持不变');
+    console.log('   ✓ 结构化错误诊断、防篡改 Hash、写出边界与源不变检查生效。');
 
     console.log('\n======================================================');
     console.log('🎉 所有 8 项 Luabnd 专有模块集成验证全部通过！');
