@@ -7,7 +7,7 @@
 > SoulForge 的常规编辑器工作台不再自行设计。对照本机 `tools` 里的 Smithbox 2.2.4 与 DarkScript3，复制的是**选择链、窗格身份、信息密度和操作顺序**，不是把 ImGui 可拆停靠翻译成固定 CSS 四栏，也不是“参考后重新设计”成卡片式网页。Agent dock 是 SoulForge 自有外壳，构图按 TRAE/Cursor；参考截图目前不在仓库内。
 >
 > **结构权威已经写入本文 §2.5 与 §7–§11**，来源是本机
-> `D:\mystream\Sekiro Shadows Die Twice\tools\smithbox\Smithbox-2.2.4-2026-07-24-a\win-x64\imgui.ini`
+> `<TOOLS_ROOT>\smithbox\Smithbox-2.2.4-2026-07-24-a\win-x64\imgui.ini`
 > （Smithbox 2.2.4，约 2560×1440 工作区的上次真实停靠）。实施 Agent 必须打开参考程序观察行为（键盘、hover、空态、工具内容），但**不得另造一套与 §2.5 / §7–§11 不同的窗格拓扑**，也不得为“同步实测”而改写本文宪法段落。若本机换了更新的 Smithbox 且拓扑明显不同，停下来报告调用方，不要自行改规范。
 >
 > 本文中的“必须 / 不得”分别等价于 `MUST / MUST NOT`。
@@ -182,7 +182,7 @@ Smithbox 是 Dear ImGui **可拆停靠**。SoulForge 复制的是它的**默认�
 当前机器上已经存在成熟 Sekiro 工具：
 
 ```text
-D:\mystream\Sekiro Shadows Die Twice\tools
+<TOOLS_ROOT>
 ```
 
 这些程序只用于观察 UI、行为、格式家族和工作流。它们不是 SoulForge runtime 依赖，不得被修改、复制进仓库、打进安装包或用来绕过 Bridge/Patch Engine。
@@ -191,7 +191,7 @@ D:\mystream\Sekiro Shadows Die Twice\tools
 
 | SoulForge 页面 | 必须先查看的参考程序 | 参考内容 | 结构权威（已写入 §2.5） |
 | --- | --- | --- | --- |
-| PARAM | `D:\mystream\Sekiro Shadows Die Twice\tools\smithbox\Smithbox-2.2.4-2026-07-24-a\win-x64\Smithbox.OpenGL.exe` | Param Editor：Params→Rows→Fields、字段控件、右侧工具栈、可选双视图 | 三栏数据 + 右侧 Actions 叠 Configuration。双视图是后续卡 |
+| PARAM | `<TOOLS_ROOT>\smithbox\Smithbox-2.2.4-2026-07-24-a\win-x64\Smithbox.OpenGL.exe` | Param Editor：Params→Rows→Fields、字段控件、右侧工具栈、可选双视图 | 三栏数据 + 右侧 Actions 叠 Configuration。双视图是后续卡 |
 | GPARAM | 同一 Smithbox | Gparam Editor：Files→Groups→Fields→Values + 右侧 Toolbar | **五区**。Fields 与 Values 分开。第一栏窗格名是 Files，项是逻辑 bank |
 | Text | 同一 Smithbox | Text Editor：Categories + 右上 Entries + 右下 Text | **不是**四条竖栏。Toolbar 叠在 Categories 下方 |
 | Map | 同一 Smithbox | Map Object List、Viewport、Properties；其余为可拆工具窗 | 三主栏。不要强行加第四条 Tools 数据栏 |
@@ -199,22 +199,22 @@ D:\mystream\Sekiro Shadows Die Twice\tools
 | Texture | 同一 Smithbox | Container list、Texture list、Viewer、Properties | 无 3D viewport。容器与纹理是两级列表 |
 | Material | 同一 Smithbox | File list、Material list、属性/值 | 无 viewport。不要套 Map 四栏模板 |
 | Files | 同一 Smithbox File Browser | Browser List + Item Viewer | **两栏**，不是四栏 |
-| Event | `D:\mystream\Sekiro Shadows Die Twice\tools\事件编辑器3.4.1\DarkScript3.exe` | 标签页源码、查找替换、编译输出、跳转 | **故意不抄** Smithbox EMEVD Editor。DarkScript3 是 WinForms 源码 IDE，不是 260/320 三栏 |
+| Event | `<TOOLS_ROOT>\事件编辑器3.4.1\DarkScript3.exe` | 标签页源码、查找替换、编译输出、跳转 | **故意不抄** Smithbox EMEVD Editor。DarkScript3 是 WinForms 源码 IDE，不是 260/320 三栏 |
 | Agent | TRAE/Cursor 式 Agent dock | 顶栏、空闲态、消息流、底部 composer | 外壳。参考图不在 `tools` 或仓库内。不得宣布「已与 TRAE 一致」 |
 
 Smithbox OpenGL 无法启动时，允许使用：
 
 ```text
-D:\mystream\Sekiro Shadows Die Twice\tools\smithbox\Smithbox-2.2.4-2026-07-24-a\win-x64\Smithbox.Vulkan.exe
+<TOOLS_ROOT>\smithbox\Smithbox-2.2.4-2026-07-24-a\win-x64\Smithbox.Vulkan.exe
 ```
 
 ### 2.3 次级对照工具
 
 | 工具 | 目录 | 允许的对照用途 |
 | --- | --- | --- |
-| Yapped Rune Bear | `D:\mystream\Sekiro Shadows Die Twice\tools\Yapped Rune Bear v2.14.1` | PARAM 行/字段交互的次级核对 |
-| Yabber | `D:\mystream\Sekiro Shadows Die Twice\tools\Yabber 1.3.1\Yabber.exe` | BND/DCX 容器层级和操作结果的次级核对 |
-| DSLuaDecompiler | `D:\mystream\Sekiro Shadows Die Twice\tools\DSLuaDecompiler\DSLuaDecompiler.exe`（v1.1.5；旧拷贝在 `tools\hks解码\`） | Script 格式对照 + S16 脚本 IDE 的本机读入反编译器（main 定位与 spawn，见 §10.2） |
+| Yapped Rune Bear | `<TOOLS_ROOT>\Yapped Rune Bear v2.14.1` | PARAM 行/字段交互的次级核对 |
+| Yabber | `<TOOLS_ROOT>\Yabber 1.3.1\Yabber.exe` | BND/DCX 容器层级和操作结果的次级核对 |
+| DSLuaDecompiler | `<TOOLS_ROOT>\DSLuaDecompiler\DSLuaDecompiler.exe`（v1.1.5；旧拷贝在 `tools\hks解码\`） | Script 格式对照 + S16 脚本 IDE 的本机读入反编译器（main 定位与 spawn，见 §10.2） |
 
 次级工具不得覆盖 Smithbox/DarkScript3 的主 UI 结论，也不得成为 production parser/writer authority。
 
@@ -1318,7 +1318,7 @@ Files 不能把 candidate 状态伪装为 ready editor。
 ### 11.1 主参考
 
 ```text
-D:\mystream\Sekiro Shadows Die Twice\tools\事件编辑器3.4.1\DarkScript3.exe
+<TOOLS_ROOT>\事件编辑器3.4.1\DarkScript3.exe
 ```
 
 Event **故意不抄** Smithbox EMEVD Editor，也不保留 SoulForge “EMEVD 四视图”。对照物是 DarkScript3：菜单 + 文档标签 + 源码占主区 + 编译输出。
@@ -2468,7 +2468,7 @@ SHELL-09 → SHELL-10
 - **S30 落地（2026-08-17，文本空表诚实空态 + FMG 标签投影）**：① 空态与失败互斥：分页失败时只显示 danger 诊断，不再叠加「当前页无条目/先选择语言与文本表」muted 空态（011738「像打不开」的一半根因——之前两态同时渲染）。② FMG 标签显示投影（011833）：`<?null?>` → 空（空槽/空标记），`<?placeName@N?>` → `[地名 N]`，`<?kgiconKc@N?>` → `[图标 N]`，`<?bmsg?>` → `[BMSG]`，其他 `<?name@N?>` → `[name N]` —— 只投影列表显示层，编辑框仍绑原文（写回保真，标签可编辑）；这些标签是文件真实 UTF-16 字节（fmgReferenceIntegrity 同语法），不是解码乱码。③ 地名缺漏：空槽行与 ID 照常在场、文本列弱化为 `—` —— 47 槽 6 条有字的地名表（1100、1102–1120 是 offset=0 空槽）打开后 41 个空槽可见，不再像「缺了」；entryCount 保持槽数语义（47），与 Bridge FmgNativeDocument 逐槽（含空槽）一致。
 - **S30 二轮（2026-08-17 晚，「N 槽 · M 有字」）**：Bridge `read-text-catalog` 的表元数据新增 `filledCount`（非空文本条数，读取时本来就要逐表解析 FMG，零额外 IO）；main 目录链透传；FmgWorkbenchPanel 左栏 meta / Entries hint / 工具条状态句统一 `formatSlotCount`：有 filledCount 时显示「N 槽 · M 有字」，旧 Bridge 缺字段时回落「N 条」。地名表因此直接显示「47 槽 · 6 有字」，不再像解析失败。单测同步：空态断言从已删除的「这张表没有已填写的条目」改为钉「当前页无条目。」+ 旧文案不再出现。
 - **S9 落地（2026-08-17，Ask 菜单 CSS fixed）**：`.agent-mode-menu` 从 `position:absolute` 改 `position:fixed` —— 菜单已 createPortal 到 document.body，锚点是 trigger 的 viewport 坐标（getBoundingClientRect），absolute 相对初始包含块、页面滚动后菜单会漂移错位，fixed 与视口坐标一致。组件侧锚点与上翻逻辑（S9 回放 stale top 修复）不动。
-- **S13 落地（2026-08-17，sanitizer 只打码路径片段）**：新增 `packages/shared/src/path-sanitizer.ts` 的 `maskPathFragments` —— preload 与 main 共用同一规则，删除两侧各自维护的路径正则（preload 旧正则字符类漏全角冒号/CJK 前缀）。行为从「检测到路径整条替换」改为「只打码路径片段、保留上下文」：`写入失败：D:\workspace\mod\a.fmg 被占用` → `写入失败：[本机路径已隐藏] 被占用`。覆盖盘符绝对路径 / UNC / 设备路径 / 盘符 file URI；路径内汉字不终止（D:\游戏\mods\a.fmg 整段打码）；工作区相对 URI（file:///workspace/…）不打码。新增 shared 单测（7 条）+ main/preload 一致性断言（4 条）；verify-desktop-security-runtime.mjs 的真实载荷断言（不得含 D:\mystream/D:\workspace）在片段替换下保持成立。
+- **S13 落地（2026-08-17，sanitizer 只打码路径片段）**：新增 `packages/shared/src/path-sanitizer.ts` 的 `maskPathFragments` —— preload 与 main 共用同一规则，删除两侧各自维护的路径正则（preload 旧正则字符类漏全角冒号/CJK 前缀）。行为从「检测到路径整条替换」改为「只打码路径片段、保留上下文」：`写入失败：D:\workspace\mod\a.fmg 被占用` → `写入失败：[本机路径已隐藏] 被占用`。覆盖盘符绝对路径 / UNC / 设备路径 / 盘符 file URI；路径内汉字不终止（D:\游戏\mods\a.fmg 整段打码）；工作区相对 URI（file:///workspace/…）不打码。新增 shared 单测（7 条）+ main/preload 一致性断言（4 条）；verify-desktop-security-runtime.mjs 的真实载荷断言（不得含本机绝对路径）在片段替换下保持成立。
 - **S10 扩展落地（2026-08-17，事件/文本 data-cite）**：PARAM 先行后把引用框选扩展到事件与文本。`citations.ts` 的 `CiteHit` 增加 `text-entry`（FMG 条目行：table=typed stableId 含冒号合法、entryId、显示投影文本）与 `event-script`（EMEVD 源码区：script=tabId 逻辑 URI、label=短标题），`mergeCiteHits` 返回 `Citation` union（param 锚定合并保持原样，text/event 单节点成条、重复命中去重、混合 kind 不跨类合并），新增 `formatCitationLabel`；`decodeCiteHit` 对 table/script 走「非路径」校验（stableId 带冒号、逻辑 URI 无盘符都是合法的，白名单标识符校验只留 library/fieldId）。main `agent.citation.create` 按 kind 分 domain（param/text/event），引用注册表与提示词拼接用 `formatCitationLabel`。FmgWorkbenchPanel 条目行、EventSourceWorkbenchPanel 源码区挂 data-cite（未选表/失败不挂，诚实态）。citations 单测 26 条 + 面板断言（renderer-unit 744 全过，core test exit=0）。
 - **Negative source tests**：无 `domainForFile`、`filterFilesForDomain(files)`、`visibleFiles.length` 领域计数。
 - **Done**：顶部无 `PARAM 36`，PARAM 入口直接打开逻辑库。
@@ -2933,7 +2933,7 @@ SHELL-09 → SHELL-10
 本次规范重写只允许修改：
 
 ```text
-D:\Repository\SoulForge\docs\frontend-renovation\front-end.md
+<REPO_ROOT>\docs\frontend-renovation\front-end.md
 ```
 
 不得修改当前工作树中的代码、临时文件或其他文档。
@@ -2957,4 +2957,4 @@ D:\Repository\SoulForge\docs\frontend-renovation\front-end.md
 6. 确认本文未改动 `docs/governance/` 下任何文件（本文对治理冲突只作标注与处置指示，不直接改治理数据）；
 7. 本文如有更新，以仓库既有 CRLF 约定保存（修改不改变整文件换行风格，避免 diff 全文件变色）。
 
-`D:\mystream\Sekiro Shadows Die Twice\tools` 只是当前机器上的强制 UI 参考库，不是 runtime、Bridge authority、安装包输入或自动导入源。
+`<TOOLS_ROOT>` 只是当前机器上的强制 UI 参考库，不是 runtime、Bridge authority、安装包输入或自动导入源。
