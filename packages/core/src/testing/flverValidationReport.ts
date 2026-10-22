@@ -26,11 +26,17 @@ export function summarizeFlverValidation<T extends FlverValidationSample>(report
   for (const sample of samples) counts[sample.validationStatus] += 1;
   const ok = counts.failed === 0 && counts.unverified === 0 && counts.passed > 0;
   const status = counts.failed > 0 ? 'failed' : ok ? 'verified' : 'unverified';
-  const meshes = reports.reduce((sum, report) => sum + report.meshCount, 0);
-  return { ok, status, counts, samples, independentReferenceVerified: false,
+  // Empty-topology meshes are classified, never decoded: they complete a sample's coverage
+  // but are not verified meshes, so the summary counts them apart.
+  const meshCounts = {
+    total: reports.reduce((sum, report) => sum + report.meshCount, 0),
+    verified: samples.filter(sample => sample.validationStatus === 'passed').reduce((sum, sample) => sum + sample.meshesOk, 0),
+    emptyTopology: samples.reduce((sum, sample) => sum + (sample.emptyMeshIndices?.length ?? 0), 0)
+  };
+  return { ok, status, counts, meshCounts, samples, independentReferenceVerified: false,
     evidenceScope: 'native structural self-consistency; independent-reference correctness requires separate field reports',
     failures: samples.filter(sample => sample.validationStatus === 'failed'),
-    message: ok ? `FLVER 多样本原生验证通过（${counts.passed} verified samples, ${meshes} meshes; ${counts.empty} empty samples）`
+    message: ok ? `FLVER 多样本原生验证通过（${counts.passed} verified samples, ${meshCounts.verified} verified meshes; ${meshCounts.emptyTopology} empty-topology meshes; ${counts.empty} empty samples）`
       : counts.failed ? `FLVER 多样本原生验证失败（${counts.failed} failed samples; ${counts.empty} empty samples）`
       : `FLVER 多样本未验证（${counts.empty} empty samples; ${counts.unverified} incomplete samples）`
   };
