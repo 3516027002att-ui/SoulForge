@@ -154,6 +154,45 @@ export function taeAnimationsFromBridge(animations, entryIndex) {
     .map(animation => ({ id: integerText(animation.animId), file: animation.hkxName || null, events: animation.eventCount }));
 }
 
+// SoulsFormats.TAE graph -> ordered [{ id, file, events: [{ type, start, end, unk04 }] }] with times as float32 bits.
+// The pinned reference does not expose an event's parameter bytes (Parameters stays null without a template), so a
+// write round trip checks what is here plus the child bytes of every other binder entry.
+export function taeEventsFromReferenceGraph(graph) {
+  if (graph?.$type !== 'SoulsFormats.TAE') throw new Error(`expected SoulsFormats.TAE, got ${graph?.$type}`);
+  const deref = graphRefResolver(graph);
+  return memberItems(graph, 'Animations', deref).map(animation => ({
+    id: integerText(member(animation, 'ID')), file: member(animation, 'AnimFileName') || null,
+    events: memberItems(animation, 'Events', deref).map(event => ({ type: integerText(member(event, 'Type')),
+      start: referenceFloatBits(member(event, 'StartTime')), end: referenceFloatBits(member(event, 'EndTime')),
+      unk04: integerText(member(event, 'Unk04')) })) }));
+}
+
+export const taeAnimationKey = animation => `${animation.id} ${animation.file ?? ''} `
+  + animation.events.map(event => `${event.type}/${event.start}/${event.end}/${event.unk04}`).join(',');
+
+// Expected animations after one event's start/end change, from the reference read of the source, never from the
+// writer. The animation id must occur once, and the times must change, so an edit that changes nothing cannot pass.
+export function applyTaeTimeEdit(animations, edit) {
+  const slots = animations.flatMap((animation, index) => animation.id === edit.id ? [index] : []);
+  if (slots.length !== 1) throw new Error(`TAE edit target animation ${edit.id} occurs ${slots.length} times`);
+  const before = animations[slots[0]].events[edit.eventIndex];
+  if (!before) throw new Error(`TAE edit target event ${edit.id}/${edit.eventIndex} is not in the source`);
+  if (before.start === edit.start && before.end === edit.end) throw new Error('TAE edit must change the event times');
+  return animations.map((animation, index) => index !== slots[0] ? animation : { ...animation,
+    events: animation.events.map((event, eventIndex) => eventIndex === edit.eventIndex ? { ...event, start: edit.start, end: edit.end } : event) });
+}
+
+// The edited entry is compared by its decoded events (its child bytes may legitimately change); every other entry
+// must keep its exact child bytes. source/output: { entries: [{ ordinal, id, name, size, sha256 }], animations }.
+export function taeRoundtripComparisons(source, output, edit) {
+  const entryKey = entry => entry.ordinal === edit.ordinal ? `${entry.ordinal} ${entry.id} ${entry.name}`
+    : `${entry.ordinal} ${entry.id} ${entry.name} ${entry.size} ${entry.sha256}`;
+  const expected = edit.times ? applyTaeTimeEdit(source.animations, edit.times) : source.animations;
+  return { entries: compareOrdered(source.entries, output.entries, entryKey),
+    [edit.ordinal]: output.animations ? compareOrdered(expected, output.animations, taeAnimationKey)
+      : failedComparison('ROUNDTRIP_OUTPUT_TAE_MISSING') };
+}
+
 // SoulsFormats.EMEVD graph -> { events, instructions, parameters }. GraphWriter writes each reference-type object once
 // with $id and every later occurrence as { $ref: id }, so nodes are resolved before they are read.
 export function emevdFromReferenceGraph(graph) {

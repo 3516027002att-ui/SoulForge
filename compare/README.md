@@ -49,6 +49,7 @@ only the stdout summary in PRs and issues.
 | `tae` | Bridge `read-tae-document` | SoulsFormatsNEXT `entries` + `decode` (TAE) | anibnd TAE entry list (ordinal, id, name); every TAE's ordered (animation id, hkx name, event count) |
 | `emevd` | Bridge `read-emevd-document`, every instruction page | SoulsFormats `decode` (EMEVD) | events (id, rest behavior, instruction and parameter counts); flattened instructions (event, index, bank, id, ArgData length and sha256, layer present); flattened parameters |
 | `fmg` `write-roundtrip` | Bridge `write-fmg` into a temp staging root | SoulsFormats reads source and output | L0 identity upsert and L1 one-entry text edit; every table's ordered (id, text) against the reference read of the source with the same edit applied |
+| `tae` `write-roundtrip` | core `commitTaeEventContainerViaBridge` (extract child, `write-tae-document`, `write-bnd4`) into a temp staging root | SoulsFormatsNEXT reads source and output | L0 rewrites one event's times unchanged, L1 moves them one frame; the edited TAE's ordered animations (id, hkx name, events: type, start/end float32 bits, Unk04) against the source read with the edit applied; every other entry's child size and sha256 unchanged |
 | `msb` | Bridge `read-msb-document` | SoulsFormatsNEXT `decode` (MSBS) | per type, ordered: models (name, sib path); parts (name, model, position/rotation/scale float32 bits, entity id); regions (name, shape, position/rotation bits, entity id); events (name, event id) |
 | `param` `read-rows` | Bridge `read-dcx-document` entries; per entry `extract-bnd4-child` + `readParamDocumentViaBridge` (trusted row width) | SoulsFormats `entries` + `decode` (PARAM, no paramdef) | parambnd .param entry list (ordinal, id, name); every param's (ParamType, row count) and ordered row (id, name) |
 
@@ -60,6 +61,13 @@ only writable root it negotiates; it refuses a staging root inside the game root
 the source file's sha256 changed. The expectation is the reference tool's read of the source with the edit applied,
 never the Bridge result. `byteIdentical` (output sha256 equals the source) is recorded, not judged: the writer
 recompresses the DCX, so an L0 match does not claim a byte-lossless write.
+
+The TAE write round trip uses the same staging and source checks. Its target is the first event, in native order, of
+the first TAE entry that has one, whose times the writer accepts moving (it refuses an event whose time slot a sibling
+shares; refusals are recorded in `refused`). The pinned SoulsFormatsNEXT does not expose an event's parameter bytes
+(`Parameters` stays null without a template), so field writes (`set-event-field`) and inserted events are not
+compared by this rule; untouched TAE entries are still checked byte for byte through their child sha256.
+`childByteIdentical` (the edited child's bytes unchanged) is recorded, not judged.
 
 EMEVD layer values are not compared yet; no corpus file has a layer. MSB compares only what the Bridge exposes:
 per-type inner payloads, entity groups, gparam, event part/region references and routes are not compared, so a
