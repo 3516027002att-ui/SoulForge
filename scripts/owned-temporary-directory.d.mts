@@ -3,7 +3,7 @@ export interface OwnedTemporaryDirectory {
   trackProcess(pid: number, options?: { processGroup?: boolean; uncertainTree?: boolean }): Promise<{ root: string; token: string }>;
   trackProcessGroup(group: number): Promise<{ root: string; token: string }>;
   retain(reason: string): Promise<void>;
-  dispose(): Promise<void>;
+  dispose(options?: { stopProofWaitMs?: number }): Promise<void>;
 }
 export function createOwnedTemporaryDirectory(owner: string, options?: { parent?: string; compact?: boolean }): Promise<OwnedTemporaryDirectory>;
 export function initializeOwnedTemporaryDirectory(owner: string, root: string, options?: { ownerPid?: number; token?: string }): Promise<OwnedTemporaryDirectory>;
