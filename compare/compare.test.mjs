@@ -6,8 +6,9 @@ import { basename, join, resolve } from 'node:path';
 import { classify, compareOrdered, emevdFromBridgePages, emevdFromReferenceGraph, emevdKeys, failedComparison, float32Bits, fmgEntriesFromBridge,
   fmgEntriesFromReferenceGraph, graphRefResolver, groupStatus, int64Text, memberItems, msbDisambiguateNames, msbFromBridge, msbFromReferenceGraph, msbKeys,
   referenceFloatBits, resolveReferenceResponse, staleKnownDiffs, taeAnimationsFromBridge, taeAnimationsFromReferenceGraph,
-  applyFmgTextEdit, fmgEntryKey, fmgRoundtripComparisons, pickFmgEditTarget,
+  applyFmgTextEdit, fmgEntryKey, fmgRoundtripComparisons, pickFmgEditTarget, applyTaeTimeEdit, taeEventsFromReferenceGraph, taeRoundtripComparisons,
   paramFromBridgeRead, paramFromReferenceGraph, paramKeys, readBridgeParam, referenceBlockingDiagnostic, referenceResultDirsToRemove } from './lib.mjs';
+import { float32FromBits, taeWriteRoundtrip } from './roundtrip.mjs';
 
 // FMG write round trip: the expectation is the reference read of the source with the edit applied.
 const rtSource = () => ({ tables: [{ ordinal: 0, id: 1, name: 'a.fmg' }, { ordinal: 1, id: 2, name: 'b.fmg' }],
@@ -115,6 +116,86 @@ test('TAE animations normalise to (id, file, events) and a one-slot ID shift is 
   const noFile = taeAnimationsFromReferenceGraph(taeGraph([[1150, '', 0]]));
   assert.equal(compareOrdered(noFile, taeAnimationsFromBridge([{ taeEntryIndex: 1, animId: 1150, eventCount: 0 }], 1), keyOf).equal, true);
   assert.equal(compareOrdered(noFile, taeAnimationsFromBridge([{ taeEntryIndex: 1, animId: 1150, hkxName: 'a000_001150.hkt', eventCount: 0 }], 1), keyOf).equal, false);
+});
+
+// TAE write round trip. Events in the pinned SoulsFormatsNEXT graph shape: System.Single times with bits, int Type/Unk04.
+const taeSingle = bits => ({ $type: 'System.Single', value: 'display only', bits });
+const taeEventGraph = animations => ({ $type: 'SoulsFormats.TAE', $members: [{ name: 'Animations', value: { $items: animations.map(([id, file, events]) => ({
+  $type: 'SoulsFormats.TAE+Animation', $members: [{ name: 'ID', value: { $type: 'System.Int64', value: String(id) } }, { name: 'AnimFileName', value: file },
+    { name: 'Events', value: { $items: events.map(([type, start, end]) => ({ $type: 'SoulsFormats.TAE+Event', $members: [
+      { name: 'StartTime', value: taeSingle(start) }, { name: 'EndTime', value: taeSingle(end) }, { name: 'Type', value: type }, { name: 'Unk04', value: 0 }] })) } }] })) } }] });
+const rtTae = () => ({ entries: [{ ordinal: 1, id: 5000000, name: 'a00.tae', size: 10, sha256: 'a' }, { ordinal: 2, id: 5000010, name: 'a01.tae', size: 20, sha256: 'b' }],
+  animations: taeEventsFromReferenceGraph(taeEventGraph([[0, 'a000_000000.hkt', [[67, '00000000', '40311111'], [237, '00000000', '40311111']]], [10, '', []]])) });
+
+test('TAE reference events normalise to float32 bits, and the expected edit changes exactly one event', () => {
+  const { animations } = rtTae();
+  assert.deepEqual(animations[0], { id: '0', file: 'a000_000000.hkt', events: [{ type: '67', start: '00000000', end: '40311111', unk04: '0' },
+    { type: '237', start: '00000000', end: '40311111', unk04: '0' }] });
+  assert.equal(animations[1].file, null);
+  const before = structuredClone(animations);
+  const edited = applyTaeTimeEdit(animations, { id: '0', eventIndex: 1, start: float32Bits(1 / 30), end: '4033B13C' });
+  assert.deepEqual(animations, before, 'the source read stays intact');
+  assert.deepEqual(edited[0].events.map(event => [event.start, event.end]), [['00000000', '40311111'], [float32Bits(1 / 30), '4033B13C']]);
+  assert.throws(() => applyTaeTimeEdit(animations, { id: '0', eventIndex: 1, start: '00000000', end: '40311111' }), /must change/u);
+  assert.throws(() => applyTaeTimeEdit(animations, { id: '5', eventIndex: 0, start: '1', end: '2' }), /occurs 0 times/u);
+  assert.throws(() => applyTaeTimeEdit(animations, { id: '0', eventIndex: 2, start: '1', end: '2' }), /not in the source/u);
+  assert.throws(() => taeEventsFromReferenceGraph({ $type: 'SoulsFormats.FMG' }), /expected SoulsFormats\.TAE/u);
+  assert.equal(float32FromBits('40311111'), Math.fround(2.7666667));
+  assert.equal(float32Bits(float32FromBits('80000000')), '80000000', '-0 keeps its bits');
+});
+
+test('TAE round trip: identity and the applied edit match; another event, another entry or an unapplied edit is a diff', () => {
+  const source = rtTae(), clone = () => structuredClone(source);
+  const times = { id: '0', eventIndex: 0, start: float32Bits(1 / 30), end: float32Bits(2.8) };
+  assert.deepEqual(rtDiffs(taeRoundtripComparisons(source, clone(), { ordinal: 1, times: null })), []);
+  const edited = clone(); Object.assign(edited.animations[0].events[0], { start: times.start, end: times.end }); edited.entries[0].sha256 = 'c';
+  assert.deepEqual(rtDiffs(taeRoundtripComparisons(source, edited, { ordinal: 1, times })), [], 'the edited child may change its bytes');
+  assert.deepEqual(rtDiffs(taeRoundtripComparisons(source, clone(), { ordinal: 1, times })), [['1', 1]], 'an unapplied edit');
+  assert.deepEqual(rtDiffs(taeRoundtripComparisons(source, edited, { ordinal: 1, times: null })), [['1', 1]], 'an identity write that moved an event');
+  const sibling = structuredClone(edited); sibling.animations[0].events[1].start = '3D088889';
+  assert.deepEqual(rtDiffs(taeRoundtripComparisons(source, sibling, { ordinal: 1, times })), [['1', 1]], 'a sibling event moved too');
+  const typed = structuredClone(edited); typed.animations[0].events[0].type = '68';
+  assert.deepEqual(rtDiffs(taeRoundtripComparisons(source, typed, { ordinal: 1, times })), [['1', 1]]);
+  const other = structuredClone(edited); other.entries[1].sha256 = 'd';
+  assert.deepEqual(rtDiffs(taeRoundtripComparisons(source, other, { ordinal: 1, times })), [['entries', 1]], 'another TAE child changed bytes');
+  const dropped = structuredClone(edited); dropped.animations[1] = { ...dropped.animations[1], events: [{ type: '1', start: '0', end: '0', unk04: '0' }] };
+  assert.deepEqual(rtDiffs(taeRoundtripComparisons(source, dropped, { ordinal: 1, times })), [['1', 1]], 'an event added elsewhere');
+  assert.deepEqual(rtDiffs(taeRoundtripComparisons(source, { ...edited, animations: null }, { ordinal: 1, times })), [['1', 1]]);
+});
+
+test('TAE round trip driver: the writer gets the reference event, refusals move on, the source is never the output', async () => {
+  const { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const gameRoot = mkdtempSync(join(tmpdir(), 'sf-compare-tae-')); mkdirSync(join(gameRoot, 'chr'));
+  const file = join(gameRoot, 'chr', 'c0000.anibnd.dcx'); writeFileSync(file, 'source');
+  const source = rtTae(), writes = [];
+  try {
+    const result = await taeWriteRoundtrip({ file, gameRoot,
+      // The first candidate is refused (shared time slot); the writer applies the second event's times exactly.
+      commitTae: async request => {
+        const mutation = request.mutations[0];
+        writes.push({ eventIndex: mutation.eventIndex, start: float32Bits(mutation.startTime), end: float32Bits(mutation.endTime), output: request.outputPath });
+        if (mutation.eventIndex === 0) return { ok: false, diagnostics: [{ severity: 'error', code: 'TAE_WRITE_BLOCKED_SHARED_TIME_SLOT' }] };
+        assert.ok(!request.outputPath.startsWith(gameRoot), 'staging stays outside the game root');
+        writeFileSync(request.outputPath, JSON.stringify(mutation));
+        return { ok: true, diagnostics: [] };
+      },
+      readEntries: path => ({ status: 'ok', entries: path === file ? source.entries : source.entries.map(entry => ({ ...entry })) }),
+      decodeEntry: (path, entry) => {
+        if (path === file) return { status: 'ok', animations: entry.ordinal === 1 ? source.animations : [] };
+        const mutation = JSON.parse(readFileSync(path, 'utf8'));
+        const animations = structuredClone(source.animations);
+        Object.assign(animations[0].events[mutation.eventIndex], { start: float32Bits(mutation.startTime), end: float32Bits(mutation.endTime) });
+        return { status: 'ok', animations };
+      } });
+    assert.deepEqual(result.refused, [{ id: '0', eventIndex: 0, code: 'TAE_WRITE_BLOCKED_SHARED_TIME_SLOT' }]);
+    assert.deepEqual(result.target, { id: '0', eventIndex: 1 });
+    assert.deepEqual(writes.map(write => [write.eventIndex, write.start, write.end]), [
+      [0, float32Bits(1 / 30), float32Bits(float32FromBits('40311111') + 1 / 30)],
+      [1, float32Bits(1 / 30), float32Bits(float32FromBits('40311111') + 1 / 30)],
+      [1, '00000000', '40311111']], 'L1 moves both times one frame; L0 writes the source bits back');
+    assert.deepEqual(result.levels.map(level => [level.level, rtDiffs(level.comparisons)]), [['L0', []], ['L1', []]]);
+  } finally { rmSync(gameRoot, { recursive: true, force: true }); }
 });
 
 // Two events in SoulsFormats.EMEVD graph shape: Int64 IDs, an enum RestBehavior with a text value, ArgData blobs, and the
