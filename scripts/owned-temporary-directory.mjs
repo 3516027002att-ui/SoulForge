@@ -11,6 +11,10 @@ const scope = createHash('sha256').update(repositoryRoot).digest('hex').slice(0,
 const markerName = '.soulforge-temporary-owner.json';
 const schema = 'soulforge.temporary-owner.v1';
 const removalOptions = { recursive: true, force: true, maxRetries: 5, retryDelay: 200 };
+// Bound for a Windows job proof that can still change (guardian exiting).
+const STOP_PROOF_WAIT_MS = 5_000;
+const STOP_PROOF_POLL_MS = 50;
+const delay = ms => new Promise(resolveDelay => setTimeout(resolveDelay, ms));
 const activeRoots = new Map();
 // Linux observations are bound to boot/PID namespace. Windows is host-scoped;
 // descendant uncertainty stays pinned when no process-tree proof is available.
@@ -51,8 +55,11 @@ process.once('exit', () => {
       // Retention never grants deletion authority; it only disables implicit
       // cleanup until a caller repairs the evidence and explicitly disposes.
       if (Object.hasOwn(current, 'retention')) continue;
-      if (current.uncertainTrees?.some(pid => !windowsJobProvesStopped(current, pid, root))) throw new Error('OWNED_TEMP_PROCESS_UNCERTAIN');
-      if (childrenAreLive(current, root)) throw new Error('OWNED_TEMP_PROCESS_LIVE');
+      // Exit cleanup cannot wait; it reports the exact unproven/live evidence.
+      const unproven = unprovenTrees(current, root);
+      if (unproven.length) throw new Error(`OWNED_TEMP_PROCESS_UNCERTAIN: ${describeUnproven(unproven)}`);
+      const live = liveProcesses(current, root, true);
+      if (live.length) throw new Error(`OWNED_TEMP_PROCESS_LIVE: ${live.join('; ')}`);
       rmSync(root, removalOptions);
     } catch (error) {
       if (error.code === 'ENOENT') continue;
@@ -93,23 +100,68 @@ function childrenAreLive(record, root) {
     || (record.uncertainTrees ?? []).some(pid => !windowsJobProvesStopped(record, pid, root));
 }
 
-function windowsJobProvesStopped(record, pid, root) {
-  if (process.platform !== 'win32') return false;
+// Reasons that no amount of waiting can change. Every other reason can still
+// turn into proof (a guardian that is exiting, a proof being published).
+const staticStopReasons = new Set(['platform-without-job-proof', 'job-record-missing', 'root-unknown']);
+
+/**
+ * Why a Windows job does or does not prove its supervisor's tree stopped.
+ * 'finished' is written by owned-windows-job.ps1 only after TerminateJobObject
+ * and JOB accounting ActiveProcesses == 0 (breakaway is not allowed), so the
+ * driver and every descendant already exited; only the guardian, which is not
+ * a job member, still has to be observed stopped. A dead driver PID is never
+ * re-checked there: it is released first and is the PID most exposed to reuse.
+ * 'assigned' (the guardian ended without publishing) still needs both PIDs.
+ */
+function windowsJobStopEvidence(record, pid, root) {
+  if (process.platform !== 'win32') return { stopped: false, reason: 'platform-without-job-proof' };
   const job = (record.windowsJobs ?? []).find(value => value.pid === pid);
-  if (!job) return false;
-  if (!root) return false;
+  if (!job) return { stopped: false, reason: 'job-record-missing' };
+  if (!root) return { stopped: false, reason: 'root-unknown' };
+  const path = join(root, `.soulforge-windows-job.${job.id}.json`);
+  let proof;
   try {
-    const path = join(root, `.soulforge-windows-job.${job.id}.json`), info = lstatSync(path);
-    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > 4096) return false;
-    const proof = JSON.parse(readFileSync(path, 'utf8'));
-    if (proof.schema !== 'soulforge.windows-job.v1' || proof.id !== job.id || proof.token !== record.token
-      || proof.observer !== record.observer || proof.supervisorPid !== pid || proof.killOnClose !== true
-      || !['assigned', 'finished'].includes(proof.state)
-      || ![proof.guardianPid, proof.driverPid].every(value => Number.isSafeInteger(value) && value > 0)) return false;
-    // Assigned before resume, with the guardian as the only non-inheritable
-    // KILL_ON_JOB_CLOSE holder. Guardian death closes that job and kills its tree.
-    return !processIsLive(proof.guardianPid) && !processIsLive(proof.driverPid);
-  } catch { return false; }
+    const info = lstatSync(path);
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > 4096) {
+      return { stopped: false, reason: 'job-proof-not-plain-file' };
+    }
+    proof = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (error) {
+    return { stopped: false, reason: error.code === 'ENOENT' ? 'job-proof-missing' : `job-proof-unreadable(${error.code ?? error.name})` };
+  }
+  if (proof.schema !== 'soulforge.windows-job.v1' || proof.id !== job.id || proof.token !== record.token
+    || proof.observer !== record.observer || proof.supervisorPid !== pid || proof.killOnClose !== true
+    || !['assigned', 'finished'].includes(proof.state)
+    || ![proof.guardianPid, proof.driverPid].every(value => Number.isSafeInteger(value) && value > 0)) {
+    return { stopped: false, reason: 'job-proof-mismatch' };
+  }
+  // The guardian is the only non-inheritable KILL_ON_JOB_CLOSE holder; its
+  // death closes the job and kills any member that is still running.
+  if (processIsLive(proof.guardianPid)) return { stopped: false, reason: `guardian-live(${proof.guardianPid},${proof.state})` };
+  if (proof.state === 'assigned' && processIsLive(proof.driverPid)) {
+    return { stopped: false, reason: `driver-live(${proof.driverPid},assigned)` };
+  }
+  return { stopped: true, reason: proof.state };
+}
+
+function windowsJobProvesStopped(record, pid, root) {
+  return windowsJobStopEvidence(record, pid, root).stopped;
+}
+
+function unprovenTrees(record, root) {
+  return (record.uncertainTrees ?? []).map(pid => ({ pid, ...windowsJobStopEvidence(record, pid, root) }))
+    .filter(tree => !tree.stopped);
+}
+
+const describeUnproven = trees => trees.map(tree => `supervisor ${tree.pid}: ${tree.reason}`).join('; ');
+
+function liveProcesses(record, root, ownerIsSelf) {
+  return [
+    ...(!ownerIsSelf && processIsLive(record.pid) ? [`owner ${record.pid}`] : []),
+    ...record.childPids.filter(processIsLive).map(pid => `child ${pid}`),
+    ...(record.processGroups ?? []).filter(groupIsLive).map(group => `group ${group}`),
+    ...unprovenTrees(record, root).map(tree => `supervisor ${tree.pid}: ${tree.reason}`)
+  ];
 }
 
 function validProcesses(record) {
@@ -269,15 +321,28 @@ function directoryHandle(root, owner, record) {
         value.retention = { schema: 'soulforge.temporary-retention.v1', reason: reason.slice(0, 512) };
       });
     },
-    async dispose() {
-      const current = await readOwner(root, owner);
+    async dispose({ stopProofWaitMs = STOP_PROOF_WAIT_MS } = {}) {
+      if (!Number.isSafeInteger(stopProofWaitMs) || stopProofWaitMs < 0) throw new Error('OWNED_TEMP_STOP_WAIT_INVALID');
+      let current = await readOwner(root, owner);
       if (!current) {
         try { await lstat(root); } catch (error) { if (error.code === 'ENOENT') { activeRoots.delete(root); return; } throw error; }
         throw new Error(`OWNED_TEMP_OWNERSHIP_CHANGED: ${root}`);
       }
       if (current.token !== record.token) throw new Error(`OWNED_TEMP_OWNERSHIP_CHANGED: ${root}`);
-      if (current.uncertainTrees?.some(pid => !windowsJobProvesStopped(current, pid, root))) throw new Error(`OWNED_TEMP_PROCESS_UNCERTAIN: ${root}`);
-      if ((current.pid !== process.pid && processIsLive(current.pid)) || childrenAreLive(current, root)) throw new Error(`OWNED_TEMP_PROCESS_LIVE: ${root}`);
+      // A result receipt can arrive while the guardian that published the job
+      // proof is still exiting. Wait a bounded time for proof that can still
+      // change; a reason no wait can change, or the deadline, stays a failure.
+      const deadline = Date.now() + stopProofWaitMs;
+      for (let unproven = unprovenTrees(current, root); unproven.length; unproven = unprovenTrees(current, root)) {
+        if (unproven.some(tree => staticStopReasons.has(tree.reason)) || Date.now() >= deadline) {
+          throw new Error(`OWNED_TEMP_PROCESS_UNCERTAIN: ${root}: ${describeUnproven(unproven)}`);
+        }
+        await delay(STOP_PROOF_POLL_MS);
+        current = await readOwner(root, owner);
+        if (!current || current.token !== record.token) throw new Error(`OWNED_TEMP_OWNERSHIP_CHANGED: ${root}`);
+      }
+      const live = liveProcesses(current, root, current.pid === process.pid);
+      if (live.length) throw new Error(`OWNED_TEMP_PROCESS_LIVE: ${root}: ${live.join('; ')}`);
       await rm(root, removalOptions);
       activeRoots.delete(root);
     }

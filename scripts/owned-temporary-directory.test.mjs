@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 const moduleUrl = pathToFileURL(resolve('scripts/owned-temporary-directory.mjs')).href;
@@ -206,5 +207,119 @@ test('uncertain descendant evidence stays preserved even after its registered PI
       helper.recordOwnedProcess(ticket, child.pid, { finished: true });
       await owner.dispose();
     } finally { await stop(child); }
+  });
+});
+
+// Windows job proofs. owned-windows-job.ps1 publishes 'finished' only after
+// TerminateJobObject and ActiveProcesses == 0, so the job's driver is already
+// gone; only the guardian (outside its own job) still has to be seen stopped.
+// 'assigned' means the guardian ended without that accounting: both PIDs matter.
+const windowsOnly = { skip: process.platform !== 'win32' && 'Windows job proof only' };
+const markerName = '.soulforge-temporary-owner.json';
+const lingering = () => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+async function exitedPid() {
+  const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  await once(child, 'exit');
+  return child.pid;
+}
+async function writeJobProof(root, { supervisor, id, guardianPid, driverPid, state }) {
+  const marker = JSON.parse(await readFile(join(root, markerName), 'utf8'));
+  await writeFile(join(root, `.soulforge-windows-job.${id}.json`), JSON.stringify({ schema: 'soulforge.windows-job.v1', id,
+    token: marker.token, observer: marker.observer, supervisorPid: supervisor, guardianPid, driverPid, state, killOnClose: true }));
+}
+async function ownerWithJobProof(parent, proof) {
+  const owner = await helper.createOwnedTemporaryDirectory('windows-job-proof', { parent });
+  const supervisor = await exitedPid(), id = randomUUID();
+  const ticket = await owner.trackProcess(supervisor, { uncertainTree: true });
+  helper.prepareOwnedWindowsJob(ticket, supervisor, id);
+  await writeJobProof(owner.root, { supervisor, id, ...proof });
+  return { owner, supervisor, id };
+}
+
+test('Windows dispose waits for a guardian that exits after publishing its finished proof', windowsOnly, async () => {
+  await inParent(async parent => {
+    const guardian = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 700)'], { stdio: 'ignore' });
+    try {
+      const { owner } = await ownerWithJobProof(parent, { state: 'finished', guardianPid: guardian.pid, driverPid: await exitedPid() });
+      await owner.dispose({ stopProofWaitMs: 10_000 });
+      // This process still holds the guardian's handle, so its PID cannot be reused yet.
+      assert.throws(() => process.kill(guardian.pid, 0), { code: 'ESRCH' }, 'dispose returned only after the guardian exited');
+      assert.deepEqual(await readdir(parent), []);
+    } finally { await stop(guardian); }
+  });
+});
+
+test('Windows dispose stays uncertain with the failed sub-check when the guardian never exits', windowsOnly, async () => {
+  await inParent(async parent => {
+    const guardian = lingering();
+    try {
+      const { owner, supervisor } = await ownerWithJobProof(parent, { state: 'finished', guardianPid: guardian.pid, driverPid: await exitedPid() });
+      const started = Date.now();
+      await assert.rejects(owner.dispose({ stopProofWaitMs: 300 }),
+        new RegExp(`^Error: OWNED_TEMP_PROCESS_UNCERTAIN: .+: supervisor ${supervisor}: guardian-live\\(${guardian.pid},finished\\)$`));
+      assert.ok(Date.now() - started >= 300, 'the bounded wait ran to its deadline');
+      assert.ok((await readdir(parent)).includes(basename(owner.root)), 'an unproven tree keeps its root');
+      await stop(guardian);
+      await owner.dispose();
+      assert.deepEqual(await readdir(parent), []);
+    } finally { await stop(guardian); }
+  });
+});
+
+test('Windows finished proof ignores a reused driver PID while assigned proof still requires the driver to stop', windowsOnly, async () => {
+  await inParent(async parent => {
+    const reused = lingering();
+    try {
+      const assigned = await ownerWithJobProof(parent, { state: 'assigned', guardianPid: await exitedPid(), driverPid: reused.pid });
+      await assert.rejects(assigned.owner.dispose({ stopProofWaitMs: 200 }),
+        new RegExp(`OWNED_TEMP_PROCESS_UNCERTAIN: .+: supervisor ${assigned.supervisor}: driver-live\\(${reused.pid},assigned\\)$`));
+      assert.ok((await readdir(parent)).includes(basename(assigned.owner.root)));
+      const finished = await ownerWithJobProof(parent, { state: 'finished', guardianPid: await exitedPid(), driverPid: reused.pid });
+      await finished.owner.dispose({ stopProofWaitMs: 0 });
+      assert.deepEqual(await readdir(parent), [basename(assigned.owner.root)]);
+      await stop(reused);
+      await assigned.owner.dispose();
+      assert.deepEqual(await readdir(parent), []);
+    } finally { await stop(reused); }
+  });
+});
+
+test('Windows dispose names a missing job record and an unreadable proof without waiting', windowsOnly, async () => {
+  await inParent(async parent => {
+    const owner = await helper.createOwnedTemporaryDirectory('windows-job-proof', { parent });
+    const supervisor = await exitedPid();
+    await owner.trackProcess(supervisor, { uncertainTree: true });
+    const started = Date.now();
+    await assert.rejects(owner.dispose({ stopProofWaitMs: 5_000 }), new RegExp(`supervisor ${supervisor}: job-record-missing$`));
+    assert.ok(Date.now() - started < 2_000, 'a reason no wait can change fails at once');
+    const proof = await ownerWithJobProof(parent, { state: 'finished', guardianPid: await exitedPid(), driverPid: await exitedPid() });
+    await writeFile(join(proof.owner.root, `.soulforge-windows-job.${proof.id}.json`), '{"schema":');
+    await assert.rejects(proof.owner.dispose({ stopProofWaitMs: 100 }), new RegExp(`supervisor ${proof.supervisor}: job-proof-unreadable\\(SyntaxError\\)$`));
+    await rm(join(proof.owner.root, `.soulforge-windows-job.${proof.id}.json`));
+    await assert.rejects(proof.owner.dispose({ stopProofWaitMs: 100 }), new RegExp(`supervisor ${proof.supervisor}: job-proof-missing$`));
+    assert.equal((await readdir(parent)).length, 2, 'both unproven roots are kept');
+  });
+});
+
+test('Windows predecessor reclaim follows the finished-proof guardian, not a reused driver PID', windowsOnly, async () => {
+  await inParent(async parent => {
+    const predecessor = await childWorkspace(parent, 'windows-reclaim');
+    const guardian = lingering(), reused = lingering();
+    try {
+      await stop(predecessor.child);
+      const path = join(predecessor.root, markerName), marker = JSON.parse(await readFile(path, 'utf8'));
+      const supervisor = await exitedPid(), id = randomUUID();
+      await writeFile(path, JSON.stringify({ ...marker, childPids: [supervisor], uncertainTrees: [supervisor], windowsJobs: [{ pid: supervisor, id }] }));
+      const proof = state => writeJobProof(predecessor.root, { supervisor, id, guardianPid: guardian.pid, driverPid: reused.pid, state });
+      const allocate = async () => { const next = await helper.createOwnedTemporaryDirectory('windows-reclaim', { parent }); await next.dispose(); };
+      const retained = async () => (await readdir(parent)).includes(basename(predecessor.root));
+      await proof('finished'); await allocate();
+      assert.ok(await retained(), 'a live finished-proof guardian keeps the predecessor');
+      await stop(guardian);
+      await proof('assigned'); await allocate();
+      assert.ok(await retained(), 'an assigned proof with a live driver PID keeps the predecessor');
+      await proof('finished'); await allocate();
+      assert.equal(await retained(), false, 'after its guardian exits, a finished job is reclaimed even if its driver PID was reused');
+    } finally { await stop(predecessor.child); await stop(guardian); await stop(reused); }
   });
 });
