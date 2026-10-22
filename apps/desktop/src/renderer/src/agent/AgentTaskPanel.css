@@ -1,0 +1,87 @@
+
+/* 任务块：目标 / 证据 / 日志，替代聊天气泡 */
+.task-goal {
+  padding: 8px 12px; font-size: 12.5px; line-height: 1.6; color: var(--ink-0);
+  border-left: 2px solid var(--line-strong); background: var(--forge-1);
+  border-radius: 0;
+  animation: msg-in var(--dur-trans) var(--ease-standard);
+  user-select: text;
+}
+.task-goal__label { display: block; font-size: 10.5px; font-weight: 600; letter-spacing: .06em; color: var(--ink-2); margin-bottom: 2px; }
+.agent-block { animation: msg-in var(--dur-trans) var(--ease-standard); }
+.agent-block__label {
+  font-size: 10.5px; font-weight: 600; letter-spacing: .06em;
+  color: var(--ink-2); margin-bottom: 6px;
+}
+.agent-draft { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.agent-draft strong { color: var(--ink-0); font-size: 12.5px; }
+.agent-draft p { color: var(--ink-1); line-height: 1.6; user-select: text; }
+.agent-tools { display: flex; flex-wrap: wrap; gap: 6px; }
+.agent-log { display: flex; flex-direction: column; gap: 2px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-2); }
+.agent-log__row { display: flex; gap: 8px; padding: 1px 0; align-items: center; }
+.agent-log__row.is-ok { color: var(--ok); }
+.agent-log__row.is-warn { color: var(--warn); }
+.agent-log__row.is-danger { color: var(--danger-text); }
+.agent-empty { color: var(--ink-2); font-size: 12px; line-height: 1.7; padding: 8px 4px; }
+.agent-empty__lead { margin: 0 0 8px; }
+.agent-empty__examples { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.agent-empty__examples-label,
+.agent-empty__steps { font-size: 11px; color: var(--ink-3); }
+.agent-empty__examples .btn { text-align: left; white-space: normal; }
+.agent-empty__steps { margin: 0 0 8px; padding-left: 18px; }
+.agent-empty__steps li { margin-bottom: 3px; }
+.agent-empty__note { margin: 0; font-size: 11px; color: var(--ink-3); }
+
+/* 审批信息保持 Codex 式无框消息流；三档危险度只用左侧语义线区分。 */
+.agent-approval {
+  border: 0;
+  border-left-width: 3px;
+  border-left-style: solid;
+  border-radius: 0;
+  padding: 8px 0 8px 12px;
+  margin-bottom: 8px;
+  background: transparent;
+}
+.agent-approval.is-high { border-left-color: var(--danger); }
+.agent-approval.is-medium { border-left-color: var(--warn); }
+.agent-approval.is-low { border-left-color: var(--line); }
+.agent-approval__head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.agent-approval__level { font-size: 11px; color: var(--ink-3); }
+.agent-approval__step { margin: 4px 0 8px; font-size: 11px; color: var(--ink-2); }
+.agent-approval__preview { margin-bottom: 8px; }
+.agent-approval__target { display: flex; gap: 6px; align-items: baseline; margin-bottom: 4px; font-size: 11px; }
+.agent-approval__target-label { color: var(--ink-3); flex-shrink: 0; }
+.agent-approval__target code { word-break: break-all; }
+/* 改动 diff。增删用左边框 + 底色双重编码，不只靠颜色——只靠红绿对色觉障碍
+   用户不可读，而这里要判断的正是「哪些行被删了」。 */
+.agent-approval__diff {
+  margin-bottom: 8px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  overflow: hidden;
+}
+.agent-approval__diff-head {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  padding: 4px 8px; background: var(--forge-3, var(--forge-2)); font-size: 11px; flex-wrap: wrap;
+}
+.agent-approval__diff-head code { word-break: break-all; }
+.agent-approval__diff-stat .is-add { color: var(--ok); }
+.agent-approval__diff-stat .is-remove { color: var(--danger); }
+.agent-approval__diff-body {
+  margin: 0; padding: 0; max-height: 320px; overflow: auto;
+  font-size: 11px; line-height: 1.55; background: transparent;
+}
+.agent-approval__diff-body .diff-line { display: block; padding: 0 8px; border-left: 2px solid transparent; white-space: pre-wrap; word-break: break-all; }
+.agent-approval__diff-body .diff-line.is-add { background: color-mix(in srgb, var(--ok) 12%, transparent); border-left-color: var(--ok); }
+.agent-approval__diff-body .diff-line.is-remove { background: color-mix(in srgb, var(--danger) 12%, transparent); border-left-color: var(--danger); }
+.agent-approval__diff-body .diff-line.is-hunk { color: var(--ink-3); background: var(--forge-2); }
+.agent-approval__diff-body .diff-line.is-header { color: var(--ink-3); }
+
+.agent-approval__actions { flex-wrap: wrap; margin-top: 8px; }
+.agent-approval__scope { margin: 6px 0 0; font-size: 11px; color: var(--ink-3); }
+
+/* ── AGENT-60D ──────────────────────────────────────────────────────────────
+   消息流四态组件：工具活动行（默认单行折叠）、Change Review 审批卡、
+   失败态有界诊断、回到底部按钮、二级抽屉。 */

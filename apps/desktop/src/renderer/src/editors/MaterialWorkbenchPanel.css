@@ -1,0 +1,14 @@
+
+/* ── MTD unknown 属性（MATERIAL-53B）：可见但不可编辑 ──
+   未识别属性由 C# 原样保留（MaterialPropertyWire.unknown），本卡只读展示；
+   值用虚线下划线标记「已保留但未完全解释」，不伪装成已解析。 */
+.mtd-unknown-value {
+  color: var(--ink-2);
+  font-style: italic;
+  text-decoration: underline dotted;
+}
+.mtd-partial {
+  margin: 8px 10px; font-size: 12px;
+}
+.mtd-partial summary { cursor: pointer; color: var(--ink-2); font-weight: 600; }
+.mtd-partial ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }

@@ -1,0 +1,56 @@
+
+/* ═══════════ 变更审查与暂存队列（e2e 钩子：.change-queue / .cq-*） ═══════════ */
+.change-queue { display: flex; flex-direction: column; gap: 8px; }
+.change-queue .panel-header { margin-bottom: 0; }
+.cq-counts { font-size: 10.5px; color: var(--ink-3); white-space: nowrap; }
+.cq-section-title {
+  margin: 6px 0 0; font-size: 11px; font-weight: 600;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2);
+}
+.cq-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.cq-row {
+  border: 0;
+  border-left: 2px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent; padding: 8px 10px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.cq-row[data-status='draft'] { border-left-color: color-mix(in oklch, var(--warn), transparent 55%); }
+.cq-row[data-status='staged'] { border-left-color: color-mix(in oklch, var(--ember), transparent 50%); }
+.cq-row[data-status='failed'] { border-left-color: color-mix(in oklch, var(--danger), transparent 45%); }
+.cq-row[data-status='written'] { border-left-color: color-mix(in oklch, var(--ok), transparent 55%); }
+.cq-row-main { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.cq-kind { font-size: 10.5px; color: var(--ink-3); flex: none; }
+.cq-target {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11.5px; color: var(--ink-0);
+}
+.cq-status { font-size: 10.5px; font-weight: 600; flex: none; }
+.cq-status-draft { color: var(--warn); }
+.cq-status-staged { color: var(--ember-text); }
+.cq-status-validating, .cq-status-writing { color: var(--ink-1); }
+.cq-status-written { color: var(--ok); }
+.cq-status-failed { color: var(--danger-text); }
+.cq-status-rejected { color: var(--ink-3); }
+.cq-summary {
+  font-size: 12px; color: var(--ink-1);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cq-old { color: var(--ink-3); }
+.cq-new { color: var(--ink-0); }
+.cq-diagnostics { margin: 0; padding-left: 16px; font-size: 11px; color: var(--danger-text); user-select: text; }
+.cq-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.cq-actions button { padding: 3px 10px; font-size: 11.5px; }
+.cq-footer {
+  display: flex; flex-direction: column; gap: 6px;
+  border-top: 1px solid var(--line); padding-top: 8px;
+}
+.cq-footer .muted { font-size: 10.5px; }
+.cq-commit {
+  color: var(--on-primary); background: var(--primary-fill);
+  padding: 8px 16px; font-size: 12.5px; font-weight: 550; border-radius: var(--radius-m);
+  transition: background var(--dur-micro);
+}
+.cq-commit:hover { background: var(--primary-fill-hover); }
+.cq-commit:disabled { opacity: .45; pointer-events: none; }

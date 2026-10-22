@@ -1,8 +1,9 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * 5.7 / 24.4 startup lifecycle smoke — tests 1-8.
  * Exercises fingerprint reuse, store generation, continuity, cancellable hash with yield, workspaceSessionGeneration guard, hash failure retention, analyze reuse.
  */
-import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
+import { writeFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';

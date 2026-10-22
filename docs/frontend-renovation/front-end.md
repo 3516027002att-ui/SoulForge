@@ -1,5 +1,7 @@
 # SoulForge 全局前端实施规范
 
+当前 issue-based 全重构中，本文作为历史设计背景。正文中的 gov、Gate/scope 登记和手工 tiers 接入指令已退役，不作为开工、验证或封存的前置条件。当前任务边界以用户指令和 [工程入口](../../AGENTS.md) 为准；具体产品约束须与当前源码、[架构](../../ARCHITECTURE.md) 和 [决定](../DECISIONS.md) 核对。
+
 > **最高优先级产品决定**
 >
 > SoulForge 的常规编辑器工作台不再自行设计。对照本机 `tools` 里的 Smithbox 2.2.4 与 DarkScript3，复制的是**选择链、窗格身份、信息密度和操作顺序**，不是把 ImGui 可拆停靠翻译成固定 CSS 四栏，也不是“参考后重新设计”成卡片式网页。Agent dock 是 SoulForge 自有外壳，构图按 TRAE/Cursor；参考截图目前不在仓库内。
@@ -75,7 +77,7 @@
 | §10.3、§10.4 与 §11 中 browser-preview、键盘、focus 和按钮视觉纪律 | **保留不冲突部分** |
 | §12 不扩大权限、不伪造 native/发布完成 | **保留** |
 
-`docs/V0_5_IMPLEMENTATION_HANDOFF.md` 中“EMEVD 四视图”只作为旧可见投影描述失效；底层 DSL、revision、typed mutation、Bridge/Patch Engine 和现有能力边界继续保留。本文改变的是默认前端工作流，不删除底层能力，也不改写其他文档记录的发布状态。
+旧实施交接书（已从主线移除，保留在 `archive/pre-v2` 分支）中“EMEVD 四视图”只作为旧可见投影描述失效；底层 DSL、revision、typed mutation、Bridge/Patch Engine 和现有能力边界继续保留。本文改变的是默认前端工作流，不删除底层能力，也不改写其他文档记录的发布状态。
 
 **四视图与治理状态冲突：** 治理侧存在大量 `completed` 切片把四视图 controller 作为 production 写链入口（`submitEmevdDslPlanViaFourView`、`commitEmevdPlanViaPatchEngine` 经四视图 UI 接线，`test:emevd-four-view` 是 `W-EMEVD-DSL-01` 的 requiredValidation）。本文 §16 与 EVENT-30B 要求把四视图从 production 断开——这与已封存的 completed 切片表述冲突。**这不是本文能消化的矛盾**：实施 EVENT-30A/B 前，须先经治理流程取得一次正式的 scope 裁定（`scope.json` 延期/改写条目或新切片），把“四视图 UI 从 production 默认入口改由 DarkScript3 式 source editor 取代，底层 typed 写链保持不变”登记为已裁定事项；未取得裁定时，断开四视图 UI 的动作不得执行，flash Agent 不得自行改治理数据或宣布旧切片失效。
 

@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * Full EMEVD editor-document pagination/assembly smoke:
  * 1) Synthetic EMEVD (always): paginated Bridge reads assemble a complete
@@ -19,7 +20,7 @@
  */
 import { createHash } from 'node:crypto';
 import { access } from 'node:fs/promises';
-import { mkdtemp, mkdir, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { disposeBridgeDaemonPool, runBridge } from '../bridge/runBridge.js';

@@ -1,0 +1,2 @@
+export interface ProviderBudgetStats {maxOutputTokens:number;outputUsed:number;outputReserved:number;requests:number;unreportedRequests:number;maxCost?:number;costUpperBound?:number;costReserved?:number;accounting:string}
+export function createProviderBudget<T>(adapter:T,options:{maxOutputTokens?:number;maxCost?:number;pricing?:{inputPerMillion:number;outputPerMillion:number}}):{adapter:T;stats():ProviderBudgetStats};

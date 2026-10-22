@@ -74,6 +74,7 @@ export * from './workspace/importLegacySemanticSnapshot.js';
 export * from './character/characterAssembly.js';
 export * from './ai/evidencePackBuilder.js';
 export * from './model-services/index.js';
+export * from './model-services/agentHostComposition.js';
 export * from './feedback/index.js';
 export * from './mutter/index.js';
 export * from './assets/assetImport.js';
@@ -197,3 +198,5 @@ export * from './script/plaintextScriptEntry.js';
 // 历史 `ai-tools/scaffoldToolRegistry` 已迁入 testing/harness，仅供 smoke 引用。
 export * from './workspace/fileFingerprint.js';
 export * from './workspace/workspaceFingerprintStore.js';
+
+export * from './runtime/operationOutcome.js';

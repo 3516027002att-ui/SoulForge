@@ -11,13 +11,22 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { parseNpmForward, tokenizeCommands } from './commandPlan.mjs';
+import { parseNpmForward, tokenizeCommands, unwrapOwnedTestCommand } from './commandPlan.mjs';
 
 /** 环境变量 → 需求类别。未列出的 SOULFORGE_* 不构成外部依赖。 */
 const ENV_REQUIREMENT = Object.freeze({
   SOULFORGE_NATIVE_FIXTURE_REGISTRY: 'native-env',
   SOULFORGE_NATIVE_FIXTURE_ROOT: 'native-env',
   SOULFORGE_SEKIRO_GAME_ROOT: 'native-env',
+  SOULFORGE_SEKIRO_ROOT: 'native-env',
+  SOULFORGE_SEKIRO_MOD_ROOT: 'native-env',
+  SOULFORGE_MSB_FIELDS: 'native-env',
+  SOULFORGE_MSB_CAPTURE: 'native-env',
+  SOULFORGE_MSB_PRODUCER: 'native-env',
+  SOULFORGE_TAE_PIN_CONTROL_PRODUCT: 'native-env',
+  SOULFORGE_TAE_INTERNAL_ORACLE_PATH: 'native-env',
+  SOULFORGE_TPF_PRODUCT_ROOT: 'native-env',
+  SF_REAL_TAE_SOURCE: 'native-env',
   SOULFORGE_EMEDF_PATH: 'emedf',
   SOULFORGE_INSTALLER_LIFECYCLE_RUN: 'opt-in',
   // script 容器 game-load 真实加载确认：opt-in 用户游戏内确认，未设置时该 leg 结构化跳过。
@@ -46,7 +55,8 @@ const DOTNET_MODULE_HINTS = Object.freeze([
 export function parseScriptCommand(command, workspaceDir) {
   const entries = [];
   const forwards = [];
-  for (const tokens of tokenizeCommands(command) ?? []) {
+  for (const originalTokens of tokenizeCommands(command) ?? []) {
+    const tokens = unwrapOwnedTestCommand(originalTokens) ?? originalTokens;
     const forward = parseNpmForward(tokens);
     if (forward) {
       const { args, ...target } = forward;
@@ -98,6 +108,7 @@ export function analyzeEntry(entryFile, { maxFiles = 400 } = {}) {
   const seen = new Set();
   const envVars = new Set();
   let dotnetHint = false;
+  let packagedAppInput = false;
   const queue = [entryFile];
 
   while (queue.length > 0 && seen.size < maxFiles) {
@@ -112,7 +123,12 @@ export function analyzeEntry(entryFile, { maxFiles = 400 } = {}) {
       continue;
     }
 
-    for (const match of text.matchAll(/SOULFORGE_[A-Z0-9_]+/g)) envVars.add(match[0]);
+    for (const match of text.matchAll(/(?:SOULFORGE_[A-Z0-9_]+|SF_REAL_[A-Z0-9_]+)/g)) envVars.add(match[0]);
+    // Reading a final unpacked payload requires the packaging phase. An
+    // arbitrary alias does not turn its app.asar/native resources into a unit
+    // fixture, and missing packaged files must still fail in that phase.
+    if (/\brelease[\\/](?:win|linux|mac)-unpacked[\\/]resources\b/u.test(text)
+      && /\b(?:readFileSync|readFile|statSync|stat|existsSync)\s*\(/u.test(text)) packagedAppInput = true;
     const normalizedFile = file.replaceAll('\\', '/');
     if (DOTNET_MODULE_HINTS.some((hint) => normalizedFile.includes(hint))) dotnetHint = true;
     for (const match of text.matchAll(IMPORT_PATTERN)) {
@@ -128,6 +144,7 @@ export function analyzeEntry(entryFile, { maxFiles = 400 } = {}) {
     if (requirement) requirements.add(requirement);
   }
   if (dotnetHint) requirements.add('dotnet');
+  if (packagedAppInput) requirements.add('packaged-app');
 
   return {
     analyzedFiles: seen.size,

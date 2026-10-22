@@ -1,0 +1,185 @@
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, relative, resolve } from 'node:path';
+import { analyzeEntry } from './classify.mjs';
+import { resolveScriptEntries } from './scriptGraph.mjs';
+import { operationKey, planScript } from './commandPlan.mjs';
+
+// These desktop smokes already have source bundlers because desktop is noEmit.
+// Discovery must execute the same operation as their existing npm entry points.
+const desktopSmokeRunners = new Map([
+  ['apps/desktop/src/main/runMapMeshGeometrySmoke.ts', 'scripts/run-map-mesh-geometry-smoke.mjs'],
+  ['apps/desktop/src/renderer/src/scene/runThreeSceneFunctionalSmoke.ts', 'scripts/run-three-scene-functional-smoke.mjs']
+]);
+
+function supportedWorkspaceTsConfig(repoRoot, workspaceDir, sourcePath) {
+  const workspaceRoot = resolve(repoRoot,workspaceDir);
+  const sourceRelative = relative(resolve(workspaceRoot,'src'),resolve(repoRoot,sourcePath)).replaceAll('\\','/');
+  if (!sourceRelative || sourceRelative === '..' || sourceRelative.startsWith('../') || sourceRelative.startsWith('/')
+    || /^[a-z]:\//iu.test(sourceRelative) || !sourceRelative.endsWith('.ts')) return false;
+
+  // Deliberately support only the current explicit src -> dist project shape;
+  // do not try to emulate the full tsconfig inheritance/glob grammar here.
+  const chain = [];
+  const seen = new Set();
+  let configPath = resolve(workspaceRoot,'tsconfig.json');
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (seen.has(configPath) || !existsSync(configPath)) return false;
+    seen.add(configPath);
+    let config;
+    try { config = JSON.parse(readFileSync(configPath,'utf8')); } catch { return false; }
+    if (!config || Array.isArray(config) || typeof config !== 'object') return false;
+    chain.push(config);
+    if (!Object.hasOwn(config,'extends')) break;
+    const extension = config.extends;
+    if (typeof extension !== 'string' || !extension.startsWith('.') || !extension.endsWith('.json')) return false;
+    configPath = resolve(dirname(configPath),extension);
+    const outsideRoot = relative(repoRoot,configPath).replaceAll('\\','/');
+    if (outsideRoot === '..' || outsideRoot.startsWith('../') || /^[a-z]:\//iu.test(outsideRoot)) return false;
+    if (depth === 7) return false;
+  }
+  if (chain.length === 0) return false;
+  const leaf = chain[0];
+  const inherited = chain.slice(1);
+  if (inherited.some(config => ['include','exclude','files'].some(key => Object.hasOwn(config,key)))) return false;
+  if (Object.hasOwn(leaf,'exclude') || Object.hasOwn(leaf,'files')) return false;
+  if (!Array.isArray(leaf.include) || leaf.include.length !== 1 || leaf.include[0] !== 'src/**/*.ts') return false;
+  const options = {};
+  for (const config of [...chain].reverse()) Object.assign(options,config.compilerOptions ?? {});
+  return leaf.compilerOptions?.rootDir === 'src' && leaf.compilerOptions?.outDir === 'dist'
+    && leaf.compilerOptions?.composite === true && options.noEmit !== true && options.emitDeclarationOnly !== true
+    && options.outFile === undefined;
+}
+
+function buildStepTargetsWorkspace(repoRoot, workspaceDir, step) {
+  if (step.kind !== 'prepare' || step.command !== 'tsc' || !['-b','--build'].includes(step.args[0])) return false;
+  const projectArgs = step.args.slice(1);
+  if (projectArgs.some(argument => argument.startsWith('-') && argument !== '--force')) return false;
+  const projects = projectArgs.filter(argument => !argument.startsWith('-'));
+  if (projects.length === 0) return false;
+  const workspaceRoot = resolve(repoRoot,workspaceDir);
+  const expected = [workspaceRoot,resolve(workspaceRoot,'tsconfig.json')];
+  const samePath = (left,right) => process.platform === 'win32'
+    ? resolve(left).toLowerCase() === resolve(right).toLowerCase() : resolve(left) === resolve(right);
+  return projects.some(project => expected.some(target => samePath(resolve(step.cwd,project),target)));
+}
+
+// A convention-selected TypeScript source under an emitting workspace executes
+// its dist counterpart. Only reuse a leading, explicit workspace test-script
+// tsc -b prefix that names this workspace and matches the narrowly supported
+// src/**/*.ts -> dist mapping. Force output despite stale mtimes/tsbuildinfo;
+// unsupported/noEmit mappings fail closed rather than trusting an old dist.
+function workspaceCompilerPrepareSteps(repoRoot, workspaces, workspaceDir, sourcePath) {
+  if (!supportedWorkspaceTsConfig(repoRoot,workspaceDir,sourcePath)) return [];
+  const workspace = workspaces.byDir.get(workspaceDir);
+  if (!workspace?.name || typeof workspace.scripts.test !== 'string') return [];
+  const testPlan = planScript(repoRoot, workspaces, 'test', {workspace:workspace.name});
+  const firstTest = testPlan.findIndex(step => step.kind === 'test');
+  if (firstTest <= 0) return [];
+  const prefix = testPlan.slice(0, firstTest);
+  if (prefix.some(step => !buildStepTargetsWorkspace(repoRoot,workspaceDir,step))) return [];
+  return prefix.map(step => {
+    const args = [...step.args];
+    if (!args.includes('--force')) args.splice(1, 0, '--force');
+    const forced = {...step,args};
+    return {...forced,key:operationKey(forced)};
+  });
+}
+
+/** Labels describe actual execution inputs, never a required registration row. */
+export function selectCheckTier(name, sources, requirements) {
+  const paths = sources.map(path => path.replaceAll('\\','/'));
+  if (paths.some(path => path.includes('/e2e/')) || /(?:renderer-(?:e2e|playwright)|test:e2e|playwright)/u.test(name)) return 'e2e';
+  // Installed/all update suites run real owned NSIS installers, so they are release checks.
+  if (/^(?:test:)?(?:release|installer|portable-packaging|cross-machine|update:(?:installed|all)$)/u.test(name)
+    || paths.some(path => /\/(?:verify-(?:release|installer|portable-packaging|cross-machine)|run(?:Release|Installer))[^/]*\./u.test(path))) return 'release';
+  if (paths.some(path => /\/scripts\/(?:check\.fixture|verify-(?:verify-entrypoint|scheduling)-fixtures)\.mjs$/u.test(path))) return 'governance';
+  if (requirements.includes('packaged-app')) return 'release';
+  if (requirements.includes('native-env')) return 'native';
+  if (requirements.includes('dotnet')) return 'synthetic';
+  return 'unit';
+}
+
+function testFiles(root) {
+  const files = [];
+  const walk = (directory) => {
+    if (!existsSync(directory)) return;
+    for (const item of readdirSync(directory,{withFileTypes:true})) {
+      if (['node_modules','dist','.git','output','bin','obj','.local-validation'].includes(item.name)) continue;
+      const path = resolve(directory,item.name);
+      if (item.isDirectory()) walk(path);
+      else if (/\.(?:fixture|test)\.(?:mjs|tsx?)$/u.test(item.name) || /^verify-.*fixtures\.mjs$/u.test(item.name)
+        || /^run.*Smoke\.ts$/u.test(item.name)) files.push(path);
+    }
+  };
+  // compare/ holds the comparison oracle; its own tests run in the gate like any other.
+  for (const dir of ['scripts','packages','apps','compare']) walk(resolve(root,dir));
+  return files.sort();
+}
+
+/** Keep explicit non-test operations; discover new convention-based tests. */
+export function discoverChecks(repoRoot, workspaces) {
+  const suites = new Map();
+  const analyze = file => {let result = workspaces.analysisCache.get(file); if (!result) {result = analyzeEntry(file);workspaces.analysisCache.set(file,result);} return result;};
+  const covered = new Set();
+  for (const [name,command] of Object.entries(workspaces.rootScripts)) {
+    if (name !== 'typecheck' && !name.startsWith('test') && !name.startsWith('bridge:verify:')) continue;
+    const entries = resolveScriptEntries(repoRoot,workspaces,name);
+    // Aggregate reachability is not execution evidence: a failing && prefix can
+    // leave every later check unexecuted. Only a single independently runnable
+    // test can suppress convention discovery.
+    const steps = planScript(repoRoot,workspaces,name);
+    if (entries.entryFiles.length === 1 && steps.filter(step => step.kind === 'test').length === 1) {
+      entries.entryFiles.forEach(file => covered.add(file));
+    }
+    const requirements = new Set(entries.entryFiles.flatMap(file => analyze(file).requirements));
+    suites.set(name,{scriptName:name,tier:selectCheckTier(name,entries.entryFiles,[...requirements]),
+      requirements:[...requirements],steps,origin:'npm',command});
+  }
+  // Workspace aliases are independently selectable, even when a root
+  // aggregate statically reaches them. Operation-key caching prevents reruns
+  // only after that exact operation actually completed.
+  for (const [workspaceName, workspace] of workspaces.byName) {
+    for (const name of Object.keys(workspace.scripts).filter(name => name.startsWith('test'))) {
+      const scriptName = `workspace:${workspaceName}:${name}`;
+      const virtual = {...workspaces,rootScripts:{...workspaces.rootScripts,[scriptName]:`npm run ${name} -w ${workspaceName}`}};
+      const entries = resolveScriptEntries(repoRoot,virtual,scriptName);
+      const steps = planScript(repoRoot,workspaces,name,{workspace:workspaceName});
+      const requirements = new Set(entries.entryFiles.flatMap(file => analyze(file).requirements));
+      suites.set(scriptName,{scriptName,tier:selectCheckTier(name,entries.entryFiles,[...requirements]),requirements:[...requirements],steps,origin:'workspace',command:workspace.scripts[name]});
+      if (entries.entryFiles.length === 1 && steps.filter(step => step.kind === 'test').length === 1) entries.entryFiles.forEach(file => covered.add(file));
+    }
+  }
+  for (const file of testFiles(repoRoot)) {
+    if (covered.has(file)) continue;
+    const path = relative(repoRoot,file).replaceAll('\\','/');
+    const analysis = analyze(file);
+    const name = `file:${path}`;
+    const smokeRunner = desktopSmokeRunners.get(path);
+    if (smokeRunner && existsSync(resolve(repoRoot, smokeRunner))) {
+      const operation = {cwd:repoRoot,command:'node',args:[smokeRunner],kind:'test',env:{},owner:name};
+      suites.set(name,{scriptName:name,tier:selectCheckTier(name,[file],analysis.requirements),
+        requirements:analysis.requirements,steps:[{...operation,key:operationKey(operation)}],origin:'file',source:path});
+      continue;
+    }
+    // Desktop TypeScript is noEmit. Its source runner bundles every main and
+    // renderer test (including TSX) and reports the actual assertions. Keep
+    // each file selectable while reusing that identical completed operation.
+    if (/^apps\/desktop\/src\/(?:main\/|renderer\/src\/).*\.test\.tsx?$/u.test(path)
+      && existsSync(resolve(repoRoot, 'scripts/run-renderer-unit-tests.mjs'))) {
+      const operation = {cwd:resolve(repoRoot),command:'node',args:['scripts/run-renderer-unit-tests.mjs'],kind:'test',validation:true,env:{},owner:name};
+      suites.set(name,{scriptName:name,tier:selectCheckTier(name,[file],analysis.requirements),
+        requirements:analysis.requirements,steps:[{...operation,key:operationKey(operation)}],origin:'file',source:path});
+      continue;
+    }
+    const workspaceDir = file.endsWith('.ts') ? [...workspaces.byDir.keys()].find(dir => path.startsWith(`${dir}/src/`)) : undefined;
+    const executionPath = workspaceDir ? path.replace(`${workspaceDir}/src/`,`${workspaceDir}/dist/`).replace(/\.ts$/u,'.js') : path;
+    const isNodeTest = /\.(?:fixture|test)\./u.test(path);
+    const args = [...(file.endsWith('.ts') && !workspaceDir ? ['--experimental-strip-types']:[]),...(isNodeTest ? ['--test']:[]),executionPath];
+    const operation = {cwd:repoRoot,command:'node',args,kind:'test',env:{},owner:name};
+    const prepareSteps = workspaceDir ? workspaceCompilerPrepareSteps(repoRoot, workspaces, workspaceDir, path) : [];
+    suites.set(name,{scriptName:name,tier:selectCheckTier(name,[file],analysis.requirements),
+      requirements:analysis.requirements,steps:[...prepareSteps,{...operation,key:operationKey(operation)}],origin:'file',source:path,
+      ...(workspaceDir ? {buildInput:workspaceDir}: {})});
+  }
+  return suites;
+}

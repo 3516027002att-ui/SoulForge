@@ -592,11 +592,11 @@ export async function runAuditSf07NativeTests(): Promise<void> {
 
   const envRoot = process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
     ?? process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim()
-    ?? 'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro';
+    ?? '';
   const corpusRoot = existsSync(join(envRoot, 'mods')) ? join(envRoot, 'mods') : envRoot;
   const sourceBnd = join(corpusRoot, 'param', 'gameparam', 'gameparam.parambnd.dcx');
 
-  if (!existsSync(sourceBnd)) {
+  if (!envRoot || !existsSync(sourceBnd)) {
     console.log(JSON.stringify({
       ok: true,
       status: 'skipped',

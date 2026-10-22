@@ -1,0 +1,48 @@
+
+/* conversation viewport：水平 padding 16px，消息之间 16px（§12.2.1）。
+   硬约束 17（分页/虚拟化）由 AGENT-60C 的 AgentMessageList 承担。 */
+.agent-conversation {
+  grid-area: conversation;
+  overflow-y: auto; min-height: 0;
+  overscroll-behavior-y: contain;
+  display: flex; flex-direction: column; gap: 16px;
+  padding: 0 16px;
+}
+
+/* §12.2.1 + §12.4 固定欢迎态：垂直居中并下移约 24px */
+.agent-welcome {
+  width: min(100% - 32px, var(--agent-welcome-max-width));
+  max-height: 100%;
+  margin: auto;
+  overflow: auto;
+  text-align: center;
+  color: var(--ink-1);
+}
+.agent-welcome__icon {
+  width: 36px; height: 36px; margin: 0 auto 10px;
+  display: grid; place-items: center;
+  border-radius: 4px;
+  background: var(--forge-2);
+  color: var(--ember-text); font-size: 18px; line-height: 1;
+}
+.agent-welcome h2 { color: var(--ink-0); font-size: 18px; font-weight: 600; }
+.agent-welcome p { margin-top: 8px; font-size: 14px; color: var(--ink-3); }
+.agent-welcome ul {
+  display: grid; gap: 8px; margin-top: 22px; padding: 0; list-style: none;
+  text-align: left; font-size: 14px; line-height: 1.8;
+}
+.agent-welcome li { position: relative; padding-left: 22px; line-height: 1.8; }
+.agent-welcome li::before { content: "✓"; position: absolute; left: 0; color: var(--ok); }
+.agent-message { padding: 6px 0; border: 0; background: transparent; font-size: 13px; line-height: 1.65; user-select: text; }
+.agent-message--user {
+  margin: 4px 0;
+  padding: 8px 0 8px 12px;
+  border: 0;
+  border-left: 2px solid var(--line-strong);
+  border-radius: 0;
+  background: transparent;
+}
+.agent-message--agent { background: transparent; border: 0; }
+.agent-message--system { display: flex; align-items: center; gap: 8px; color: var(--ink-2); background: transparent; border: 0; }
+.agent-message__meta { margin-bottom: 3px; color: var(--ink-3); font: 10px var(--font-mono); }
+.agent-message__actions { margin: 6px 0 0; padding-left: 17px; color: var(--ink-1); }

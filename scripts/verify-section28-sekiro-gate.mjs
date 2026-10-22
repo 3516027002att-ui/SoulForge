@@ -8,6 +8,7 @@ import { access, mkdir, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { classifyOutcome, OUTCOME } from './verify/runner.mjs';
 import {
   createProcessCancellation,
   processSucceeded,
@@ -148,11 +149,16 @@ const cancellation = createProcessCancellation();
 try {
   for (const entry of smokes) {
     const result = await runNpm(entry.args, cancellation.signal, entry.env ?? {});
-    const ok = processSucceeded(result);
-    if (!ok) failed = true;
+    const outcome = classifyOutcome(result.code, result.stdout, result.stderr, entry.name);
+    const processOk = processSucceeded(result);
+    const ok = processOk && outcome.outcome === OUTCOME.PASSED;
+    if (!processOk || outcome.outcome === OUTCOME.FAILED) failed = true;
     report.steps.push({
       name: entry.name,
       ok,
+      status: outcome.outcome,
+      skipped: outcome.outcome === OUTCOME.SKIPPED,
+      skippedLegs: outcome.skippedLegs,
       code: result.code,
       timedOut: result.timedOut,
       cancelled: result.cancelled,
@@ -172,7 +178,9 @@ report.status = failed ? 'failed' : 'partial';
 report.ok = !failed;
 report.message = failed
   ? 'section-28 前置 native smoke 或真实 me3 启动会话失败。'
-  : 'section-28 前置 native smoke 与真实 me3 启动会话（suspend）通过；本机真实验证不替代打包游戏验收，不得声明 section-28 全绿。';
+  : report.steps.some(step => step.status === OUTCOME.SKIPPED || step.status === OUTCOME.PARTIAL)
+    ? 'section-28 有未执行或部分执行的验证阶段；真实游戏启动/回滚验收未完整验证。'
+    : 'section-28 前置 native smoke 与真实 me3 启动会话（suspend）通过；本机真实验证不替代打包游戏验收，不得声明 section-28 全绿。';
 
 const outPath = join(scratch, 'section28-sekiro-gate.json');
 await writeFile(outPath, JSON.stringify(report, null, 2), 'utf8');

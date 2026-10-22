@@ -13,39 +13,11 @@
  * passed / skipped / partial / failed 四态，并要求调用方对 skipped 与
  * partial 做出选择（--require-executed 时它们算失败）。
  */
-import { spawn, spawnSync } from 'node:child_process';
-import { delimiter, dirname, resolve } from 'node:path';
-import { SILENT_ON_SUCCESS } from './tiers.mjs';
-
-/**
- * 超时时杀掉整棵进程树，而不只是直接子进程。
- *
- * child.kill() 只终止我们 spawn 的那个 npm 壳。实测后果：runNativeFlverSmoke
- * 挂死时，被杀的是 npm，而它下面的 node 与两个 SoulForge.Bridge 孙进程继续存活
- * 四小时，锁住 bin 下的 SoulForge.Bridge.exe，使之后每一次 bridge:build 都失败。
- * 超时清理不彻底，等于把一次超时变成后续所有套件的连环失败。
- *
- * Windows 用 taskkill /T（按树），POSIX 用负 PID 杀进程组。两者都尽力而为：
- * 失败时退回直接 kill，不让清理本身抛错掩盖真正的超时结论。
- */
-function killTree(child) {
-  const pid = child.pid;
-  if (pid === undefined) return;
-  try {
-    if (process.platform === 'win32') {
-      spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-    } else {
-      process.kill(-pid, 'SIGKILL');
-    }
-  } catch {
-    // 树杀失败时至少终止直接子进程。
-  }
-  try {
-    child.kill('SIGKILL');
-  } catch {
-    // 已退出。
-  }
-}
+import { delimiter, resolve } from 'node:path';
+import { runOwnedTestOperation, resolveTestNpmCli } from '../owned-test-environment.mjs';
+// TypeScript's successful checker is intentionally silent. Test entries must
+// still provide execution evidence; there is no per-suite registration table.
+const SILENT_ON_SUCCESS = Object.freeze({typecheck:true});
 
 export const OUTCOME = Object.freeze({
   PASSED: 'passed',
@@ -191,6 +163,63 @@ export function detectSkipSignals(stdout, stderr = '') {
   const skippedLegs = [];
   let wholeSkipped = false;
 
+  // Node's TAP and spec reporters use stable terminal counts rather than JSON.
+  // Require a complete summary block so ordinary prose mentioning a skip or
+  // a fixture's quoted '# tests' text cannot masquerade as execution evidence.
+  const nodeSummaries=[];
+  for(const source of [stdout,stderr]){
+    let summary=null;
+    for(const line of (source??'').replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu,'').split(/\r?\n/u)){
+      const match=/^(?:#\s*|ℹ\s+)(tests|pass|fail|cancelled|skipped|todo)\s+(\d+)\s*$/u.exec(line);
+      if(!match)continue;
+      if(match[1]==='tests')summary={tests:Number(match[2])};
+      else if(summary)summary[match[1]]=Number(match[2]);
+      if(summary&&['tests','pass','fail','cancelled','skipped','todo'].every(key=>Number.isSafeInteger(summary[key]))){nodeSummaries.push(summary);summary=null;}
+    }
+  }
+  if(nodeSummaries.length){
+    const executed=nodeSummaries.reduce((sum,item)=>sum+item.pass+item.fail+item.cancelled,0);
+    const skipped=nodeSummaries.reduce((sum,item)=>sum+item.skipped+item.todo,0);
+    if(executed===0){wholeSkipped=true;skippedLegs.push('node-test:no-executed-tests');}
+    else if(skipped>0)skippedLegs.push(`node-test:${skipped}-unverified-tests`);
+  }
+
+  // Playwright's list reporter emits counts rather than JSON. Bind terminal
+  // counts to its announced test total; isolated skip prose is not evidence.
+  const playwrightSummaries = [];
+  let incompletePlaywright = false;
+  for (const source of [stdout, stderr]) {
+    let summary = null;
+    const finishSummary = () => {
+      if (!summary) return;
+      const counted = Object.values(summary.counts).reduce((sum, value) => sum + value, 0);
+      if (!summary.invalid && Number.isSafeInteger(summary.total) && counted === summary.total) playwrightSummaries.push(summary.counts);
+      else incompletePlaywright = true;
+      summary = null;
+    };
+    for (const line of (source ?? '').replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '').split(/\r?\n/u)) {
+      const start = /^Running (\d+) tests? using \d+ workers?(?:, shard \d+ of \d+)?$/u.exec(line);
+      if (start) {
+        finishSummary();
+        summary = {total:Number(start[1]), counts:{}};
+        continue;
+      }
+      const count = /^  (\d+) (passed|skipped|did not run|failed|flaky|interrupted)(?: \([^\r\n]+\))?\s*$/u.exec(line);
+      if (!summary || !count) continue;
+      if (Object.hasOwn(summary.counts, count[2]) || !Number.isSafeInteger(Number(count[1]))) summary.invalid = true;
+      else summary.counts[count[2]] = Number(count[1]);
+    }
+    finishSummary();
+  }
+  if (playwrightSummaries.length || incompletePlaywright) {
+    const executed = playwrightSummaries.reduce((sum, counts) => sum + (counts.passed ?? 0)
+      + (counts.failed ?? 0) + (counts.flaky ?? 0) + (counts.interrupted ?? 0), 0);
+    const skipped = playwrightSummaries.reduce((sum, counts) => sum + (counts.skipped ?? 0) + (counts['did not run'] ?? 0), 0);
+    if (executed === 0) { wholeSkipped = true; skippedLegs.push('playwright:no-executed-tests'); }
+    else if (skipped > 0) skippedLegs.push(`playwright:${skipped}-unverified-tests`);
+    if (incompletePlaywright) skippedLegs.push('playwright:incomplete-summary');
+  }
+
   for (const source of [stdout, stderr]) {
     if (typeof source !== 'string' || source.length === 0) continue;
     for (const candidate of extractTopLevelJsonValues(source)) {
@@ -272,119 +301,91 @@ export function classifyOutcome(exitCode, stdout, stderr = '', scriptName = '') 
  * @param {number} options.timeoutMs
  * @param {boolean} [options.injectEnv] 是否经 env wrapper（默认 true）。
  */
-export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, operation, env = {}, args: extraArgs = [] }) {
-  return new Promise((resolvePromise) => {
-    const npmArgs = ['run', scriptName, '--silent', ...(extraArgs.length ? ['--', ...extraArgs] : [])];
-    // 始终用 process.execPath 执行 JS 入口，不依赖 shell 解析 `npm`：
-    // Windows 下 npm 是 .cmd，spawn 不带 shell 时无法直接执行。
-    const npmCli = process.env.npm_execpath?.trim()
-      || resolve(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
-    const directArgs = !operation ? [npmCli, ...npmArgs]
-      : operation.command === 'npm' ? [npmCli, ...operation.args]
-        : operation.command === 'tsc'
-          ? [resolve(repoRoot, 'node_modules/typescript/bin/tsc'), ...operation.args]
-          : operation.args;
-    const args = injectEnv
-      ? [resolve(repoRoot, 'scripts/with-local-has-game-env.mjs'), process.execPath, ...directArgs]
-      : directArgs;
-    const cwd = operation?.cwd ?? repoRoot;
-    const childEnv = { ...process.env, ...env, ...operation?.env };
-    // npm normally supplies local binaries on PATH. Expanded node commands may
-    // invoke them too, so retain that workspace/root lookup without using a shell.
-    const pathKey = Object.keys(childEnv).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
-    childEnv[pathKey] = [resolve(cwd, 'node_modules/.bin'), resolve(repoRoot, 'node_modules/.bin'), childEnv[pathKey] ?? ''].join(delimiter);
-    childEnv.npm_execpath = npmCli;
-
-    const child = spawn(process.execPath, args, {
-      cwd,
-      env: childEnv,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-      detached: process.platform !== 'win32'
-    });
-
-    let stdout = '';
-    let stderr = '';
-    let timedOut = false;
-    const startedAt = Date.now();
-    const timer = setTimeout(() => {
-      timedOut = true;
-      killTree(child);
-    }, timeoutMs);
-
-    child.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
-
-    child.once('error', (error) => {
-      clearTimeout(timer);
-      resolvePromise({
-        scriptName,
-        outcome: OUTCOME.FAILED,
-        exitCode: null,
-        durationMs: Date.now() - startedAt,
-        skippedLegs: [],
-        spawnError: error instanceof Error ? error.message : String(error),
-        stdout,
-        stderr
-      });
-    });
-
-    child.once('close', (exitCode) => {
-      clearTimeout(timer);
-      const { outcome, skippedLegs } = timedOut
-        ? { outcome: OUTCOME.FAILED, skippedLegs: [] }
-        : classifyOutcome(exitCode, stdout, stderr, operation?.command === 'tsc' ? 'typecheck' : scriptName);
-      resolvePromise({
-        scriptName,
-        outcome,
-        exitCode,
-        durationMs: Date.now() - startedAt,
-        skippedLegs,
-        timedOut,
-        stdout,
-        stderr
-      });
-    });
-  });
+export async function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true, operation, env = {}, args: extraArgs = [], signal }) {
+  const startedAt = Date.now();
+  const childEnv = { ...process.env, ...env, ...operation?.env };
+  let npmCli;
+  try { npmCli = resolveTestNpmCli(childEnv); }
+  catch (error) { return {scriptName,outcome:OUTCOME.FAILED,exitCode:null,durationMs:Date.now()-startedAt,
+    skippedLegs:[],stdout:'',stderr:error.message,spawnError:error.message}; }
+  const npmArgs = ['run', scriptName, '--silent', ...(extraArgs.length ? ['--', ...extraArgs] : [])];
+  const directArgs = !operation ? [npmCli, ...npmArgs]
+    : operation.command === 'npm' ? [npmCli, ...operation.args]
+      : operation.command === 'tsc'
+        ? [resolve(repoRoot, 'node_modules/typescript/bin/tsc'), ...operation.args]
+        : operation.args;
+  const args = injectEnv
+    ? [resolve(repoRoot, 'scripts/with-local-has-game-env.mjs'), process.execPath, ...directArgs]
+    : directArgs;
+  const cwd = operation?.cwd ?? repoRoot;
+  // Independent checks must not inherit node:test's private reporter channel.
+  delete childEnv.NODE_TEST_CONTEXT;
+  const pathKey = Object.keys(childEnv).find(key => key.toLowerCase() === 'path') ?? 'PATH';
+  childEnv[pathKey] = [resolve(cwd, 'node_modules/.bin'), resolve(repoRoot, 'node_modules/.bin'), childEnv[pathKey] ?? ''].join(delimiter);
+  childEnv.npm_execpath = npmCli;
+  const result = await runOwnedTestOperation({ command: process.execPath, args, cwd,
+    env: childEnv, timeoutMs, signal });
+  const { code: exitCode, stdout, stderr, timedOut, cancelled, cleanupError, outputError } = result;
+  const { outcome, skippedLegs } = timedOut || cancelled || cleanupError || outputError || result.spawnError
+    ? { outcome: OUTCOME.FAILED, skippedLegs: [] }
+    : operation?.validation === false
+      ? { outcome: exitCode === 0 ? OUTCOME.PASSED : OUTCOME.FAILED, skippedLegs: [] }
+      : classifyOutcome(exitCode, stdout, stderr, operation?.command === 'tsc' ? 'typecheck' : scriptName);
+  return { scriptName, outcome, exitCode, durationMs: Date.now() - startedAt, skippedLegs,
+    timedOut, cancelled, stdout, stderr,
+    ...(result.spawnError ? { spawnError: result.spawnError } : {}),
+    ...(cleanupError ? { cleanupError, childExitCode: result.childExitCode } : {}),
+    ...(outputError ? { outputError } : {}),
+    ...(result.temporaryOwnership ? { temporaryOwnership: result.temporaryOwnership } : {}) };
 }
 
 // Cache only successful operations within this invocation. A build/generator is
 // a barrier. Failed/skipped work is never promoted by reuse, and && still stops
 // the remaining operations of that suite on a nonzero exit or timeout.
-export async function runPlannedSuite({ repoRoot, entry, timeoutMs, cache, injectEnv = true, execute = runSuite }) {
+export async function runPlannedSuite({ repoRoot, entry, timeoutMs, cache, injectEnv = true, execute = runSuite, signal }) {
   const startedAt = Date.now();
   const steps = [];
   const outputs = [];
-  for (const operation of entry.steps) {
+  const cancelledTail = index => {
+    for (const operation of entry.steps.slice(index)) steps.push({ key:operation.key,command:operation.command,args:operation.args,cwd:operation.cwd,
+      outcome:OUTCOME.NOT_ATTEMPTED,execution:'not_run',reason:'cancelled',durationMs:0 });
+  };
+  for (let index = 0; index < entry.steps.length; index++) {
+    if (signal?.aborted) { cache.clear(); cancelledTail(index); break; }
+    const operation = entry.steps[index];
     if (operation.kind === 'barrier') cache.clear();
     const cached = cache.get(operation.key);
     const remaining = timeoutMs - (Date.now() - startedAt);
     const result = cached ?? (remaining <= 0
       ? { outcome: OUTCOME.FAILED, exitCode: null, durationMs: 0, skippedLegs: [], timedOut: true, stdout: '', stderr: 'Suite timeout budget exhausted.' }
-      : await execute({ repoRoot, scriptName: entry.scriptName, timeoutMs: remaining, injectEnv, operation }));
-    if (!cached && result.outcome === OUTCOME.PASSED && operation.kind !== 'barrier') {
+      : await execute({ repoRoot, scriptName: entry.scriptName, timeoutMs: remaining, injectEnv, operation, signal }));
+    if (!signal?.aborted && !cached && result.outcome === OUTCOME.PASSED && operation.kind !== 'barrier') {
       cache.set(operation.key, { ...result, reusedFrom: entry.scriptName });
     }
     steps.push({ key: operation.key, command: operation.command, args: operation.args, cwd: operation.cwd,
       outcome: result.outcome, execution: cached ? 'reused' : 'executed',
+      validation: operation.validation ?? (operation.kind !== 'prepare'),
       durationMs: cached ? 0 : result.durationMs, ...(cached ? { reusedFrom: cached.reusedFrom } : {}) });
     outputs.push(result);
+    if (signal?.aborted || result.cancelled) { cache.clear(); cancelledTail(index + 1); break; }
     if (result.exitCode !== 0 || result.timedOut) break;
   }
   const failed = outputs.find((r) => r.outcome === OUTCOME.FAILED);
-  const skipped = outputs.filter((r) => r.outcome === OUTCOME.SKIPPED);
-  const partial = outputs.some((r) => r.outcome === OUTCOME.PARTIAL);
-  const testOutputs = outputs.filter((_, i) => entry.steps[i].kind !== 'prepare');
+  const testOutputs = outputs.filter((_, i) => entry.steps[i].validation ?? (entry.steps[i].kind !== 'prepare'));
+  const skipped = testOutputs.filter((r) => r.outcome === OUTCOME.SKIPPED);
+  const partial = testOutputs.some((r) => r.outcome === OUTCOME.PARTIAL);
   const allSkipped = testOutputs.length > 0 && testOutputs.every((r) => r.outcome === OUTCOME.SKIPPED);
+  const cancelled = signal?.aborted || outputs.some(result => result.cancelled);
   return {
     scriptName: entry.scriptName,
-    outcome: failed ? OUTCOME.FAILED : allSkipped ? OUTCOME.SKIPPED
+    outcome: failed ? OUTCOME.FAILED : cancelled ? OUTCOME.NOT_ATTEMPTED : allSkipped ? OUTCOME.SKIPPED
       : skipped.length || partial ? OUTCOME.PARTIAL : OUTCOME.PASSED,
     exitCode: failed ? failed.exitCode : 0,
     durationMs: Date.now() - startedAt,
-    skippedLegs: outputs.flatMap((r, i) => r.outcome === OUTCOME.SKIPPED || r.outcome === OUTCOME.PARTIAL
+    skippedLegs: outputs.flatMap((r, i) => steps[i].validation && (r.outcome === OUTCOME.SKIPPED || r.outcome === OUTCOME.PARTIAL)
       ? [`${steps[i].key}:${r.skippedLegs.join(',') || r.outcome}`] : []),
     ...(failed?.timedOut ? { timedOut: true } : {}),
+    ...(cancelled ? { cancelled:true,reason:'cancelled' } : {}),
     ...(failed?.spawnError ? { spawnError: failed.spawnError } : {}),
     stdout: outputs.map((r) => r.stdout).join('\n'), stderr: outputs.map((r) => r.stderr).join('\n'), steps
   };

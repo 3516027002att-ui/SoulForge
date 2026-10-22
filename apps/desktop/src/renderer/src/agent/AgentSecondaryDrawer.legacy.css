@@ -1,0 +1,13 @@
+
+/* 模型服务管理抽屉：由 header 齿轮打开，不占用会话滚动区 */
+.agent-drawer {
+  position: absolute; inset: 0; z-index: 20;
+  display: flex; flex-direction: column;
+  background: var(--forge-1); box-shadow: var(--shadow-float);
+}
+.agent-drawer__header {
+  flex: none; display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 12px; border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+}
+.agent-drawer > .panel { flex: 1; overflow-y: auto; min-height: 0; padding: 12px; display: flex; flex-direction: column; gap: 10px; }

@@ -154,8 +154,9 @@ function makeAdapter(toolCalls, rounds = 1) {
       if (n <= rounds) {
         return {
           ok: true,
-          message: { role: 'assistant', content: '', toolCalls },
+          message: { role: 'assistant', content: '', toolCalls:toolCalls.map(call=>({...call,id:`${call.id}-round-${n}`})) },
           finishReason: 'tool_use',
+          usage:{inputTokens:1,outputTokens:1},
           diagnostics: []
         };
       }
@@ -163,6 +164,7 @@ function makeAdapter(toolCalls, rounds = 1) {
         ok: true,
         message: { role: 'assistant', content: 'done', toolCalls: [] },
         finishReason: 'stop',
+        usage:{inputTokens:1,outputTokens:1},
         diagnostics: []
       };
     }
@@ -286,7 +288,9 @@ async function runOnce(options) {
   const productionAsked = [];
   const productionExecuted = [];
   const gatedNames = new Set(gatedProductionTools.map((tool) => tool.name));
-  const productionCalls = bridge.tools.slice(0, 6).map((tool, index) => ({
+  const productionSamples = [bridge.tools.find(tool=>tool.permissionLevel==='read'),bridge.tools.find(tool=>tool.permissionLevel==='commit'),bridge.tools.find(tool=>tool.permissionLevel==='rollback')].filter(Boolean);
+  if(!productionSamples.some(tool=>DEFAULT_APPROVAL_REQUIRED_LEVELS.includes(tool.permissionLevel)))throw new Error('Production approval probe requires a real gated sample.');
+  const productionCalls = productionSamples.map((tool, index) => ({
     id: `p${index}`,
     name: tool.name,
     argumentsJson: '{"probe":"gate"}'
@@ -438,7 +442,7 @@ for (const [decision, shouldExecuteSecond] of [['always', true], ['never', false
     });
   }
   const resolved = events.filter((event) => event.type === 'approval-resolved');
-  if (resolved.length >= 2 && resolved[1]?.fromMemory !== true) {
+  if (resolved.length !== 2 || resolved[1]?.fromMemory !== true) {
     findings.push({
       code: 'MEMORY_HIT_NOT_MARKED',
       decision,
@@ -504,13 +508,9 @@ for (const [decision, shouldExecuteSecond] of [['always', true], ['never', false
         + '这条路径必须 fail-closed,否则「审批服务挂了」会变成「全部自动批准」。'
     });
   }
-  const decision = result.audit?.approvals?.[0]?.decision;
-  if (decision !== 'reject') {
-    findings.push({
-      code: 'APPROVAL_FAILURE_NOT_AUDITED_AS_REJECT',
-      decision: decision ?? null,
-      message: `审批通道异常应记为 reject,实际记为 ${decision ?? '(无)'}。`
-    });
+  if(result.finishReason!=='error'||!result.diagnostics.some(entry=>entry.code==='AGENT_APPROVAL_REQUEST_FAILED')){
+    findings.push({code:'APPROVAL_FAILURE_NOT_DIAGNOSED',finishReason:result.finishReason,diagnostics:result.diagnostics,
+      message:'An unavailable approval channel must fail closed and retain its actual failure, without inventing a user rejection.'});
   }
 }
 
@@ -604,29 +604,13 @@ for (const [decision, shouldExecuteSecond] of [['always', true], ['never', false
   }
 }
 
-// 判据⑪:不传 requestApproval 时行为不变。
+// Missing approval channel waits with the concrete proposal before any turn dispatch.
 {
-  const { asked, executed, result } = await runOnce({});
-  if (asked.length !== 0) {
-    findings.push({
-      code: 'APPROVAL_ASKED_WITHOUT_CALLBACK',
-      message: '未提供 requestApproval 却发生了审批询问。'
-    });
-  }
-  if (!executed.includes('rollback_operation') || !executed.includes('search_events')) {
-    findings.push({
-      code: 'NO_CALLBACK_SILENTLY_BLOCKED',
-      executed,
-      message: '未提供 requestApproval 时不得默默拦住工具 —— 那会让忘记接线的宿主'
-        + '表现为「agent 什么都做不了」,且没有任何错误码说明原因。'
-    });
-  }
-  if (result.audit?.approvals !== undefined) {
-    findings.push({
-      code: 'EMPTY_APPROVAL_AUDIT_PRESENT',
-      message: '未发生审批时 audit.approvals 应缺席而不是空数组,'
-        + '否则无法区分「没有审批层」与「审批层跑过但零条目」。'
-    });
+  const { asked, executed, events, result } = await runOnce({});
+  const pending=events.find(event=>event.type==='approval-requested');
+  if(asked.length!==0||executed.length!==0||result.finishReason!=='waiting'||pending?.toolName!=='rollback_operation'||!pending.argumentsJson){
+    findings.push({code:'NO_CHANNEL_APPROVAL_WAIT_INVALID',executed,finishReason:result.finishReason,pending,
+      message:'Required approval without a channel must retain a concrete proposal and dispatch no domain calls.'});
   }
 }
 
@@ -662,7 +646,7 @@ report({
   gate: LABEL,
   status: 'passed',
   message: '审批层十三条判据通过:写类工具必经审批、拒绝真的阻止执行、'
-    + '通道异常按拒绝处理、会话记忆不跨 run、审批不越过模式门、timed_out 与 abort 各有独立语义、'
+    + '通道异常失败关闭且保留原因、会话记忆不跨 run、审批不越过模式门、timed_out 与 abort 各有独立语义、'
     + '且分级建立在生产 bridge 真实投影的 permissionLevel 上。',
   defaultLevels: [...DEFAULT_APPROVAL_REQUIRED_LEVELS],
   nonClaim: '本门禁只观测 agent loop 层的审批行为(fake adapter,不发网络请求)。'

@@ -1,6 +1,8 @@
 /** T11-B/C 本地会话 host：同用户同工作区复用 CoreToolSession；协议校验与请求去重。 */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { CoreToolSession } from '../runtime/coreToolSession.js';
+import type { OperationLogStore } from '../patch/operationLog.js';
+import { queryOperationOutcome, receiptOperationIds, summarizeOperationOutcomes, trackRequestOperations, type SessionTransactionOutcome } from '../runtime/operationOutcome.js';
 
 export interface SessionRequest {
   id: string;
@@ -19,9 +21,11 @@ export interface SessionResult {
   ok: boolean;
   result?: unknown;
   error?: SessionError;
+  requestState?: SessionRequestState;
+  transaction?: SessionTransactionOutcome;
 }
 
-export type SessionRequestState = 'queued' | 'running' | 'cancel_requested' | 'cancelled' | 'completed' | 'failed';
+export type SessionRequestState = 'queued' | 'running' | 'cancel_requested' | 'cancelled' | 'completed' | 'failed' | 'unknown';
 
 export interface SessionRequestStatus {
   id: string;
@@ -31,6 +35,7 @@ export interface SessionRequestStatus {
   finishedAt?: number;
   cancelRequestedAt?: number;
   lateResultDiscarded?: boolean;
+  opIds?: string[];
   outcome?: SessionResult;
 }
 
@@ -53,7 +58,7 @@ interface RequestRecord extends SessionRequestStatus {
 }
 
 function payloadHash(request: SessionRequest): string {
-  return JSON.stringify({ tool: request.tool, args: request.args });
+  return createHash('sha256').update(JSON.stringify({ tool: request.tool, args: request.args })).digest('hex');
 }
 
 export class LocalSessionHost {
@@ -118,7 +123,30 @@ export class LocalSessionHost {
       if (signal.aborted) abortFromCaller();
       else signal.addEventListener('abort', abortFromCaller, { once: true });
     }
+    const operations = new Map<string, OperationLogStore>();
+    const transactionOutcome = async (result?: unknown): Promise<SessionTransactionOutcome> => {
+      for (const opId of receiptOperationIds(result)) {
+        if (!operations.has(opId)) operations.set(opId, this.coreSession.operationLog);
+      }
+      requestRecord.opIds = [...operations.keys()];
+      const outcomes = await Promise.all([...operations].map(([opId, store]) => queryOperationOutcome(store, opId)));
+      return summarizeOperationOutcomes(outcomes, requestRecord.startedAt === undefined);
+    };
     const task = this.tail.then(async () => {
+      // The prior host may have committed and lost its response. Use existing
+      // durable journal correlation before allowing the executor to run again.
+      let recovered: SessionResult | undefined;
+      try { recovered = await this.recoverRequestOutcome(request.id, hash); }
+      catch (error) {
+        recovered = { id: request.id, ok: false, requestState: 'unknown', transaction: summarizeOperationOutcomes([]),
+          error: sessionError(error instanceof Error && error.message === 'CLI_REQUEST_ID_CONFLICT' ? error.message : 'CLI_REQUEST_OUTCOME_UNKNOWN', '无法安全核对先前请求的持久结果，已拒绝重放。', false) };
+      }
+      if (recovered) {
+        requestRecord.state = 'unknown';
+        requestRecord.finishedAt = Date.now();
+        requestRecord.opIds = recovered.transaction?.operations.map(op => op.opId) ?? [];
+        return recovered;
+      }
       if (this.closed) {
         const cancelled = controller.signal.aborted || requestRecord.state === 'cancel_requested';
         requestRecord.state = cancelled ? 'cancelled' : 'failed';
@@ -126,7 +154,9 @@ export class LocalSessionHost {
         return {
           id: request.id,
           ok: false,
-          error: sessionError(cancelled ? 'CLI_REQUEST_CANCELLED' : 'CLI_SESSION_CLOSED', cancelled ? '请求已取消；本地会话随后关闭。' : '本地会话已关闭。', cancelled)
+          error: sessionError(cancelled ? 'CLI_REQUEST_CANCELLED' : 'CLI_SESSION_CLOSED', cancelled ? '请求已取消；本地会话随后关闭。' : '本地会话已关闭。', true),
+          requestState: requestRecord.state,
+          transaction: summarizeOperationOutcomes([], true)
         } satisfies SessionResult;
       }
       try {
@@ -136,39 +166,40 @@ export class LocalSessionHost {
           return {
             id: request.id,
             ok: false,
-            error: sessionError('CLI_REQUEST_CANCELLED', '本地会话请求已取消。', true)
+            error: sessionError('CLI_REQUEST_CANCELLED', '本地会话请求已取消。', true),
+            requestState: 'cancelled',
+            transaction: summarizeOperationOutcomes([], true)
           } satisfies SessionResult;
         }
         requestRecord.state = requestRecord.state === 'cancel_requested' ? 'cancel_requested' : 'running';
         requestRecord.startedAt = Date.now();
-        const result = await call(request.tool, request.args, controller.signal);
-        // An executor may not observe AbortSignal. A result that arrives after
-        // cancellation is never allowed to become a successful result for a
-        // later request with the same id.
+        const result = await trackRequestOperations((opId, store) => {
+          operations.set(opId, store);
+          requestRecord.opIds = [...operations.keys()];
+        }, () => call(request.tool, request.args, controller.signal), { sessionName: this.sessionName, id: request.id, payloadHash: hash });
+        const transaction = await transactionOutcome(result);
+        if (transaction.operations.some(op => op.state === 'committed')) this.writerCalls += 1;
         if (controller.signal.aborted || requestRecord.state === 'cancel_requested') {
           requestRecord.state = 'cancelled';
           requestRecord.finishedAt = Date.now();
-          requestRecord.lateResultDiscarded = true;
           return {
-            id: request.id,
-            ok: false,
-            error: sessionError('CLI_REQUEST_CANCELLED', '请求已取消；迟到的工具结果已丢弃。', true)
+            id: request.id, ok: false, result, requestState: 'cancelled', transaction,
+            error: sessionError('CLI_REQUEST_CANCELLED', '请求已取消；执行结果已保留，请先核对事务状态。', transaction.state === 'not_committed')
           } satisfies SessionResult;
         }
         requestRecord.state = 'completed';
         requestRecord.finishedAt = Date.now();
-        if (request.tool.startsWith('mutate_') || request.tool.startsWith('apply_') || request.tool.startsWith('commit_')) {
-          this.writerCalls += 1;
-        }
-        return { id: request.id, ok: true, result } satisfies SessionResult;
+        return { id: request.id, ok: true, result, requestState: 'completed', transaction } satisfies SessionResult;
       } catch (error) {
         const cancelled = controller.signal.aborted || requestRecord.state === 'cancel_requested';
         requestRecord.state = cancelled ? 'cancelled' : 'failed';
         requestRecord.finishedAt = Date.now();
-        if (cancelled) requestRecord.lateResultDiscarded = true;
+        const transaction = await transactionOutcome();
         return {
           id: request.id,
           ok: false,
+          requestState: requestRecord.state,
+          transaction,
           error: sessionError(
             cancelled
               ? 'CLI_REQUEST_CANCELLED'
@@ -176,7 +207,7 @@ export class LocalSessionHost {
               ? error.message.split(':', 1)[0]!
               : 'CLI_TOOL_FAILED',
             cancelled ? '请求已取消；执行方已返回终态。' : error instanceof Error ? error.message : String(error),
-            cancelled
+            transaction.state === 'not_committed'
           )
         } satisfies SessionResult;
       }
@@ -216,6 +247,31 @@ export class LocalSessionHost {
     if (!record) return undefined;
     const { payloadHash: _payloadHash, controller: _controller, promise: _promise, ...status } = record;
     return status;
+  }
+
+  async operationStatus(opId: string) {
+    return queryOperationOutcome(this.coreSession.operationLog, opId);
+  }
+
+  async resolveRequestStatus(requestId: string): Promise<SessionRequestStatus | undefined> {
+    const current = this.requestStatus(requestId);
+    if (current) return current;
+    const outcome = await this.recoverRequestOutcome(requestId);
+    if (!outcome) return undefined;
+    return { id: requestId, state: 'unknown', queuedAt: 0, opIds: outcome.transaction?.operations.map(op => op.opId) ?? [], outcome };
+  }
+
+  private async recoverRequestOutcome(requestId: string, expectedHash?: string): Promise<SessionResult | undefined> {
+    const store = this.coreSession.operationLog;
+    const records = await store.findTransactionsForRequest?.(this.sessionName, requestId);
+    if (!records?.length) return undefined;
+    if (expectedHash && records.some(record => (record.state as { request?: { payloadHash?: string } })?.request?.payloadHash !== expectedHash)) {
+      throw new Error('CLI_REQUEST_ID_CONFLICT');
+    }
+    const opIds = [...new Set(records.map(record => record.opId))];
+    const transaction = summarizeOperationOutcomes(await Promise.all(opIds.map(opId => queryOperationOutcome(store, opId))));
+    return { id: requestId, ok: false, requestState: 'unknown', transaction,
+      error: sessionError('CLI_REQUEST_REPLAY_BLOCKED', '已找回先前请求的持久操作；请核对事务结果，禁止自动重放。', false) };
   }
 
   listRequestStatuses(): SessionRequestStatus[] {

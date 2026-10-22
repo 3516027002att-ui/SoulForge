@@ -26,6 +26,13 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 
 app.whenReady().then(async () => {
+  const expectedProfile = join(process.env.SOULFORGE_TEST_BUILD_ROOT!, '.runtime', 'electron-user-data');
+  const normalizePath = (path: string) => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path);
+  for (const name of ['userData', 'sessionData'] as const) {
+    if (normalizePath(app.getPath(name)) !== normalizePath(expectedProfile)) {
+      throw new Error(`Database smoke ${name} is outside its owned profile.`);
+    }
+  }
   const root = await mkdtemp(join(tmpdir(), 'soulforge-electron-sqlite-'));
   const overlayRoot = join(root, 'mod');
   const workspaceId = 'electron-utility-smoke';
@@ -41,7 +48,7 @@ app.whenReady().then(async () => {
   const client = new OperationLogUtilityClient(
     join(here, 'databaseUtility.js'),
     30_000,
-    resolve(here, '../../.native/better_sqlite3.node')
+    process.env.SOULFORGE_SQLITE_NATIVE_BINDING || resolve(here, '../../.native/better_sqlite3.node')
   );
   try {
     const appDatabasePath = join(root, 'app.db');
@@ -50,7 +57,7 @@ app.whenReady().then(async () => {
     // database. The production path must then read it through the utility
     // connection, not open a second main-process SQLite handle.
     const seedDatabase = openWorkspaceDatabase(workspaceDatabasePath, {
-      nativeBinding: resolve(here, '../../.native/better_sqlite3.node')
+      nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING || resolve(here, '../../.native/better_sqlite3.node')
     });
     try {
       const seedStore = new KnowledgeStore({
@@ -130,7 +137,7 @@ app.whenReady().then(async () => {
     const metadataDatabase = openWorkspaceDatabase(workspaceDatabasePath, {
       readonly: true,
       fileMustExist: true,
-      nativeBinding: resolve(here, '../../.native/better_sqlite3.node')
+      nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING || resolve(here, '../../.native/better_sqlite3.node')
     });
     try {
       const metadata = metadataDatabase.prepare(

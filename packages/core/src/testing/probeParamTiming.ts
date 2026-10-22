@@ -1,6 +1,6 @@
-import { mkdtemp, mkdir, rm, stat } from 'node:fs/promises';
+import { mkdir, stat } from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
-import { tmpdir } from 'node:os';
+import { createSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { resolveNativeFixture } from './nativeFixtureRegistry.js';
@@ -64,12 +64,13 @@ async function main(): Promise<void> {
     'param-primary',
     '../../mods/param/gameparam/gameparam.parambnd.dcx'
   );
-  const scratch = await mkdtemp(join(tmpdir(), 'soulforge-param-probe-'));
+  const workspace = await createSmokeWorkspace('param-probe');
+  const scratch = workspace.root;
   const staging = join(scratch, 'staging');
-  await mkdir(staging, { recursive: true });
   const observations: TimingObservation[] = [];
 
   try {
+    await mkdir(staging, { recursive: true });
     for (const profile of PROBE_PROFILES) {
       const paramPath = join(staging, `probe-${profile.entryIndex}.param`);
       const extractStart = performance.now();
@@ -128,8 +129,8 @@ async function main(): Promise<void> {
       ]
     }, null, 2));
   } finally {
-    await rm(scratch, { recursive: true, force: true });
     await disposeBridgeDaemonPool();
+    await workspace.dispose();
   }
 }
 

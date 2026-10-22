@@ -27,6 +27,32 @@ export interface FlverPreviewVertexColorDiagnostic {
   rgbaBase64: string;
 }
 
+/** Native tangent/bitangent evidence. No generic material tangent policy is implied. */
+export interface FlverPreviewVector4Diagnostic {
+  memberOrdinal: number;
+  memberIndex: number;
+  layoutType: number;
+  layoutTypeName: string;
+  vertexBufferIndex: number;
+  bufferLayoutIndex: number;
+  structOffset: number;
+  xyzwBase64: string;
+}
+
+/** All native position/normal members; diagnostic values do not change the selected shader attributes. */
+export interface FlverPreviewVector3Diagnostic {
+  memberOrdinal: number;
+  memberIndex: number;
+  layoutType: number;
+  layoutTypeName: string;
+  vertexBufferIndex: number;
+  bufferLayoutIndex: number;
+  structOffset: number;
+  xyzBase64: string;
+  /** Raw native integer NormalW. Absent for a Float3 normal member. */
+  normalWBase64?: string | undefined;
+}
+
 export interface FlverContainerEntryIdentity {
   index: number;
   id: number;
@@ -67,6 +93,18 @@ export interface FlverPreviewMesh {
   vertexColorStatus?: FlverPreviewVertexColorStatus | undefined;
   vertexColorFailure?: string | undefined;
   vertexColorDiagnostics?: FlverPreviewVertexColorDiagnostic[] | undefined;
+  positionStatus?: FlverPreviewVertexColorStatus | undefined;
+  positionFailure?: string | undefined;
+  positionDiagnostics?: FlverPreviewVector3Diagnostic[] | undefined;
+  normalStatus?: FlverPreviewVertexColorStatus | undefined;
+  normalFailure?: string | undefined;
+  normalDiagnostics?: FlverPreviewVector3Diagnostic[] | undefined;
+  tangentStatus?: FlverPreviewVertexColorStatus | undefined;
+  tangentFailure?: string | undefined;
+  tangentDiagnostics?: FlverPreviewVector4Diagnostic[] | undefined;
+  bitangentStatus?: FlverPreviewVertexColorStatus | undefined;
+  bitangentFailure?: string | undefined;
+  bitangentDiagnostics?: FlverPreviewVector4Diagnostic[] | undefined;
   /** 兼容字段：首个 VertexColor 的 alpha，绝不是全局透明度。 */
   vertexAlphaBase64?: string | undefined;
   /** Selected native FaceSet.CullBackfaces; undefined means no display FaceSet. */
@@ -254,6 +292,10 @@ function isPreviewMesh(value: unknown): boolean {
       && value.skinningTransformMode !== 'absolute'
       && value.skinningTransformMode !== 'delta')
     || (value.vertexColorStatus !== undefined && !isPreviewVertexColorStatus(value.vertexColorStatus))
+    || (value.positionStatus !== undefined && !isPreviewVertexColorStatus(value.positionStatus))
+    || (value.normalStatus !== undefined && !isPreviewVertexColorStatus(value.normalStatus))
+    || (value.tangentStatus !== undefined && !isPreviewVertexColorStatus(value.tangentStatus))
+    || (value.bitangentStatus !== undefined && !isPreviewVertexColorStatus(value.bitangentStatus))
     || (value.renderMode !== undefined
       && value.renderMode !== 'surface'
       && value.renderMode !== 'projected-decal'
@@ -261,7 +303,11 @@ function isPreviewMesh(value: unknown): boolean {
   const optionalStrings = [
     'uvsBase64',
     'normalsBase64',
+    'positionFailure',
+    'normalFailure',
     'vertexColorFailure',
+    'tangentFailure',
+    'bitangentFailure',
     'vertexAlphaBase64',
     'boneWeightsBase64',
     'boneIndicesBase64',
@@ -275,6 +321,12 @@ function isPreviewMesh(value: unknown): boolean {
   if (value.vertexColorDiagnostics !== undefined
     && (!Array.isArray(value.vertexColorDiagnostics)
       || !value.vertexColorDiagnostics.every(isPreviewVertexColorDiagnostic))) return false;
+  for (const key of ['positionDiagnostics', 'normalDiagnostics']) {
+    if (value[key] !== undefined && (!Array.isArray(value[key]) || !value[key].every((member) => isPreviewVector3Diagnostic(member, key === 'normalDiagnostics')))) return false;
+  }
+  for (const key of ['tangentDiagnostics', 'bitangentDiagnostics']) {
+    if (value[key] !== undefined && (!Array.isArray(value[key]) || !value[key].every(isPreviewVector4Diagnostic))) return false;
+  }
   return ['projectionTextureName', 'projectionTexturePreviewToken', 'projectionTextureColorSpace']
     .every((key) => value[key] === undefined || value[key] === null || typeof value[key] === 'string');
 }
@@ -299,6 +351,30 @@ function isPreviewVertexColorDiagnostic(value: unknown): value is FlverPreviewVe
   return (value.layoutTypeName === 'Float4' && value.layoutType === 3)
     || (value.layoutTypeName === 'Color' && value.layoutType === 16)
     || (value.layoutTypeName === 'UByte4Norm' && value.layoutType === 19);
+}
+
+function isPreviewVector3Diagnostic(value: unknown, normal: boolean): value is FlverPreviewVector3Diagnostic {
+  if (!isRecord(value)
+    || !['memberOrdinal', 'memberIndex', 'layoutType', 'vertexBufferIndex', 'bufferLayoutIndex', 'structOffset'].every((key) => isNonNegativeInteger(value[key]))
+    || typeof value.xyzBase64 !== 'string'
+    || (value.normalWBase64 !== undefined && (!normal || typeof value.normalWBase64 !== 'string'))) return false;
+  const layouts: Record<string, number> = normal
+    ? { Float3: 2, Float4: 3, Color: 16, UByte4: 17, UByte4Norm: 19, Byte4Norm: 20, Short4Norm: 26, Half4: 46, Byte4E: 47 }
+    : { Float3: 2, Float4: 3 };
+  return typeof value.layoutTypeName === 'string' && layouts[value.layoutTypeName] === value.layoutType;
+}
+
+function isPreviewVector4Diagnostic(value: unknown): value is FlverPreviewVector4Diagnostic {
+  return isRecord(value)
+    && ['memberOrdinal', 'memberIndex', 'layoutType', 'vertexBufferIndex', 'bufferLayoutIndex', 'structOffset'].every((key) => isNonNegativeInteger(value[key]))
+    && typeof value.xyzwBase64 === 'string'
+    && ((value.layoutTypeName === 'Float4' && value.layoutType === 3)
+      || (value.layoutTypeName === 'Color' && value.layoutType === 16)
+      || (value.layoutTypeName === 'UByte4' && value.layoutType === 17)
+      || (value.layoutTypeName === 'UByte4Norm' && value.layoutType === 19)
+      || (value.layoutTypeName === 'Byte4Norm' && value.layoutType === 20)
+      || (value.layoutTypeName === 'Short4Norm' && value.layoutType === 26)
+      || (value.layoutTypeName === 'Byte4E' && value.layoutType === 47));
 }
 
 function isPreviewTexture(value: unknown): boolean {

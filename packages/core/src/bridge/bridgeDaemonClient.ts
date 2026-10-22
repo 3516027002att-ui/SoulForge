@@ -51,6 +51,7 @@ const MAX_CANCELLATION_TERMINAL_OBSERVERS = 64;
 // Native cancellation may only become observable after a long synchronous
 // section; keep the receipt window finite without making a ref'ed timer.
 const CANCELLATION_TERMINAL_OBSERVER_MAX_TTL_MS = 30_000;
+const STDOUT_FRAGMENT_BLOCK_BYTES = 16 * 1024;
 
 interface PendingRequest {
   terminalKinds: Set<string>;
@@ -85,11 +86,15 @@ export class BridgeDaemonClient {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly cancellationTerminalObservers = new Map<string, CancellationTerminalObserver>();
-  private stdoutBuffer = '';
-  /** stdoutBuffer 的 UTF-8 字节数，增量维护，避免每 chunk 重算。 */
+  /** 完整 NDJSON 行之前的有界分块；每个块约 16 KiB 或直接复用一个大 stdout chunk。 */
+  private stdoutBlocks: string[] = [];
+  /** 尚未达到分块阈值的 stdout 数据片段。 */
+  private stdoutTailFragments: string[] = [];
+  private stdoutTailBytes = 0;
+  /** 所有未完行片段的 UTF-8 字节数，含 blocks 与 tail。 */
   private stdoutBufferBytes = 0;
-  /** stdoutBuffer 中已确认不含换行的前缀长度（字符数）。 */
-  private stdoutScanned = 0;
+  /** fatal transport/protocol 错误后停止消费旧 stdout；dispose admission 关闭不设置此标记。 */
+  private stdoutFailed = false;
   private stderrTail = '';
   private closed = false;
   private negotiatedMaxFrameBytes: number;
@@ -230,6 +235,7 @@ export class BridgeDaemonClient {
     } finally {
       clearTimeout(timeout);
       this.release();
+      this.clearStdoutFragments();
     }
   }
 
@@ -463,32 +469,27 @@ export class BridgeDaemonClient {
   }
 
   private consumeStdout(chunk: string): void {
-    // 单帧可达数 MB（read-emevd-document 一页装满时 33266 条指令约 4-5 MB），
-    // 会被 stdout 切成上百个 chunk。此处两处扫描必须增量，否则每个 chunk 都
-    // 重扫整个缓冲，规模上是 O(n²)。实测量级要说清：common.emevd.dcx 一次
-    // 65536 页整读，改成增量后总耗时 274.5 ms → 257.7 ms，只省 ~17 ms —— 这条
-    // 是复杂度正确性修复，不是打开路径的主要瓶颈（主瓶颈在反汇编，见
-    // darkScriptRenderer）。页大小再涨或帧再大时这一项才会变显著。
-    this.stdoutBuffer += chunk;
-    this.stdoutBufferBytes += Buffer.byteLength(chunk, 'utf8');
-    if (this.stdoutBufferBytes > this.negotiatedMaxFrameBytes * 2) {
+    if (this.stdoutFailed) return;
+
+    // A complete line can span many Readable chunks. Search only this new
+    // chunk; older incomplete text stays in bounded fragments and is joined
+    // once, when its newline arrives. The 2x check intentionally includes the
+    // whole incoming chunk, matching the previous buffered-byte boundary.
+    const incomingBytes = Buffer.byteLength(chunk, 'utf8');
+    if (this.stdoutBufferBytes + incomingBytes > this.negotiatedMaxFrameBytes * 2) {
       this.failAll(new BridgeDaemonError('BRIDGE_FRAME_TOO_LARGE', 'Bridge stdout exceeded the frame buffer limit.'));
       this.child.kill();
       return;
     }
+
+    let lineStart = 0;
     while (true) {
-      // 已确认无换行的前缀不再重扫；消费掉一帧后归零。
-      const newline = this.stdoutBuffer.indexOf('\n', this.stdoutScanned);
-      if (newline < 0) {
-        this.stdoutScanned = this.stdoutBuffer.length;
-        return;
-      }
-      const rawLine = this.stdoutBuffer.slice(0, newline);
+      const newline = chunk.indexOf('\n', lineStart);
+      if (newline < 0) break;
+      const newFragment = chunk.slice(lineStart, newline);
+      const rawLine = this.takeStdoutLine(newFragment);
       const line = rawLine.trim();
-      this.stdoutBuffer = this.stdoutBuffer.slice(newline + 1);
-      // '\n' 在 UTF-8 里恒为 1 字节。
-      this.stdoutBufferBytes -= Buffer.byteLength(rawLine, 'utf8') + 1;
-      this.stdoutScanned = 0;
+      lineStart = newline + 1;
       if (!line) continue;
       if (Buffer.byteLength(line, 'utf8') > this.negotiatedMaxFrameBytes) {
         this.failAll(new BridgeDaemonError('BRIDGE_FRAME_TOO_LARGE', 'Inbound Bridge frame exceeds the negotiated limit.'));
@@ -506,7 +507,52 @@ export class BridgeDaemonClient {
         this.child.kill();
         return;
       }
+      // A protocol mismatch calls failAll() from handleFrame. Stop before a
+      // later line in this same Readable chunk can be mistaken for valid data.
+      if (this.stdoutFailed) return;
     }
+
+    this.appendStdoutFragment(chunk.slice(lineStart));
+  }
+
+  private appendStdoutFragment(fragment: string): void {
+    if (!fragment) return;
+    const bytes = Buffer.byteLength(fragment, 'utf8');
+    this.stdoutBufferBytes += bytes;
+
+    if (bytes >= STDOUT_FRAGMENT_BLOCK_BYTES) {
+      this.flushStdoutTailFragments();
+      this.stdoutBlocks.push(fragment);
+      return;
+    }
+
+    this.stdoutTailFragments.push(fragment);
+    this.stdoutTailBytes += bytes;
+    if (this.stdoutTailBytes >= STDOUT_FRAGMENT_BLOCK_BYTES) {
+      this.flushStdoutTailFragments();
+    }
+  }
+
+  private flushStdoutTailFragments(): void {
+    if (this.stdoutTailFragments.length === 0) return;
+    this.stdoutBlocks.push(this.stdoutTailFragments.join(''));
+    this.stdoutTailFragments = [];
+    this.stdoutTailBytes = 0;
+  }
+
+  private takeStdoutLine(lastFragment: string): string {
+    if (this.stdoutBlocks.length === 0 && this.stdoutTailFragments.length === 0) return lastFragment;
+    if (lastFragment) this.stdoutTailFragments.push(lastFragment);
+    const line = [...this.stdoutBlocks, ...this.stdoutTailFragments].join('');
+    this.clearStdoutFragments();
+    return line;
+  }
+
+  private clearStdoutFragments(): void {
+    this.stdoutBlocks = [];
+    this.stdoutTailFragments = [];
+    this.stdoutTailBytes = 0;
+    this.stdoutBufferBytes = 0;
   }
 
   private handleFrame(frame: BridgeDaemonFrame<unknown>): void {
@@ -638,6 +684,8 @@ export class BridgeDaemonClient {
   }
 
   private failAll(error: Error): void {
+    this.stdoutFailed = true;
+    this.clearStdoutFragments();
     if (this.closed && this.pending.size === 0 && this.cancellationTerminalObservers.size === 0) return;
     this.closed = true;
     for (const pending of this.pending.values()) {

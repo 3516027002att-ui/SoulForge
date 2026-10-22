@@ -1,0 +1,101 @@
+
+/* 编辑器工具条（面包屑） */
+.pane-toolbar {
+  flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 8px 16px; border-bottom: 1px solid var(--line);
+  background: var(--forge-1); font-size: 11.5px; color: var(--ink-3);
+}
+.pane-toolbar .crumb { font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-toolbar .crumb b { color: var(--ink-1); font-weight: 600; }
+.toolbar-spacer { flex: 1; }
+
+/* ── 编辑器卡片（生产 React 面板，作用域限定在编辑视口内） ── */
+.viewer-content .panel {
+  /* S20：panel 填满视口（flex:1 + min-height:0），工作台 height:100% 才有参照，
+     三栏各自的 column-body 成为滚动宿主，长列表不再把整页顶出滚动条。 */
+  flex: 1; min-height: 0;
+  border: 1px solid var(--line); border-radius: 0;
+  background: var(--forge-1); padding: 8px 12px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.panel-header {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+}
+.panel-header h2 { font-size: 12.5px; font-weight: 600; color: var(--ink-1); }
+.panel-header h3 { font-size: 13px; font-weight: 600; color: var(--ink-0); }
+.panel-header .muted { font-size: 11px; }
+
+/* 布局辅助 */
+.row.gap { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.stack.gap { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+/* S25：设置表单一列表单——标签独占一行、控件 100% 宽（照 010517 的信息结构）。 */
+.agent-settings-drawer .stack.gap > label,
+.model-service-footer + .list { display: flex; flex-direction: column; gap: 4px; }
+.agent-settings-drawer .stack.gap > label { font-size: 11px; color: var(--ink-2); }
+.agent-settings-drawer .stack.gap > label > input,
+.agent-settings-drawer .stack.gap > label > select { width: 100%; }
+.agent-settings-drawer .model-service-footer { margin-top: 4px; }
+.column.gap { display: flex; flex-direction: column; gap: 8px; }
+.pager { margin-top: 8px; }
+.pager button { min-width: 64px; }
+.pager span.muted { min-width: 3.5em; text-align: center; }
+
+/* 代码 / Hex 证据视图 */
+.hex-view {
+  margin: 0; padding: 12px; overflow: auto;
+  border: 1px solid var(--line); border-radius: var(--radius-m);
+  background: var(--forge-0); color: var(--ink-1);
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.6;
+  user-select: text;
+}
+pre { margin: 0; }
+pre.tool-output {
+  padding: 12px; overflow: auto; max-height: 240px;
+  border: 1px solid var(--line); border-radius: var(--radius-m);
+  background: var(--forge-0); color: var(--ink-1);
+  font-family: var(--font-mono); font-size: 11.5px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-all; user-select: text;
+}
+
+/* 行式表格（FMG / PARAM / BND4 / 脚本容器 / MSB regions 通用） */
+.binder-child-table { display: grid; gap: 4px; margin-top: 8px; overflow-x: auto; }
+.binder-child-row {
+  display: grid;
+  grid-template-columns: 56px minmax(180px, 1.6fr) 92px 90px 90px 90px;
+  gap: 6px; min-width: 680px; align-items: center;
+  border: 0; border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  padding: 5px 8px; background: transparent;
+  color: var(--ink-1); font-size: 12px;
+}
+.binder-child-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.binder-child-row:not(.binder-child-header) { transition: background var(--dur-micro), box-shadow var(--dur-micro); }
+.binder-child-row:not(.binder-child-header):hover { background: var(--forge-hover); }
+/* 选中行：ember-soft 底 + 2px 左侧指示（双通道）；hover 不丢选中态 */
+.binder-child-row.selected,
+.binder-child-row[aria-selected='true'] {
+  background: var(--ember-soft);
+  box-shadow: inset 2px 0 0 var(--ember);
+}
+.binder-child-row.selected:hover,
+.binder-child-row[aria-selected='true']:hover { background: var(--ember-soft); }
+.binder-child-header {
+  color: var(--ink-3); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em;
+  background: transparent; border-bottom: 1px solid var(--line-strong);
+}
+.script-entry-row {
+  grid-template-columns: minmax(150px, 1.6fr) 118px 72px 56px minmax(160px, 1.2fr);
+  min-width: 720px;
+}
+.bnd4-child-row {
+  grid-template-columns: minmax(150px, 1.6fr) 72px 78px 92px 96px 72px 56px;
+  min-width: 760px;
+}
+.paramdef-field-row {
+  grid-template-columns: minmax(120px, 1.4fr) 64px 96px 88px minmax(120px, 1fr) 88px;
+  min-width: 720px;
+}
+.paramdef-field-row input {
+  width: 100%; padding: 4px 6px;
+  font-family: var(--font-mono); font-size: 12px;
+}

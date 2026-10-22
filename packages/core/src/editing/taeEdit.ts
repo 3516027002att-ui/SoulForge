@@ -25,6 +25,8 @@ import {
   type TaeEventUpsertMutation
 } from './taeBridgeCommit.js';
 import type { NativeEditSession } from './nativeEditSession.js';
+import { readTaeBrowse } from './taeBrowse.js';
+import type { TaeBrowseAction } from './taeBrowse.js';
 
 export const TAE_FPS = 30;
 
@@ -84,10 +86,77 @@ export interface TaeEventFieldEdit {
   value: string | number | boolean;
 }
 
+type TaeFieldSnapshot = NonNullable<TaeEventSnapshot['fields']>[number];
+const TAE_FIELD_SIZES: Readonly<Record<string, number>> = { b: 1, u8: 1, s8: 1, u16: 2, s16: 2, u32: 4, s32: 4, s64: 8, f32: 4 };
+const TAE_INTEGER_RANGES: Readonly<Record<string, readonly [bigint, bigint]>> = {
+  u8: [0n, 255n], s8: [-128n, 127n], u16: [0n, 65535n], s16: [-32768n, 32767n],
+  u32: [0n, 4294967295n], s32: [-2147483648n, 2147483647n], s64: [-9223372036854775808n, 9223372036854775807n]
+};
+
+function validTaeEnumEntries(value: unknown): boolean {
+  // Native schemas serialize an absent enum as null. Any other non-array
+  // shape is corrupt evidence, not an absent constraint.
+  return value === undefined || value === null || (Array.isArray(value) && value.every(item => (
+    item !== null && typeof item === 'object' && typeof item.name === 'string'
+    && typeof item.value === 'number' && Number.isSafeInteger(item.value)
+    && item.value >= -2147483648 && item.value <= 2147483647
+  )));
+}
+
+/** Compare schema scalars, not bytes. Bridge remains the only native codec.
+ * Its EncodeValue accepts numeric strings, bool forms and named enum entries;
+ * native readback returns typed values. Unknown/lossy schema evidence fails closed. */
+function matchesTaeFieldReadback(before: TaeFieldSnapshot, after: TaeFieldSnapshot, requested: TaeEventFieldEdit['value']): boolean {
+  const type = before.type;
+  if (!type || !Object.hasOwn(TAE_FIELD_SIZES, type) || before.size !== TAE_FIELD_SIZES[type]
+    || !Number.isSafeInteger(before.index) || before.index! < 0
+    || !Number.isSafeInteger(before.offset) || before.offset! < 0
+    || after.type !== type || after.size !== before.size || after.offset !== before.offset
+    || after.index !== before.index || after.name !== before.name
+    || after.isPadding === true || after.assert !== undefined) return false;
+  if (!validTaeEnumEntries(before.enumEntries) || !validTaeEnumEntries(after.enumEntries)) return false;
+  const enumEntries = before.enumEntries ?? [], observedEnum = after.enumEntries ?? [];
+  if (enumEntries.length !== observedEnum.length
+    || enumEntries.some((item, index) => item.name !== observedEnum[index]!.name || item.value !== observedEnum[index]!.value)) return false;
+  let value = requested;
+  if (typeof value === 'string') {
+    const text = value;
+    const entry = enumEntries.find(item => item.name === text
+      || (/^[\x00-\x7F]*$/.test(item.name) && /^[\x00-\x7F]*$/.test(text) && item.name.toLowerCase() === text.toLowerCase()));
+    if (entry) value = entry.value;
+  }
+  if (type === 'b') {
+    if (typeof value === 'string' && /^(true|false)$/i.test(value.trim())) value = value.trim().toLowerCase() === 'true';
+    else if (value === 0 || value === 1) value = value === 1;
+    return typeof value === 'boolean' && after.value === value;
+  }
+  if (type === 'f32') {
+    let numeric: number;
+    if (typeof value === 'number') numeric = value === 0 ? 0 : value; // JSON numbers do not retain -0.
+    else if (typeof value === 'string' && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(value.trim())) numeric = Number(value);
+    else return false;
+    const expected = Math.fround(numeric);
+    return Number.isFinite(expected) && typeof after.value === 'number' && Number.isFinite(after.value)
+      && Object.is(Math.fround(after.value), expected);
+  }
+  const range = TAE_INTEGER_RANGES[type];
+  if (!range || typeof after.value !== 'number' || !Number.isSafeInteger(after.value)) return false;
+  let expected: bigint;
+  if (typeof value === 'number' && Number.isSafeInteger(value)) expected = BigInt(value);
+  else if (typeof value === 'string' && /^[+-]?\d+$/.test(value.trim())) expected = BigInt(value.trim());
+  else return false;
+  return expected >= range[0] && expected <= range[1] && BigInt(after.value) === expected;
+}
+
 export interface TaeEditFailure {
   code: string;
   message: string;
   details?: unknown;
+}
+
+export interface TaeActionSnapshot {
+  chrId: string; animId: number; code: string; address: string; eventCount: number;
+  taeEntryIndex?: number; taeEntryId?: number; taeEntryName?: string; taeGroup?: string;
 }
 
 export type TaeReadResult =
@@ -95,24 +164,34 @@ export type TaeReadResult =
     ok: true;
     filePath: string;
     chrId: string;
+    readerSchemaRevision: number;
     sourceHash?: string;
+    outerFileHash?: string;
     containerSourceHash?: string;
+    animationCount?: number;
+    totalEventCount?: number;
+    status?: 'partial' | 'complete';
+    eventsTruncated?: boolean;
+    nativePagination?: { animationPage: number; animationPageSize: number; returnedCount: number; totalCount: number | null; hasMore: boolean };
     taeEntryCount?: number;
       taeEntries?: TaeEntryWire[];
+      actions: Array<TaeActionSnapshot | TaeBrowseAction>;
       events: TaeEventSnapshot[];
       pagination: {
         returnedCount: number;
-        totalCount: number;
+        totalCount: number | null;
         offset: number;
         hasMore: boolean;
         nextCursor: string | null;
+        pageNumber?: number;
+        totalPages?: number | null;
       };
       diagnostics: Diagnostic[];
   }
   | { ok: false; error: TaeEditFailure; diagnostics: Diagnostic[] };
 
 export type TaeSetResult =
-  | { ok: true; filePath: string; before: TaeEventSnapshot[]; after: TaeEventSnapshot[]; mutations: number; diagnostics: Diagnostic[] }
+  | { ok: true; filePath: string; before: TaeEventSnapshot[]; after: TaeEventSnapshot[]; mutations: number; diagnostics: Diagnostic[]; opId?: string; backupRoot?: string; nativeVerified: boolean }
   | { ok: false; error: TaeEditFailure; diagnostics: Diagnostic[]; before?: TaeEventSnapshot[] };
 
 interface EnvelopeTemplateField {
@@ -151,6 +230,8 @@ interface EnvelopeAnim {
   taeEntryId?: number;
   taeEntryName?: string;
   taeGroup?: string;
+  eventCount?: number;
+  eventsTruncated?: boolean;
   events?: EnvelopeEvent[];
 }
 
@@ -167,14 +248,13 @@ export async function readTaeEvents(input: {
   file: string;
   addresses?: string[];
   cursor?: string;
+  offset?: number;
   pageSize?: number;
+  expectedSourceHash?: string;
+  expectedReaderSchemaRevision?: number;
 }): Promise<TaeReadResult> {
   const resolved = await resolveAnibndFile(input.edit, input.file);
   if (!resolved.ok) return { ok: false, error: resolved.error, diagnostics: [] };
-  const envelope = await readTaeEnvelope(input.edit, resolved.path);
-  if (!envelope.ok) return envelope.result;
-  const chrId = envelope.chrId;
-  const events = projectEvents(chrId, envelope.animations);
   const wanted = (input.addresses ?? []).map((address) => parseActionAddress(address));
   if (wanted.some((item) => item === null)) {
     return {
@@ -183,21 +263,46 @@ export async function readTaeEvents(input: {
       diagnostics: []
     };
   }
+  if (wanted.every(address => address!.animId === undefined)) {
+    const chrId = extractChrId(resolved.path);
+    if (wanted.some(address => address!.chr.toLowerCase() !== chrId)) return {
+      ok: false, error: { code: 'TAE_EVENT_NOT_FOUND', message: '请求的角色地址与 TAE 来源不匹配。' }, diagnostics: []
+    };
+    return readTaeBrowse({ ...input, filePath: resolved.path, loadPage: async (animationPage, animationPageSize) => {
+      const envelope = await readTaeEnvelope(input.edit, resolved.path, undefined, { animationPage, animationPageSize });
+      if (!envelope.ok) return envelope.result;
+      const { animations, ...metadata } = envelope;
+      return { ...metadata, animationsTruncated: envelope.animationsTruncated === true,
+        events: projectEvents(envelope.chrId, animations), actions: projectActions(envelope.chrId, animations) };
+    } });
+  }
+  const envelope = await readTaeEnvelope(input.edit, resolved.path, input.addresses);
+  if (!envelope.ok) return envelope.result;
+  if ((input.expectedSourceHash !== undefined && (input.expectedSourceHash !== (envelope.outerFileHash ?? envelope.containerSourceHash ?? envelope.sourceHash)
+      || input.expectedSourceHash !== await sha256Of(resolved.path)))
+    || (input.expectedReaderSchemaRevision !== undefined && input.expectedReaderSchemaRevision !== envelope.readerSchemaRevision))
+    return { ok: false, error: { code: 'TAE_SOURCE_VERSION_CHANGED', message: 'TAE 来源或读取器版本已变化，请重新搜索或读取动作。' }, diagnostics: envelope.diagnostics };
+  const chrId = envelope.chrId;
+  const events = projectEvents(chrId, envelope.animations);
+  const actions = projectActions(chrId, envelope.animations);
   let selected = events;
   if (wanted.length > 0) {
     selected = events.filter((event) => wanted.some((wantedAddr) => matchesAddress(wantedAddr!, event)));
     const ambiguous = (input.addresses ?? []).filter((address) => (
-      events.filter((event) => matchesAddress(parseActionAddress(address)!, event)).length > 1
+      new Set(events.filter((event) => matchesAddress(parseActionAddress(address)!, event)).map((event) =>
+        JSON.stringify([event.taeEntryIndex, event.taeEntryId, event.taeEntryName, event.taeGroup]))).size > 1
     ));
     if (ambiguous.length > 0) {
       return {
         ok: false,
-        error: { code: 'TAE_EVENT_AMBIGUOUS', message: `词条地址在多个 TAE section 中重复，必须指定 section：${ambiguous.join(', ')}` },
+        error: { code: 'TAE_EVENT_AMBIGUOUS', message: `词条地址在多个 TAE section 中重复，必须指定 section：${ambiguous.join(', ')}`,
+          details: { candidates: events.filter((event) => wanted.some((address) => matchesAddress(address!, event))).map((event) => ({ animId: event.animId, taeEntryIndex: event.taeEntryIndex, taeEntryName: event.taeEntryName, address: event.address })) } },
         diagnostics: []
       };
     }
     const missing = (input.addresses ?? []).filter((address, index) => (
       !events.some((event) => matchesAddress(wanted[index]!, event))
+      && !(wanted[index]!.eventIndex === undefined && actions.some(action => matchesAddress(wanted[index]!, { ...action, eventIndex: 0 })))
     ));
     if (missing.length > 0) {
       return {
@@ -207,32 +312,37 @@ export async function readTaeEvents(input: {
       };
     }
   }
-  if (input.cursor && wanted.length > 0) {
-    return {
-      ok: false,
-      error: { code: 'TAE_CURSOR_SCOPE_MISMATCH', message: 'TAE 精确地址读取不能同时使用分页 cursor。' },
-      diagnostics: []
-    };
-  }
-  const pageSize = normalizeTaePageSize(input.pageSize);
-  const sourceHash = envelope.containerSourceHash ?? envelope.sourceHash ?? await sha256Of(resolved.path);
+  if (input.cursor && input.offset !== undefined) return { ok: false,
+    error: { code: 'TAE_CURSOR_SCOPE_MISMATCH', message: '续页只传 cursor，不同时传 offset。' }, diagnostics: [] };
+  if (input.offset !== undefined && (!Number.isSafeInteger(input.offset) || input.offset < 0)) return { ok: false,
+    error: { code: 'TAE_CURSOR_INVALID', message: 'offset 必须是非负安全整数。' }, diagnostics: [] };
+  const maximumEventBytes = Math.max(1, ...selected.map((event) => Buffer.byteLength(JSON.stringify(event), 'utf8')));
+  const pageSize = Math.max(1, Math.min(normalizeTaePageSize(input.pageSize), Math.floor(24000 / maximumEventBytes)));
+  const sourceHash = envelope.outerFileHash ?? envelope.containerSourceHash ?? envelope.sourceHash ?? await sha256Of(resolved.path);
   // queryScope 只做续页时的相等性校验；用工作区相对逻辑 URI，避免把本机
   // 绝对路径编进发往模型的 opaque cursor（base64 可解码，不是脱敏）。
   const overlayRoot = input.edit.session.layers.overlayRoot;
-  const queryScope = `tae-events:${makeFileResourceUri(makeWorkspaceRelativePath(overlayRoot, resolved.path))}`;
+  const queryScope = `tae-events:${makeFileResourceUri(makeWorkspaceRelativePath(overlayRoot, resolved.path))}:${JSON.stringify([...(input.addresses ?? [])].sort())}`;
   let pagination = {
     returnedCount: selected.length,
     totalCount: selected.length,
     offset: 0,
     hasMore: false,
-    nextCursor: null as string | null
+    nextCursor: null as string | null,
+    pageNumber: 1, totalPages: 1
   };
-  if (wanted.length === 0) {
+  {
     try {
       let cursor = input.cursor;
       if (cursor) {
         const payload = parseOpaqueCursor(cursor);
-        if (payload.domain !== 'tae' || payload.scope !== queryScope) {
+        // The read-session table is process-global and resolvePage only checks the
+        // source hash, so the payload scope alone does not bind the session: a
+        // replayed or forged sessionId must belong to this workspace and query.
+        const existing = defaultReadSessionManager.getSession(payload.sessionId);
+        if (payload.domain !== 'tae' || payload.scope !== queryScope
+          || (existing && (existing.domain !== 'tae' || existing.queryScope !== queryScope
+            || existing.workspaceId !== input.edit.session.meta.workspaceId))) {
           return {
             ok: false,
             error: { code: 'TAE_CURSOR_SCOPE_MISMATCH', message: 'TAE 分页 cursor 与当前文件或读取范围不匹配，请重新读取。' },
@@ -249,7 +359,7 @@ export async function readTaeEvents(input: {
         });
         cursor = createOpaqueCursor({
           sessionId: session.sessionId,
-          offset: 0,
+          offset: input.offset ?? 0,
           sourceHash,
           domain: 'tae',
           scope: queryScope
@@ -262,7 +372,9 @@ export async function readTaeEvents(input: {
         totalCount: page.total,
         offset: page.offset,
         hasMore: page.hasMore,
-        nextCursor: page.nextCursor
+        nextCursor: page.nextCursor,
+        pageNumber: Math.floor(page.offset / pageSize) + 1,
+        totalPages: Math.ceil(page.total / pageSize)
       };
     } catch (error) {
       const code = error instanceof Error && 'code' in error && typeof (error as { code?: unknown }).code === 'string'
@@ -279,10 +391,14 @@ export async function readTaeEvents(input: {
     ok: true,
     filePath: resolved.path,
     chrId,
+    readerSchemaRevision: envelope.readerSchemaRevision,
     ...(envelope.sourceHash ? { sourceHash: envelope.sourceHash } : { sourceHash }),
+    ...(envelope.outerFileHash ? { outerFileHash: envelope.outerFileHash } : {}),
     ...(envelope.containerSourceHash ? { containerSourceHash: envelope.containerSourceHash } : {}),
     ...(envelope.taeEntryCount !== undefined ? { taeEntryCount: envelope.taeEntryCount } : {}),
     ...(envelope.taeEntries ? { taeEntries: envelope.taeEntries } : {}),
+    actions: actions.filter(action => selected.some(event => matchesAddress(parseActionAddress(action.address)!, event))
+      || wanted.some(address => address!.eventIndex === undefined && matchesAddress(address!, { ...action, eventIndex: 0 }))),
     events: selected,
     pagination,
     diagnostics: envelope.diagnostics
@@ -295,6 +411,24 @@ function normalizeTaePageSize(value: number | undefined): number {
   return value;
 }
 
+/** Only call after the Patch Engine has confirmed the commit. Read/transport
+ * and projection failures cannot erase that transaction or trigger a replay. */
+async function readCommittedTaeEvents(edit: NativeEditSession, filePath: string, addresses: string[]): Promise<{
+  ok: boolean; events: TaeEventSnapshot[]; diagnostics: Diagnostic[];
+}> {
+  try {
+    const reread = await readTaeEnvelope(edit, filePath, addresses);
+    return reread.ok
+      ? { ok: true, events: projectEvents(reread.chrId, reread.animations), diagnostics: reread.diagnostics }
+      : { ok: false, events: [], diagnostics: reread.result.diagnostics };
+  } catch {
+    // Native exceptions may contain filesystem paths or transport credentials.
+    // Keep a stable diagnostic here, not the exception message/stack/details.
+    return { ok: false, events: [], diagnostics: [{ severity: 'error', code: 'TAE_POST_COMMIT_READBACK_FAILED',
+      message: '写入已提交，但原生回读出现异常，尚未验证；请按 opId 查询或回滚，禁止自动重放。' }] };
+  }
+}
+
 export async function setTaeEventTimes(input: {
   edit: NativeEditSession;
   file: string;
@@ -305,7 +439,13 @@ export async function setTaeEventTimes(input: {
   }
   const resolved = await resolveAnibndFile(input.edit, input.file);
   if (!resolved.ok) return { ok: false, error: resolved.error, diagnostics: [] };
-  const envelope = await readTaeEnvelope(input.edit, resolved.path);
+  const addresses = input.edits.map(edit => edit.address);
+  const invalidAddress = addresses.find(address => {
+    const parsed = parseActionAddress(address);
+    return !parsed || parsed.animId === undefined || parsed.eventIndex === undefined;
+  });
+  if (invalidAddress !== undefined) return { ok: false, error: { code: 'TAE_ADDRESS_INVALID', message: `地址需含动画与词条下标：${invalidAddress}` }, diagnostics: [] };
+  const envelope = await readTaeEnvelope(input.edit, resolved.path, addresses);
   if (!envelope.ok) return envelope.result;
   const chrId = envelope.chrId;
   const events = projectEvents(chrId, envelope.animations);
@@ -366,9 +506,9 @@ export async function setTaeEventTimes(input: {
   const file = await input.edit.indexFile(resolved.path, 'action');
   const expectedHash = file.sha256 || await sha256Of(resolved.path);
   const isContainer = (envelope.taeEntryCount ?? 0) > 0;
-  const expectedCommitHash = isContainer
-    ? envelope.containerSourceHash ?? expectedHash
-    : expectedHash;
+  const expectedCommitHash = envelope.outerFileHash ?? (isContainer ? undefined : envelope.sourceHash);
+  if (!expectedCommitHash || expectedCommitHash !== expectedHash) return { ok: false,
+    error: { code: 'TAE_SOURCE_VERSION_CHANGED', message: 'TAE physical source 在原生读取后改变或缺少 snapshot hash，已拒绝写回。' }, diagnostics: envelope.diagnostics, before };
   const outcome = await applyNativeMutation({
     file: { ...file, sha256: expectedCommitHash },
     sourceUri: file.sourceUri,
@@ -404,27 +544,29 @@ export async function setTaeEventTimes(input: {
         : [{ severity: 'error' as const, code: 'TAE_WRITE_CANCELLED', message: '写入被取消。', sourceUri: file.sourceUri }];
     return {
       ok: false,
-      error: { code: diagnostics[0]?.code ?? 'TAE_WRITE_FAILED', message: diagnostics[0]?.message ?? 'TAE 写入失败。' },
+      error: { code: diagnostics.find(item => item.severity === 'error')?.code ?? 'TAE_WRITE_FAILED', message: diagnostics.find(item => item.severity === 'error')?.message ?? 'TAE 写入失败。' },
       diagnostics,
       before
     };
   }
 
-  const reread = await readTaeEnvelope(input.edit, resolved.path);
-  const after = reread.ok
-    ? projectEvents(reread.chrId, reread.animations)
-    : pending.map((item) => ({
-      ...item.event,
-      startFrame: item.edit.startFrame ?? item.event.startFrame,
-      endFrame: item.edit.endFrame ?? item.event.endFrame
-    }));
+  const reread = await readCommittedTaeEvents(input.edit, resolved.path, before.map(event => event.address));
+  const after = reread.events;
+  const nativeVerified = reread.ok && pending.every(({ event, edit }) => {
+    const observed = after.find(item => item.address === event.address);
+    return observed !== undefined
+      && (edit.startFrame === undefined || Math.abs(observed.startTime - secondsFromFrame(edit.startFrame)) <= 0.00001)
+      && (edit.endFrame === undefined || Math.abs(observed.endTime - secondsFromFrame(edit.endFrame)) <= 0.00001);
+  });
   return {
     ok: true,
     filePath: resolved.path,
     before,
     after,
     mutations: mutations.length,
-    diagnostics: [...envelope.diagnostics, ...outcome.result.diagnostics]
+    ...(outcome.result.opId ? { opId: outcome.result.opId } : {}),
+    ...(outcome.result.backupRoot ? { backupRoot: outcome.result.backupRoot } : {}), nativeVerified,
+    diagnostics: [...envelope.diagnostics, ...outcome.result.diagnostics, ...(reread.ok ? [] : reread.diagnostics)]
   };
 }
 
@@ -444,7 +586,13 @@ export async function setTaeEventFields(input: {
   }
   const resolved = await resolveAnibndFile(input.edit, input.file);
   if (!resolved.ok) return { ok: false, error: resolved.error, diagnostics: [] };
-  const envelope = await readTaeEnvelope(input.edit, resolved.path);
+  const addresses = input.edits.map(edit => edit.address);
+  const invalidAddress = addresses.find(address => {
+    const parsed = parseActionAddress(address);
+    return !parsed || parsed.animId === undefined || parsed.eventIndex === undefined;
+  });
+  if (invalidAddress !== undefined) return { ok: false, error: { code: 'TAE_ADDRESS_INVALID', message: `地址需含动画与词条下标：${invalidAddress}` }, diagnostics: [] };
+  const envelope = await readTaeEnvelope(input.edit, resolved.path, addresses);
   if (!envelope.ok) return envelope.result;
   const events = projectEvents(envelope.chrId, envelope.animations);
   const before: TaeEventSnapshot[] = [];
@@ -546,9 +694,9 @@ export async function setTaeEventFields(input: {
   const file = await input.edit.indexFile(resolved.path, 'action');
   const expectedHash = file.sha256 || await sha256Of(resolved.path);
   const isContainer = (envelope.taeEntryCount ?? 0) > 0;
-  const expectedCommitHash = isContainer
-    ? envelope.containerSourceHash ?? expectedHash
-    : expectedHash;
+  const expectedCommitHash = envelope.outerFileHash ?? (isContainer ? undefined : envelope.sourceHash);
+  if (!expectedCommitHash || expectedCommitHash !== expectedHash) return { ok: false,
+    error: { code: 'TAE_SOURCE_VERSION_CHANGED', message: 'TAE physical source 在原生读取后改变或缺少 snapshot hash，已拒绝写回。' }, diagnostics: envelope.diagnostics, before };
   const outcome = await applyNativeMutation({
     file: { ...file, sha256: expectedCommitHash },
     sourceUri: file.sourceUri,
@@ -584,24 +732,153 @@ export async function setTaeEventFields(input: {
         : [{ severity: 'error' as const, code: 'TAE_WRITE_CANCELLED', message: '写入被取消。', sourceUri: file.sourceUri }];
     return {
       ok: false,
-      error: { code: diagnostics[0]?.code ?? 'TAE_WRITE_FAILED', message: diagnostics[0]?.message ?? 'TAE 字段写入失败。' },
+      error: { code: diagnostics.find(item => item.severity === 'error')?.code ?? 'TAE_WRITE_FAILED', message: diagnostics.find(item => item.severity === 'error')?.message ?? 'TAE 字段写入失败。' },
       diagnostics,
       before
     };
   }
 
-  const reread = await readTaeEnvelope(input.edit, resolved.path);
+  const reread = await readCommittedTaeEvents(input.edit, resolved.path, before.map(event => event.address));
+  const after = reread.events;
+  const nativeVerified = reread.ok && input.edits.every((edit, index) => {
+    const previous = before[index]!;
+    const observed = after.find(event => event.address === previous.address);
+    if (observed?.parameterDecoded !== true || observed.eventTypeId !== previous.eventTypeId
+      || observed.schemaBankId !== previous.schemaBankId || observed.schemaVariant !== previous.schemaVariant) return false;
+    const selected = (value: TaeFieldSnapshot) => (edit.fieldIndex === undefined || value.index === edit.fieldIndex)
+      && (edit.fieldName === undefined || value.name === edit.fieldName);
+    const original = previous.fields?.filter(selected), fields = observed.fields?.filter(selected);
+    return original?.length === 1 && fields?.length === 1 && matchesTaeFieldReadback(original[0]!, fields[0]!, edit.value);
+  });
   return {
     ok: true,
     filePath: resolved.path,
     before,
-    after: reread.ok ? projectEvents(reread.chrId, reread.animations) : before,
+    after,
     mutations: mutations.length,
-    diagnostics: [...envelope.diagnostics, ...outcome.result.diagnostics]
+    ...(outcome.result.opId ? { opId: outcome.result.opId } : {}),
+    ...(outcome.result.backupRoot ? { backupRoot: outcome.result.backupRoot } : {}), nativeVerified,
+    diagnostics: [...envelope.diagnostics, ...outcome.result.diagnostics, ...(reread.ok ? [] : reread.diagnostics)]
   };
 }
 
-function matchesAddress(address: ActionAddress, event: TaeEventSnapshot): boolean {
+export interface TaeEventInsertion {
+  address: string;
+  eventTypeId: number;
+  startFrame: number;
+  endFrame: number;
+  template: { file?: string; address: string };
+  fields?: Array<{ fieldIndex?: number; fieldName?: string; value: string | number | boolean }>;
+}
+
+/** Host-resolved templates; Bridge owns byte layout and typed-field validation. */
+export async function insertTaeEvents(input: { edit: NativeEditSession; file: string; events: TaeEventInsertion[] }) {
+  const failure = (code: string, message: string, diagnostics: Diagnostic[] = []) => ({ ok: false as const, error: { code, message }, diagnostics });
+  if (!Array.isArray(input.events) || input.events.length === 0 || input.events.length > 64)
+    return failure('TAE_INSERT_INVALID', 'events 必须包含 1–64 条新增词条。');
+  if (input.events.some(e => !e || typeof e.address !== 'string' || !e.template || typeof e.template.address !== 'string'))
+    return failure('TAE_INSERT_INVALID', '每条新增词条必须指定目标和模板地址。');
+  const resolved = await resolveAnibndFile(input.edit, input.file);
+  if (!resolved.ok) return failure(resolved.error.code, resolved.error.message);
+  const envelope = await readTaeEnvelope(input.edit, resolved.path, input.events.flatMap(e => [e.address, ...(e.template?.file ? [] : [e.template?.address ?? ''])]));
+  if (!envelope.ok) return envelope.result;
+  const current = projectEvents(envelope.chrId, envelope.animations);
+  const mutations: TaeEventUpsertMutation[] = [];
+  const templates: Array<{ path: string; entryIndex?: number; hash: string }> = [];
+  const added: Array<{ animId: number; entryIndex?: number; eventIndex: number }> = [];
+  for (const item of input.events) {
+    const address = parseActionAddress(item.address);
+    const templateAddress = item.template && parseActionAddress(item.template.address);
+    if (!address || address.animId === undefined || address.eventIndex !== undefined
+      || !templateAddress || templateAddress.animId === undefined || templateAddress.eventIndex === undefined)
+      return failure('TAE_ADDRESS_INVALID', '目标需动作级地址，模板需完整词条地址。');
+    if (!Number.isSafeInteger(item.eventTypeId) || item.eventTypeId < 0
+      || !Number.isFinite(item.startFrame) || !Number.isFinite(item.endFrame) || item.startFrame > item.endFrame)
+      return failure('TAE_INSERT_INVALID', '词条类型和起止帧无效。');
+    const targetAnims = envelope.animations.filter(a => a.animId === address.animId
+      && address.chr.toLowerCase() === envelope.chrId.toLowerCase()
+      && (address.taeEntryIndex === undefined || address.taeEntryIndex === a.taeEntryIndex)
+      && (address.taeEntryId === undefined || address.taeEntryId === a.taeEntryId)
+      && (address.taeEntryName === undefined || address.taeEntryName === a.taeEntryName)
+      && (address.taeGroup === undefined || address.taeGroup === a.taeGroup));
+    if (targetAnims.length !== 1) return failure(targetAnims.length ? 'TAE_EVENT_AMBIGUOUS' : 'TAE_EVENT_NOT_FOUND', '目标动作不存在或跨 TAE section 歧义。');
+    const target = targetAnims[0]!;
+    const templateFile = item.template.file ? await resolveAnibndFile(input.edit, item.template.file) : resolved;
+    if (!templateFile.ok) return failure(templateFile.error.code, templateFile.error.message);
+    const templateEnvelope = templateFile.path === resolved.path ? envelope : await readTaeEnvelope(input.edit, templateFile.path, [item.template.address]);
+    if (!templateEnvelope.ok) return templateEnvelope.result;
+    const matches = projectEvents(templateEnvelope.chrId, templateEnvelope.animations).filter(e => matchesAddress(templateAddress, e));
+    if (matches.length !== 1) return failure(matches.length ? 'TAE_EVENT_AMBIGUOUS' : 'TAE_TEMPLATE_NOT_FOUND', '模板词条不存在或跨 TAE section 歧义。');
+    const template = matches[0]!;
+    if (template.eventTypeId !== item.eventTypeId) return failure('TAE_TEMPLATE_TYPE_MISMATCH', '模板词条类型与新增词条类型必须相同。');
+    if (item.fields !== undefined && (!Array.isArray(item.fields) || item.fields.some(f => !f || typeof f !== 'object'
+      || (f.fieldIndex === undefined && !f.fieldName) || !['string', 'number', 'boolean'].includes(typeof f.value))))
+      return failure('TAE_TEMPLATE_FIELDS_INVALID', 'fields 必须是有选择器和值的字段数组。');
+    const pendingCount = added.filter(a => a.animId === target.animId && a.entryIndex === target.taeEntryIndex).length;
+    added.push({ animId: target.animId!, ...(target.taeEntryIndex === undefined ? {} : { entryIndex: target.taeEntryIndex }), eventIndex: (target.events?.length ?? 0) + pendingCount });
+    mutations.push({ mutation: 'insert-event', animId: target.animId!, templateAnimId: template.animId,
+      templateEventIndex: template.eventIndex, eventTypeId: item.eventTypeId,
+      startTime: item.startFrame / TAE_FPS, endTime: item.endFrame / TAE_FPS,
+      ...(target.taeEntryIndex === undefined ? {} : { taeEntryIndex: target.taeEntryIndex }),
+      ...(template.schemaBankId === undefined ? {} : { schemaBankId: template.schemaBankId }),
+      ...(item.fields ? { fieldOverrides: item.fields } : {}) });
+    templates.push({ path: templateFile.path, ...(template.taeEntryIndex === undefined ? {} : { entryIndex: template.taeEntryIndex }),
+      hash: templateEnvelope.outerFileHash ?? ((templateEnvelope.taeEntryCount ?? 0) > 0 ? '' : templateEnvelope.sourceHash ?? '') });
+  }
+  const file = await input.edit.indexFile(resolved.path, 'action');
+  const expectedHash = envelope.outerFileHash ?? ((envelope.taeEntryCount ?? 0) > 0 ? undefined : envelope.sourceHash);
+  if (!expectedHash || expectedHash !== (file.sha256 || await sha256Of(resolved.path)))
+    return failure('TAE_SOURCE_VERSION_CHANGED', 'TAE physical source 在原生读取后改变或缺少 snapshot hash，已拒绝插入。', envelope.diagnostics);
+  const outcome = await applyNativeMutation({ file: { ...file, sha256: expectedHash }, sourceUri: file.sourceUri, expectedHash,
+    stagingRoot: input.edit.stagingRoot, allowedRoots: () => [...input.edit.allowedRoots()], stagingPrefix: 'tae',
+    stagingFileName: `${basename(resolved.path)}.insert.tae`,
+    stageWrite: async context => {
+      const prepared: TaeEventUpsertMutation[] = [];
+      for (let index = 0; index < mutations.length; index++) {
+        const template = templates[index]!;
+        if (!(await input.edit.session.resolveWritablePathSecure(template.path)).ok)
+          return { ok: false, diagnostics: [{ severity: 'error', code: 'TAE_TEMPLATE_PATH_BLOCKED', message: '模板路径越出安全工作区。' }] };
+        if (await sha256Of(template.path) !== template.hash)
+          return { ok: false, diagnostics: [{ severity: 'error', code: 'TAE_TEMPLATE_HASH_MISMATCH', message: '模板在读取后改变。' }] };
+        let path = template.path;
+        if (template.entryIndex !== undefined) {
+          path = join(context.writableRoots[0]!, `template-${index}.tae`);
+          const extract = await runBridge({ command: 'extract-bnd4-child', filePath: template.path,
+            allowedRoots: context.allowedRoots, writableRoots: context.writableRoots,
+            ...(input.edit.oodleRuntimeRoot ? { oodleRuntimeRoot: input.edit.oodleRuntimeRoot } : {}),
+            commandOptions: { outputPath: path, entryIndex: template.entryIndex }, timeoutMs: 120000 });
+          if (extract.parseStatus === 'failed') return { ok: false, diagnostics: extract.diagnostics };
+          const extractedSnapshot = extract.data as { sourceHash?: string } | undefined;
+          if (extractedSnapshot?.sourceHash !== template.hash)
+            return { ok: false, diagnostics: [{ severity: 'error', code: 'TAE_TEMPLATE_HASH_MISMATCH', message: '提取器的原生 physical snapshot 与已读取模板不一致。' }] };
+        }
+        const bytes = await readFile(path);
+        if (await sha256Of(template.path) !== template.hash)
+          return { ok: false, diagnostics: [{ severity: 'error', code: 'TAE_TEMPLATE_HASH_MISMATCH', message: '模板在暂存期间改变。' }] };
+        prepared.push({ ...mutations[index]!, templateDocumentBase64: bytes.toString('base64'), expectedTemplateDocumentHash: createHash('sha256').update(bytes).digest('hex') } as TaeEventUpsertMutation);
+      }
+      const request = { sourcePath: resolved.path, outputPath: context.outputPath, expectedDocumentHash: expectedHash,
+        allowedRoots: context.allowedRoots, writableRoots: context.writableRoots, mutations: prepared, timeoutMs: 120000,
+        ...(input.edit.oodleRuntimeRoot ? { oodleRuntimeRoot: input.edit.oodleRuntimeRoot } : {}) };
+      return (envelope.taeEntryCount ?? 0) > 0 ? commitTaeEventContainerViaBridge(request) : commitTaeEventViaBridge(request);
+    }, title: `TAE insert ${mutations.length} native events in ${basename(resolved.path)}`, confirmActionLabel: '提交 TAE 新增词条'
+  }, { commit: input.edit.commitPort });
+  if (outcome.status !== 'committed' || !outcome.result.ok) {
+    const diagnostics: Diagnostic[] = outcome.status === 'failed' ? outcome.diagnostics
+      : outcome.status === 'committed' ? outcome.result.diagnostics : [{ severity: 'error', code: 'TAE_WRITE_CANCELLED', message: '写入被取消。' }];
+    const diagnostic = diagnostics.find(item => item.severity === 'error');
+    return failure(diagnostic?.code ?? 'TAE_WRITE_FAILED', diagnostic?.message ?? 'TAE 新增失败。', diagnostics);
+  }
+  const reread = await readCommittedTaeEvents(input.edit, resolved.path, input.events.map(e => e.address));
+  const after = reread.events.filter(e => added.some(a => a.animId === e.animId && a.entryIndex === e.taeEntryIndex && a.eventIndex === e.eventIndex));
+  return { ok: true as const, filePath: resolved.path, before: current.filter(e => added.some(a => a.animId === e.animId && a.entryIndex === e.taeEntryIndex)),
+    after, mutations: mutations.length, nativeVerified: reread.ok && after.length === mutations.length,
+    opId: outcome.result.opId, backupRoot: outcome.result.backupRoot,
+    rollback: { tool: 'rollback_operation', args: { opId: outcome.result.opId } },
+    diagnostics: [...envelope.diagnostics, ...outcome.result.diagnostics, ...reread.diagnostics] };
+}
+
+function matchesAddress(address: ActionAddress, event: Pick<TaeEventSnapshot, 'chrId' | 'animId' | 'eventIndex' | 'taeEntryIndex' | 'taeEntryId' | 'taeEntryName' | 'taeGroup'>): boolean {
   if (address.chr !== event.chrId && address.chr.toLowerCase() !== event.chrId.toLowerCase()) return false;
   if (address.animId === undefined && address.eventIndex === undefined) return true;
   if (address.animId !== event.animId) return false;
@@ -629,6 +906,17 @@ function sectionSelectorForAnimation(anim: EnvelopeAnim): Pick<
   return {};
 }
 
+function projectActions(chrId: string, animations: EnvelopeAnim[]): Array<TaeActionSnapshot & { eventsTruncated?: boolean }> {
+  return animations.map(anim => ({ chrId, animId: anim.animId!, code: formatAnimCode(anim.animId!),
+    ...(anim.taeEntryIndex === undefined ? {} : { taeEntryIndex: anim.taeEntryIndex }),
+    ...(anim.taeEntryId === undefined ? {} : { taeEntryId: anim.taeEntryId }),
+    ...(anim.taeEntryName === undefined ? {} : { taeEntryName: anim.taeEntryName }),
+    ...(anim.taeGroup === undefined ? {} : { taeGroup: anim.taeGroup }),
+    ...(anim.eventsTruncated === undefined ? {} : { eventsTruncated: anim.eventsTruncated }),
+    address: formatActionAddress({ chr: chrId, animId: anim.animId!, ...sectionSelectorForAnimation(anim) }),
+    eventCount: anim.eventCount ?? anim.events?.length ?? 0 }));
+}
+
 function projectEvents(chrId: string, animations: EnvelopeAnim[]): TaeEventSnapshot[] {
   const out: TaeEventSnapshot[] = [];
   for (const anim of animations) {
@@ -636,6 +924,10 @@ function projectEvents(chrId: string, animations: EnvelopeAnim[]): TaeEventSnaps
     const code = formatAnimCode(anim.animId);
     for (let index = 0; index < (anim.events ?? []).length; index += 1) {
       const event = anim.events![index]!;
+      const schemaShapeValid = Array.isArray(event.templateFields) && event.templateFields.every(field => (
+        field !== null && typeof field === 'object' && typeof field.name === 'string' && field.name.length > 0
+        && validTaeEnumEntries(field.enumEntries)
+      ));
       const startTime = typeof event.startTime === 'number' && Number.isFinite(event.startTime) ? event.startTime : 0;
       const endTime = typeof event.endTime === 'number' && Number.isFinite(event.endTime) ? event.endTime : startTime;
       const sectionSelector = sectionSelectorForAnimation(anim);
@@ -663,13 +955,13 @@ function projectEvents(chrId: string, animations: EnvelopeAnim[]): TaeEventSnaps
         ...(typeof event.typeName === 'string' && event.typeName.length > 0 ? { typeName: event.typeName } : {}),
         ...(typeof event.schemaBankId === 'number' ? { schemaBankId: event.schemaBankId } : {}),
         ...(typeof event.schemaVariant === 'string' ? { schemaVariant: event.schemaVariant } : {}),
-        ...(typeof event.parameterDecoded === 'boolean' ? { parameterDecoded: event.parameterDecoded } : {}),
+        ...(typeof event.parameterDecoded === 'boolean' ? { parameterDecoded: event.parameterDecoded && schemaShapeValid } : {}),
         ...(typeof event.parameterTailLength === 'number' ? { parameterTailLength: event.parameterTailLength } : {}),
         startTime,
         endTime,
         startFrame: frameFromSeconds(startTime),
         endFrame: frameFromSeconds(endTime),
-        decodeStatus: event.parameterDecoded === true && Array.isArray(event.templateFields)
+        decodeStatus: event.parameterDecoded === true && schemaShapeValid
           ? 'decoded'
           : typeof event.parameterBytesHex === 'string' && event.parameterBytesHex.length > 0
             ? 'unknown'
@@ -686,7 +978,7 @@ function projectEvents(chrId: string, animations: EnvelopeAnim[]): TaeEventSnaps
           ? {
             fields: event.templateFields
               .filter((field): field is EnvelopeTemplateField & { name: string } => (
-                typeof field.name === 'string' && field.name.length > 0
+                field !== null && typeof field === 'object' && typeof field.name === 'string' && field.name.length > 0
               ))
               .map((field) => ({
                 name: field.name,
@@ -725,13 +1017,20 @@ function parseScalar(value: unknown): string | number | boolean {
 
 async function readTaeEnvelope(
   edit: NativeEditSession,
-  filePath: string
+  filePath: string,
+  addresses?: string[],
+  nativePage?: { animationPage: number; animationPageSize: number }
 ): Promise<
   | {
     ok: true;
     chrId: string;
+    readerSchemaRevision: number;
     sourceHash?: string;
+    outerFileHash?: string;
     containerSourceHash?: string;
+    animationCount?: number;
+    totalEventCount?: number;
+    animationsTruncated?: boolean;
     taeEntryCount?: number;
     taeEntries?: TaeEntryWire[];
     animations: EnvelopeAnim[];
@@ -739,9 +1038,21 @@ async function readTaeEnvelope(
   }
   | { ok: false; result: { ok: false; error: TaeEditFailure; diagnostics: Diagnostic[] } }
 > {
+  const requested = (addresses ?? []).map(address => parseActionAddress(address)).filter((address): address is ActionAddress => address !== null && address.animId !== undefined);
+  const nativeQueries = [...new Map(requested.map(address => [JSON.stringify([address.animId, address.taeEntryIndex, address.taeEntryId, address.taeEntryName, address.taeGroup]), address])).values()];
+  const nativeOptions = (address: ActionAddress) => ({ animId: address.animId,
+    ...(address.taeEntryIndex === undefined ? {} : { taeEntryIndex: address.taeEntryIndex }),
+    ...(address.taeEntryId === undefined ? {} : { taeEntryId: address.taeEntryId }),
+    ...(address.taeEntryName === undefined ? {} : { taeEntryName: address.taeEntryName }),
+    ...(address.taeGroup === undefined ? {} : { taeGroup: address.taeGroup }) });
   const result = await runBridge<{
+    identityProjectionVersion?: number;
     sourceHash?: string;
+    outerFileHash?: string;
     containerSourceHash?: string;
+    animationCount?: number;
+    totalEventCount?: number;
+    animationsTruncated?: boolean;
     taeEntryCount?: number;
     taeEntries?: TaeEntryWire[];
     animations?: Array<Record<string, unknown>>;
@@ -751,7 +1062,8 @@ async function readTaeEnvelope(
     resourceUri: pathToFileURL(filePath).href,
     allowedRoots: edit.allowedRoots(),
     ...(edit.oodleRuntimeRoot ? { oodleRuntimeRoot: edit.oodleRuntimeRoot } : {}),
-    timeoutMs: 120_000
+    timeoutMs: 120_000,
+    commandOptions: nativeQueries[0] ? nativeOptions(nativeQueries[0]) : nativePage ?? { animationPage: 0, animationPageSize: 64 }
   });
   const diagnostics = asDiagnostics(result.diagnostics);
   if (result.parseStatus === 'failed' || !result.data || !Array.isArray(result.data.animations)) {
@@ -759,10 +1071,25 @@ async function readTaeEnvelope(
       ok: false,
       result: {
         ok: false,
-        error: { code: 'TAE_READ_FAILED', message: `无法读取 TAE 文档：${filePath}` },
+        error: diagnostics.some(d => d.message.includes('ACTION_TAE_ANIMATION_ID_AMBIGUOUS'))
+          ? { code: 'TAE_EVENT_AMBIGUOUS', message: diagnostics.find(d => d.message.includes('ACTION_TAE_ANIMATION_ID_AMBIGUOUS'))!.message }
+          : { code: 'TAE_READ_FAILED', message: `无法读取 TAE 文档：${filePath}` },
         diagnostics
       }
     };
+  }
+  for (const address of nativeQueries.slice(1)) {
+    const next = await runBridge<{ identityProjectionVersion?: number; sourceHash?: string; outerFileHash?: string; animations?: Array<Record<string, unknown>> }>({
+      command: 'read-tae-document', filePath, allowedRoots: edit.allowedRoots(), timeoutMs: 120000,
+      commandOptions: nativeOptions(address), ...(edit.oodleRuntimeRoot ? { oodleRuntimeRoot: edit.oodleRuntimeRoot } : {}) });
+    if (next.parseStatus === 'failed' || !next.data?.animations || next.data.sourceHash !== result.data.sourceHash
+      || next.data.outerFileHash !== result.data.outerFileHash
+      || next.data.identityProjectionVersion !== result.data.identityProjectionVersion)
+      return { ok: false, result: { ok: false, error: { code: 'TAE_ACTION_READ_INCOMPLETE', message: '目标动作查询失败或原生来源/读取器版本在查询间改变。' }, diagnostics: asDiagnostics(next.diagnostics) } };
+    for (const animation of next.data.animations) {
+      const key = (value: Record<string, unknown>) => JSON.stringify([value?.animId, value?.taeEntryIndex, value?.taeEntryId, value?.taeEntryName, value?.taeGroup]);
+      if (!result.data.animations.some(existing => key(existing) === key(animation))) result.data.animations.push(animation);
+    }
   }
   const invalidAnimationIndex = result.data.animations.findIndex((anim) => {
     if (anim === null || typeof anim !== 'object') return true;
@@ -782,6 +1109,28 @@ async function readTaeEnvelope(
         diagnostics
       }
     };
+  }
+  for (let index = 0; index < result.data.animations.length; index++) {
+    if (nativePage) break;
+    const animation = result.data.animations[index]!;
+    if (typeof animation.animId !== 'number') continue;
+    const selected = requested.some((address) => address.animId === animation.animId
+      && (address.taeEntryIndex === undefined || address.taeEntryIndex === animation.taeEntryIndex)
+      && (address.taeEntryId === undefined || address.taeEntryId === animation.taeEntryId)
+      && (address.taeEntryName === undefined || address.taeEntryName === animation.taeEntryName)
+      && (address.taeGroup === undefined || address.taeGroup === animation.taeGroup));
+    if (nativeQueries.length > 0 && animation.eventsTruncated !== true) continue;
+    if (!selected && animation.eventsTruncated !== true) continue;
+    const full = await runBridge<{ sourceHash?: string; outerFileHash?: string; animations?: Array<Record<string, unknown>> }>({
+      command: 'read-tae-document', filePath, allowedRoots: edit.allowedRoots(), timeoutMs: 120000,
+      commandOptions: { animId: animation.animId,
+        ...(typeof animation.taeEntryIndex === 'number' ? { taeEntryIndex: animation.taeEntryIndex } : {}) },
+      ...(edit.oodleRuntimeRoot ? { oodleRuntimeRoot: edit.oodleRuntimeRoot } : {})
+    });
+    if (full.parseStatus === 'failed' || !full.data?.animations?.[0]
+      || full.data.sourceHash !== result.data.sourceHash || full.data.outerFileHash !== result.data.outerFileHash) return { ok: false, result: { ok: false,
+        error: { code: 'TAE_ACTION_READ_INCOMPLETE', message: '动作完整读取失败或来源在读取期间变化。' }, diagnostics: asDiagnostics(full.diagnostics) } };
+    result.data.animations[index] = full.data.animations[0];
   }
   const chrId = extractChrId(filePath);
   if (!chrId) {
@@ -803,6 +1152,8 @@ async function readTaeEnvelope(
       ...(typeof anim.taeEntryId === 'number' ? { taeEntryId: anim.taeEntryId } : {}),
       ...(typeof anim.taeEntryName === 'string' ? { taeEntryName: anim.taeEntryName } : {}),
       ...(typeof anim.taeGroup === 'string' ? { taeGroup: anim.taeGroup } : {}),
+      ...(typeof anim.eventCount === 'number' && Number.isSafeInteger(anim.eventCount) && anim.eventCount >= 0 ? { eventCount: anim.eventCount } : {}),
+      ...(typeof anim.eventsTruncated === 'boolean' ? { eventsTruncated: anim.eventsTruncated } : {}),
       events: Array.isArray(anim.events) ? anim.events.map((event) => {
         const startTime = asFinite(event.startTime);
         const endTime = asFinite(event.endTime);
@@ -827,8 +1178,13 @@ async function readTaeEnvelope(
   return {
     ok: true,
     chrId,
+    readerSchemaRevision: typeof result.data.identityProjectionVersion === 'number' ? result.data.identityProjectionVersion : 0,
     ...(result.data.sourceHash ? { sourceHash: result.data.sourceHash } : {}),
+    ...(result.data.outerFileHash ? { outerFileHash: result.data.outerFileHash } : {}),
     ...(result.data.containerSourceHash ? { containerSourceHash: result.data.containerSourceHash } : {}),
+    ...(typeof result.data.animationCount === 'number' ? { animationCount: result.data.animationCount } : {}),
+    ...(typeof result.data.totalEventCount === 'number' ? { totalEventCount: result.data.totalEventCount } : {}),
+    ...(typeof result.data.animationsTruncated === 'boolean' ? { animationsTruncated: result.data.animationsTruncated } : {}),
     ...(typeof result.data.taeEntryCount === 'number' ? { taeEntryCount: result.data.taeEntryCount } : {}),
     ...(Array.isArray(result.data.taeEntries) ? { taeEntries: result.data.taeEntries } : {}),
     animations,
@@ -873,11 +1229,11 @@ async function resolveAnibndFile(
   };
 }
 
-function asDiagnostics(items: Array<{ severity: string; code: string; message: string }>): Diagnostic[] {
+function asDiagnostics(items: Array<{ severity: string; code: string; message: string; details?: unknown }>): Diagnostic[] {
   return items.map((item) => ({
     severity: item.severity === 'warning' || item.severity === 'info' ? item.severity : 'error',
     code: item.code,
-    message: item.message
+    message: item.message, ...(item.details === undefined ? {} : { details: item.details })
   }));
 }
 

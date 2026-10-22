@@ -109,9 +109,33 @@ export class MapModelLoadCache<TGeometry extends MapModelLoadGeometry = MapMeshG
   private readonly uploaded = new Set<string>();
   private disposed = false;
 
+  private readonly timeoutMs: number;
   public constructor(
-    private readonly loader: (modelName: string, signal: AbortSignal) => Promise<TGeometry | null>
-  ) {}
+    private readonly loader: (modelName: string, signal: AbortSignal) => Promise<TGeometry | null>,
+    options: { timeoutMs?: number } = {}
+  ) {
+    this.timeoutMs = options.timeoutMs ?? 180_000;
+    if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 1) throw new Error('MAP_MESH_LOAD_TIMEOUT_INVALID');
+  }
+
+  private runLoader(modelName: string, controller: AbortController): Promise<TGeometry | null> {
+    const signal = controller.signal;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: () => void;
+    let timeout = false;
+    const cancelled = new Promise<never>((_, reject) => {
+      onAbort = () => reject(new Error(`${timeout ? 'MAP_MESH_LOAD_TIMEOUT' : 'MAP_MESH_LOAD_CANCELLED'}: ${modelName}`));
+      signal.addEventListener('abort', onAbort, { once: true });
+      timer = setTimeout(() => { timeout = true; controller.abort(); }, this.timeoutMs);
+    });
+    let loaded: Promise<TGeometry | null>;
+    try { loaded = this.loader(modelName, signal); }
+    catch (error) { loaded = Promise.reject(error); }
+    return Promise.race([loaded, cancelled]).finally(() => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort!);
+    });
+  }
 
   public load(modelName: string): Promise<TGeometry | null> {
     if (this.disposed) {
@@ -126,7 +150,7 @@ export class MapModelLoadCache<TGeometry extends MapModelLoadGeometry = MapMeshG
     if (pending) return pending;
     const controller = new AbortController();
     let request: Promise<TGeometry | null>;
-    request = this.loader(modelName, controller.signal)
+    request = this.runLoader(modelName, controller)
       .then((geometry) => {
         if (this.disposed || controller.signal.aborted) {
           throw new Error(`MAP_MESH_LOAD_CANCELLED: ${modelName}`);
@@ -172,7 +196,7 @@ export class MapModelLoadCache<TGeometry extends MapModelLoadGeometry = MapMeshG
         // ready hit: manifest exists, wire payload not retained — caller acquires from GPU pool.
         return null;
       }
-      const geometry = await this.loader(modelName, controller.signal);
+      const geometry = await this.runLoader(modelName, controller);
       if (this.disposed || controller.signal.aborted) {
         throw new Error(`MAP_MESH_LOAD_CANCELLED: ${modelName}`);
       }

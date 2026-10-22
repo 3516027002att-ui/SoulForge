@@ -1,0 +1,15 @@
+# Trust zone: the judge. Must match TRUST_ZONE in scripts/trust-zone-check.mjs (scripts/gate.test.mjs checks this).
+/.github/ @3516027002att-ui
+/AGENTS.md @3516027002att-ui
+/CLAUDE.md @3516027002att-ui
+/compare/ @3516027002att-ui
+/packages/core/src/patch/ @3516027002att-ui
+/scripts/gate.mjs @3516027002att-ui
+/scripts/gate.test.mjs @3516027002att-ui
+/scripts/trust-zone-check.mjs @3516027002att-ui
+/scripts/trust-zone-check.test.mjs @3516027002att-ui
+/scripts/check.mjs @3516027002att-ui
+/scripts/check.fixture.mjs @3516027002att-ui
+/scripts/verify/ @3516027002att-ui
+/scripts/verify-verify-entrypoint-fixtures.mjs @3516027002att-ui
+/scripts/verify-scheduling-fixtures.mjs @3516027002att-ui

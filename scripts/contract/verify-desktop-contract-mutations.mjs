@@ -8,7 +8,7 @@
  * 变异只作用于 apps/desktop/out 构建产物的临时副本，绝不改源码，也绝不改
  * 原产物：先备份、跑、无条件恢复（finally），并在结尾校验产物已还原。
  */
-import { copyFileSync, readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
@@ -20,22 +20,47 @@ import { structuredSkip } from './desktopSurface.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
-const MAIN_BUNDLE = join(repoRoot, 'apps', 'desktop', 'out', 'main', 'index.js');
-const PRELOAD_BUNDLE = join(repoRoot, 'apps', 'desktop', 'out', 'preload', 'index.cjs');
+const SOURCE_MAIN_BUNDLE = join(repoRoot, 'apps', 'desktop', 'out', 'main', 'index.js');
+const SOURCE_PRELOAD_BUNDLE = join(repoRoot, 'apps', 'desktop', 'out', 'preload', 'index.cjs');
 const CONTRACT = join(here, 'verify-desktop-ipc-contract.mjs');
 const LABEL = 'desktop-contract-mutations';
 
-if (!existsSync(MAIN_BUNDLE) || !existsSync(PRELOAD_BUNDLE)) {
+if (!existsSync(SOURCE_MAIN_BUNDLE) || !existsSync(SOURCE_PRELOAD_BUNDLE)) {
   structuredSkip(LABEL, '桌面构建产物缺失，无法做变异测试');
 }
+
+// Mutations run against private copies of the complete main/preload graphs.
+// Concurrent builds and developer sessions keep their actual artifacts intact.
+const mutationParent = join(repoRoot, '.local-validation');
+mkdirSync(mutationParent, { recursive: true });
+const mutationRoot = mkdtempSync(join(mutationParent, 'legacy-contract-mutants-'));
+if (dirname(mutationRoot) !== mutationParent) throw new Error('CONTRACT_MUTATION_ROOT_UNSAFE');
+process.on('exit', () => rmSync(mutationRoot, { recursive: true, force: true }));
+cpSync(dirname(SOURCE_MAIN_BUNDLE), join(mutationRoot, 'main'), { recursive: true });
+cpSync(dirname(SOURCE_PRELOAD_BUNDLE), join(mutationRoot, 'preload'), { recursive: true });
+const MAIN_BUNDLE = join(mutationRoot, 'main', 'index.js');
+const PRELOAD_BUNDLE = join(mutationRoot, 'preload', 'index.cjs');
 
 function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
 function runContract() {
-  const result = spawnSync(process.execPath, [CONTRACT], { cwd: repoRoot, encoding: 'utf8' });
-  return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+  const result = spawnSync(process.execPath, [CONTRACT], {
+    cwd: repoRoot, encoding: 'utf8',
+    env: { ...process.env, SOULFORGE_CONTRACT_BUNDLE_ROOT: mutationRoot }
+  });
+  const stdout = result.stdout ?? '';
+  const stderr = result.stderr ?? '';
+  let report;
+  for (const stream of [stdout, stderr]) {
+    try {
+      const candidate = JSON.parse(stream.trim());
+      if (candidate.contract === 'desktop-ipc-contract') report = candidate;
+    } catch { /* An exception log is not a completed contract report. */ }
+  }
+  return { status: result.status, stdout, stderr, report,
+    passed: result.status === 0 && report?.ok === true };
 }
 
 /**
@@ -120,7 +145,7 @@ const MUTATIONS = [
 
 const baselineHashes = { main: sha256(MAIN_BUNDLE), preload: sha256(PRELOAD_BUNDLE) };
 const baseline = runContract();
-if (baseline.status !== 0) {
+if (!baseline.passed) {
   console.error(JSON.stringify({
     ok: false, contract: LABEL, code: 'BASELINE_CONTRACT_FAILED',
     message: '未变异时契约门禁就已失败，变异测试结论无意义。',

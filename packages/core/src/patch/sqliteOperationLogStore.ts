@@ -107,6 +107,14 @@ WHERE workspace_id = ? AND op_id = ?
     return row ? this.hydrate(row) : undefined;
   }
 
+  async getTransactionForOperation(opId: string): Promise<TransactionJournalRecord | undefined> {
+    return this.durableRepository().getTransactionForOperation(opId);
+  }
+
+  async findTransactionsForRequest(sessionName: string, requestId: string): Promise<TransactionJournalRecord[]> {
+    return this.durableRepository().findTransactionsForRequest(sessionName, requestId);
+  }
+
   async list(workspaceId = this.workspaceId): Promise<OperationLogRecord[]> {
     this.assertWorkspace(workspaceId);
     const rows = this.database.prepare<[string], PatchHistoryRow>(`

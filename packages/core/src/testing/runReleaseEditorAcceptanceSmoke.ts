@@ -17,7 +17,7 @@ function main(): void {
   const inventory = buildProposedReleaseEditorInventory();
   const schemas = buildReleaseEditorFunctionalScaleSchemas();
   assertInventoryDerivedFromCapabilities(inventory);
-  const approvedEditorContract = assertScopeEditorProjection(inventory);
+  const approvedEditorContract = assertReviewedEditorContract(inventory);
   assertReopenedWriteEditors();
   assertReadOnlyHexAndAssetExclusions();
   assertScaleContractsMatchCurrentSources();
@@ -144,83 +144,32 @@ function assertInventoryDerivedFromCapabilities(
   }
 }
 
-function assertScopeEditorProjection(
+// Reviewed harness expectations retained from the owner-approved editor decision.
+// This is a test fixture, not release evidence or a work-start authorization gate.
+const REVIEWED_EDITOR_MUTATION_MODES = Object.freeze({
+  bnd4: 'typed-mutation',
+  fmg: 'typed-mutation',
+  param: 'typed-mutation',
+  emevd: 'typed-mutation',
+  script: 'whole-inner-file-replacement',
+  tae: 'typed-mutation',
+  esd: 'typed-mutation'
+} as const);
+
+function assertReviewedEditorContract(
   inventory: ReleaseEditorInventoryItem[]
 ): { editorIds: string[]; transitionEditorIds: string[] } {
-  const root = resolve('../..');
-  // 直读 docs/governance/scope.json。
-  //
-  // 此前从交接书 §18.2.1 的内嵌 JSON 里正则抠 scopeItems——那块是 scope.json 的
-  // 逐字复制（1467 行），实测与权威分叉 27/27 条。冻结清单的权威一直是 scope.json，
-  // 从复制品读只是因为当时那份复制品存在；块退成人读摘要表后，正则会直接匹配不到。
-  const scope = JSON.parse(
-    readFileSync(resolve(root, 'docs/governance/scope.json'), 'utf8')
-  ) as {
-    scopeItems?: Array<{
-      scopeItemId?: string;
-      decisionStatus?: unknown;
-      proposedSupport?: unknown;
-      editorIds?: unknown;
-      editorMutationModes?: Record<string, unknown>;
-      deferredToRelease?: unknown;
-      deferredTrack?: unknown;
-      resumeRequires?: unknown;
-      hexEvidenceView?: { included?: unknown; writable?: unknown };
-    }>;
-  };
-  const editorScope = scope.scopeItems?.find((item) => item.scopeItemId === 'SCOPE-EDITORS');
-  if (!editorScope || !Array.isArray(editorScope.editorIds)
-    || editorScope.decisionStatus !== 'user-approved'
-    || editorScope.proposedSupport !== 'supported'
-    || editorScope.deferredToRelease !== null
-    || editorScope.deferredTrack !== null
-    || !Array.isArray(editorScope.resumeRequires)
-    || editorScope.resumeRequires.length !== 0) {
-    throw new Error('SCOPE-EDITORS must expose the current user-approved supported contract');
-  }
-
-  const editorIds = editorScope.editorIds.filter(
-    (editorId): editorId is string => typeof editorId === 'string'
-  );
-  if (editorIds.length !== editorScope.editorIds.length
-    || editorIds.length === 0
-    || new Set(editorIds).size !== editorIds.length
-    || editorIds.some((editorId) => editorId === 'hex'
-      || editorId === 'raw'
-      || !Object.hasOwn(EDITOR_CAPABILITY_CONTRACTS, editorId))) {
-    throw new Error(
-      `current editor contract must expose non-empty unique editorIds: ${JSON.stringify(editorScope.editorIds)}`
-    );
-  }
-
+  const editorIds = Object.keys(REVIEWED_EDITOR_MUTATION_MODES);
   const inventoryIds = inventory.map((item) => item.releaseEditorId);
-  if (inventoryIds.some((editorId) => !editorIds.includes(editorId))) {
+  if (JSON.stringify(inventoryIds) !== JSON.stringify(editorIds)) {
     throw new Error(
-      `core editor inventory is not covered by the current scope projection: ${JSON.stringify(inventoryIds)} != ${JSON.stringify(editorIds)}`
+      `core editor inventory differs from the reviewed fixture: ${JSON.stringify(inventoryIds)}`
     );
   }
-
-  const modes = editorScope.editorMutationModes;
-  const modeKeys = modes !== null && typeof modes === 'object' && !Array.isArray(modes)
-    ? Object.keys(modes)
-    : [];
-  if (modeKeys.length !== editorIds.length
-    || modeKeys.some((editorId) => !editorIds.includes(editorId))
-    || editorIds.some((editorId) => !['typed-mutation', 'whole-inner-file-replacement']
-      .includes(modes?.[editorId] as string))) {
-    throw new Error('SCOPE-EDITORS editorIds/editorMutationModes projection drifted');
+  if (EDITOR_CAPABILITY_CONTRACTS.script.mutationKinds.length !== 0) {
+    throw new Error('script whole-inner-file replacement must not be promoted to typed mutation');
   }
-
-  if (editorScope.hexEvidenceView?.included !== true
-    || editorScope.hexEvidenceView.writable !== false) {
-    throw new Error('SCOPE-EDITORS must keep Hex included as a read-only evidence view');
-  }
-
-  const inventoryIdSet = new Set<string>(inventoryIds);
-  return {
-    editorIds,
-    transitionEditorIds: editorIds.filter((editorId) => !inventoryIdSet.has(editorId))
-  };
+  return { editorIds, transitionEditorIds: [] };
 }
 
 /**
@@ -271,6 +220,8 @@ function assertReadOnlyHexAndAssetExclusions(): void {
   const msb = EDITOR_CAPABILITY_CONTRACTS.msb;
   const flver = EDITOR_CAPABILITY_CONTRACTS.flver;
   if (hex.proposedReleaseEditorId !== null
+    || hex.releaseWriteEnabled !== false
+    || raw.releaseWriteEnabled !== false
     || hex.mutationKinds.length !== 0
     || raw.mutationKinds.length !== 0
     || msb.proposedReleaseEditorId !== null

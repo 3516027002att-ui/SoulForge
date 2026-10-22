@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import type { IndexedFile } from '@soulforge/shared';
 import { analyzeWorkspace } from '@soulforge/core';
 // @ts-ignore Focused runner executes this source with Node TypeScript stripping.
 import { createPostCommitSemanticAnalysisOptions } from './postCommitSemanticAnalysis.ts';
 
-test('post-commit native refresh avoids a duplicate Bridge export and inspection pass', async () => {
+test('post-commit native refresh avoids a duplicate Bridge export and inspection pass', async (context) => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'soulforge-post-commit-analysis-'));
+  context.after(() => rm(workspaceRoot, { recursive: true, force: true }));
   const sourceUri = 'file://param/gameparam/gameparam.parambnd.dcx';
   const file: IndexedFile = {
     id: sourceUri,
@@ -16,7 +21,7 @@ test('post-commit native refresh avoids a duplicate Bridge export and inspection
     resourceKind: 'param',
     parseStatus: 'partial',
     diagnostics: [],
-    absolutePath: 'C:/post-commit-analysis/param/gameparam/gameparam.parambnd.dcx',
+    absolutePath: join(workspaceRoot, 'param/gameparam/gameparam.parambnd.dcx'),
     relativePath: 'param/gameparam/gameparam.parambnd.dcx',
     extension: '.dcx',
     compoundExtension: '.parambnd.dcx',
@@ -27,7 +32,7 @@ test('post-commit native refresh avoids a duplicate Bridge export and inspection
   };
 
   const options = createPostCommitSemanticAnalysisOptions({
-    workspaceRoot: 'C:/post-commit-analysis',
+    workspaceRoot,
     files: [file]
   });
   assert.equal(options.exportNativeCandidateResources, false);
@@ -36,7 +41,7 @@ test('post-commit native refresh avoids a duplicate Bridge export and inspection
 
   const result = await analyzeWorkspace({
     ...options,
-    bridgeExecutablePath: 'C:/missing/SoulForge.Bridge.exe',
+    bridgeExecutablePath: join(workspaceRoot, 'missing/SoulForge.Bridge.exe'),
     bridgeTimeoutMs: 5
   });
   assert.equal(result.parsedFiles, 0, 'the authoritative native refresh owns PARAM decoding');

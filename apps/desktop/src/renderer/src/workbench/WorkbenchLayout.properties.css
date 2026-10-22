@@ -1,0 +1,46 @@
+
+/* ── 属性表（右栏：字段名 + 数值输入）── */
+/* grid 而不是 table：字段数可达数百（ATK_PARAM_ST 有 221 个），table 布局在
+   列宽计算上会随内容跳动，grid 让名值两列对齐稳定。 */
+.wb-props { display: flex; flex-direction: column; }
+.wb-prop {
+  display: grid; grid-template-columns: minmax(9ch, 44%) 1fr;
+  gap: 8px; align-items: center; padding: 2px 10px;
+}
+.wb-prop:hover { background: var(--forge-hover); }
+.wb-prop__name {
+  font-size: 12px; color: var(--ink-1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.wb-prop__enum { font-size: 10px; color: var(--ember-text); }
+.wb-prop__value { min-width: 0; }
+.wb-prop__value input, .wb-prop__value select {
+  width: 100%; padding: 2px 6px; font-family: var(--font-mono); font-size: 12px;
+  color: var(--ink-0); background: var(--forge-0);
+  border: 1px solid var(--line); border-radius: var(--radius-s);
+}
+.wb-prop__value input:focus-visible, .wb-prop__value select:focus-visible {
+  outline: 2px solid var(--ember); outline-offset: -1px;
+}
+/* 只读态必须看得出来：延期格式（MSB/TAE/ESD/FLVER）与未授信元数据下的字段都是
+   只读，若与可编辑态同形，用户会以为「改了没生效」而反复尝试。
+
+   但只读**不用** disabled，也不退化成纯文本 span —— 对照参照工具的做法：
+   相同控件 + readonly + 变色。disabled 和 span 都会丢掉焦点与文本选中，
+   而「把这个数值抄到别处」正是只读字段最常见的用途。 */
+.wb-prop__value input.is-readonly, .wb-prop__value select.is-readonly {
+  color: var(--ink-2); background: var(--forge-2);
+  border-color: transparent; cursor: text;
+}
+/* 仍保留 disabled 样式：它现在只表达「提交中」这个瞬时状态。 */
+.wb-prop__value input:disabled, .wb-prop__value select:disabled {
+  color: var(--ink-3); background: var(--forge-2);
+  border-color: transparent; cursor: progress;
+}
+/* 纯展示值（不可选中的场合，例如条目元信息）仍可用这个类。 */
+.wb-prop__value--readonly {
+  font-family: var(--font-mono); font-size: 12px; color: var(--ink-2);
+  padding: 2px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 只读输入框在两个只读工作台里也要能选中复制。 */
+.wb-prop__value input[readonly] { cursor: text; }

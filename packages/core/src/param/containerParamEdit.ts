@@ -1111,12 +1111,7 @@ async function loadTableRows(
     sourcePath: unpackedPath,
     allowedRoots: [...edit.allowedRoots(), unpackedDir],
     ...(includeAllPayloads ? { includeAllPayloads: true } : { rowIds }),
-    resolveRowDataSize: async (header) => {
-      const definition = await loadTrustedDefinition(
-        header.typeName, undefined, header.dataVersion, edit.session.meta.game
-      );
-      return definition.ok ? definition.document.rowDataSize : undefined;
-    },
+    resolveRowDataSize: (header) => resolveTrustedParamRowWidth(header, edit.session.meta.game),
     timeoutMs: 120_000,
     maxFrameBytes: includeAllPayloads ? 32 * 1024 * 1024 : 8 * 1024 * 1024
   }, bridgeScope.run);
@@ -1317,6 +1312,20 @@ function readFieldValue(
 ): number | string | boolean | null {
   const values = decodeRowFields(Buffer.from(rowDataBase64, 'base64'), definition);
   return values.find((item) => item.fieldId === fieldId)?.value ?? null;
+}
+
+/**
+ * Row width of a single-row 32-bit PARAM from the trusted first-party definition. The Bridge cannot bound such a row
+ * alone (PARAM_ROW_SIZE_REQUIRED) and readParamDocumentViaBridge retries with this width. undefined when no definition
+ * matches: the caller fails the read instead of guessing. compare/run.mjs uses it too, so the comparison drives the
+ * same read path as the editor.
+ */
+export async function resolveTrustedParamRowWidth(
+  header: { typeName: string; dataVersion: number },
+  game: string
+): Promise<number | undefined> {
+  const definition = await loadTrustedDefinition(header.typeName, undefined, header.dataVersion, game);
+  return definition.ok ? definition.document.rowDataSize : undefined;
 }
 
 async function loadTrustedDefinition(

@@ -1,0 +1,249 @@
+{
+  "experiment": "param-postcommit-cache-retention",
+  "scope": {
+    "owner": "desktop PARAM IPC cache",
+    "nativeTransport": "deterministic fixture",
+    "commit": "settled-result fixture",
+    "historicalFullWorkspaceOom": "unproven"
+  },
+  "fixture": {
+    "files": 12,
+    "rowsPerFile": 256,
+    "bytesPerRow": 4096,
+    "native": "deterministic-fixture",
+    "commit": "settled-result-fixture"
+  },
+  "sourceBinding": {
+    "measuredLocalBaselineCommit": "de382edc4cb43b6980c01f1e6b6835451e4fdc50",
+    "measuredLocalFixedCommit": "d9eef70c9b5c93265debfb4177c9e37359fe7242",
+    "publishedEquivalentCommit": "461387d7ecaa414fdc8647cc2eafc46da9114216",
+    "identityQualification": "Historical measurements used the local commits; the published baseline is a verified source-equivalent reproduction reference.",
+    "equivalentTree": "d57df0532eaef5e3a2c3d0b0259201e9e34f27bf",
+    "equivalentParamBlob": "2b9c3e554d0af848a1a4d145b2b9adbf3b67a93c",
+    "handlerSha256": {
+      "baseline": "d6ad817ee86f1e58b7e80f31618c92d6ec0569a4ea18b3ae1b8d54cfc7f2b4aa",
+      "fixed": "26bb9777dade4aac3795a651cebaca592f6adc6bf4f9485543df38d935c7c716"
+    },
+    "bundleSha256": {
+      "baseline": "8625fa2712cf80b5700d24ec12434e20ce3b35c7e5c11c5b32c7b86f01a2175e",
+      "fixed": "cac72bcb2e22ff27c67280b9b0e50b8edae7bd4e9728bbf36b9a0c57cc673553",
+      "electronBaseline": "723447852302dbb134a505b27d9f2838b7967d21c9acadda2ec8278e82dedb18",
+      "electronFixed": "5e3371eb01101a48ddc54889eb6bb01349004a109df1814e86a5d465e3454176"
+    }
+  },
+  "runtime": {
+    "node": {
+      "node": "v24.19.0",
+      "v8": "13.6.233.17-node.51",
+      "role": "standalone-actual-ipc-handler-fixture",
+      "electron": null,
+      "heapLimit": 2348810240
+    },
+    "electronMain": {
+      "node": "v24.17.0",
+      "v8": "15.0.245.13-electron.0",
+      "role": "electron-browser-actual-ipc-handler-fixture",
+      "electron": "43.0.0",
+      "heapLimit": 4395630592,
+      "sandboxIntact": true
+    }
+  },
+  "metrics": {
+    "node": {
+      "peakHeapUsedBytes": {
+        "baseline": 43909696,
+        "fixed": 27964712
+      },
+      "peakRssBytes": {
+        "baseline": 132108288,
+        "fixed": 129310720
+      },
+      "finalPostGcHeapBytes": {
+        "baseline": 43415432,
+        "fixed": 26011400
+      }
+    },
+    "electronMain": {
+      "peakHeapUsedBytes": {
+        "baseline": 36587920,
+        "fixed": 20789828
+      },
+      "peakRssBytes": {
+        "baseline": 187977728,
+        "fixed": 187822080
+      },
+      "finalPostGcHeapBytes": {
+        "baseline": 36303320,
+        "fixed": 19061204
+      }
+    }
+  },
+  "staleRetention": {
+    "documents": {
+      "baseline": 12,
+      "fixed": 0
+    },
+    "rows": {
+      "baseline": 3072,
+      "fixed": 0
+    }
+  },
+  "nativeSmall": {
+    "inputSha256": "621eeccead73f16cdf97c363690415e0d4239920af5bfcc5bb6f5fffcde05e1a",
+    "bridgeExecutableSha256": "352ae4f9d74d57ea8b5cd213490c990c57b7169430aec2a88b3ab099928fbed4",
+    "compiledOutputSha256": {
+      "packages/core/dist/pipeline/workspacePipeline.js": "acbaa54ee632e7a0a75d91dadaaf26f5d11a86aa29ddaed9592f33acac43275c",
+      "packages/core/dist/indexing/workspaceIndex.js": "06faa38675fd362cc7e191ab90154703c2eb9529166286885575eb485f45b649",
+      "packages/core/dist/indexing/knowledgeRefresh.js": "2bac0aa0da1f26492c07dc5606c641a8c79d3f7ef6f0bd80dbb33330607a9a0f",
+      "packages/core/dist/indexing/nativeSemanticRefresh.js": "c3f8966f25c0517c88a618cb0a9273d7f217761a29973f130757ae20d9cc3204",
+      "packages/core/dist/rag/chunkBuilder.js": "3ee781bba9c2f76f9d1f57c37fc6615ffd75506c86d8afef1171a203ffc8ed1a",
+      "packages/shared/dist/index.js": "4aadcc0ae52ed2c905a378100e2476332330ca77a803a04ce5c88626cf3e204a",
+      "scripts/param-memory-loader.mjs": "679405bb3e8e3db27cd215712e0a56388d0737f8ae15f0d8e5ed0c1910de2887"
+    },
+    "preflight": {
+      "tables": 1,
+      "rows": 16,
+      "fields": 48
+    },
+    "commits": 2,
+    "field": "textId",
+    "nativeValues": [
+      -1,
+      0,
+      1
+    ],
+    "ragChunks": 17,
+    "refresh": "converged",
+    "sourceInputUnchanged": true
+  },
+  "fullContainerLimit": {
+    "preflight": {
+      "tables": 131,
+      "rows": 50295,
+      "fields": 0
+    },
+    "postWriteGcHeapBytes": 132681968,
+    "postInvalidationGcHeapBytes": 16976056,
+    "exitCode": 137,
+    "firstNativeRefreshProgressSeen": false,
+    "oomCauseProven": false,
+    "resourceCountersAccessible": false,
+    "formerDescendantsObservable": false,
+    "sourceInputStillUnchanged": true
+  },
+  "rawEvidence": "Optional local experiment output; not a mandatory artifact or gate.",
+  "nativeDirectoryComparison": {
+    "sourceHashBefore": "fdd333bd2497ed1749ca0501db43fd67bf5b354d4faa039c38f59a2394d42998",
+    "sourceSize": 1009714,
+    "bridgeHash": "352ae4f9d74d57ea8b5cd213490c990c57b7169430aec2a88b3ab099928fbed4",
+    "originalUnchanged": true,
+    "identitiesEqual": true,
+    "legs": [
+      {
+        "command": "read-dcx-document",
+        "exitCode": 0,
+        "elapsedMs": 790,
+        "sampledPeakRssBytes": 444239872,
+        "sampleIntervalMs": 20,
+        "entryCount": 138,
+        "entryIdentityHash": "e9e3f646666c967988fea4c62cbb51247b02a4e28863cdde7a9cfd973bcb0137",
+        "sourceHash": "fdd333bd2497ed1749ca0501db43fd67bf5b354d4faa039c38f59a2394d42998",
+        "payloadHash": "2bdb3afb2f362928a98437fb0c0591059586ab9d33c05a3f60fd46f9c7f3970b"
+      },
+      {
+        "command": "list-bnd4-entries",
+        "exitCode": 0,
+        "elapsedMs": 203,
+        "sampledPeakRssBytes": 120455168,
+        "sampleIntervalMs": 20,
+        "entryCount": 138,
+        "entryIdentityHash": "e9e3f646666c967988fea4c62cbb51247b02a4e28863cdde7a9cfd973bcb0137",
+        "sourceHash": "fdd333bd2497ed1749ca0501db43fd67bf5b354d4faa039c38f59a2394d42998",
+        "payloadHash": "2bdb3afb2f362928a98437fb0c0591059586ab9d33c05a3f60fd46f9c7f3970b"
+      }
+    ]
+  },
+  "fullContainerFixed": {
+    "qualification": "Actual standalone core/Bridge/owned commit and RAG flow; complete desktop historical Electron OOM remains unverified. All original game resources remained read-only.",
+    "runtime": {
+      "node": "v24.19.0",
+      "electron": null,
+      "v8": "13.6.233.17-node.51",
+      "role": "standalone-core-probe",
+      "heapLimit": 1006632960
+    },
+    "nativeBridgeHash": "352ae4f9d74d57ea8b5cd213490c990c57b7169430aec2a88b3ab099928fbed4",
+    "sourceInputHash": "fdd333bd2497ed1749ca0501db43fd67bf5b354d4faa039c38f59a2394d42998",
+    "nativeRefreshSourceSha256": "79b6e7215b7ddc545a4be4a427d80a9a2a1c9223438f2b75adf44026b528f94b",
+    "loadedOutputHashes": {
+      "packages/core/dist/pipeline/workspacePipeline.js": "acbaa54ee632e7a0a75d91dadaaf26f5d11a86aa29ddaed9592f33acac43275c",
+      "packages/core/dist/indexing/workspaceIndex.js": "06faa38675fd362cc7e191ab90154703c2eb9529166286885575eb485f45b649",
+      "packages/core/dist/indexing/knowledgeRefresh.js": "2bac0aa0da1f26492c07dc5606c641a8c79d3f7ef6f0bd80dbb33330607a9a0f",
+      "packages/core/dist/indexing/nativeSemanticRefresh.js": "ae986445e8ef12f4741c9ec8005a4dcb0f2727ff79269d877898536b9dcc3641",
+      "packages/core/dist/rag/chunkBuilder.js": "3ee781bba9c2f76f9d1f57c37fc6615ffd75506c86d8afef1171a203ffc8ed1a",
+      "packages/shared/dist/index.js": "4aadcc0ae52ed2c905a378100e2476332330ca77a803a04ce5c88626cf3e204a",
+      "scripts/param-memory-loader.mjs": "679405bb3e8e3db27cd215712e0a56388d0737f8ae15f0d8e5ed0c1910de2887"
+    },
+    "status": "verified",
+    "preflight": {
+      "tables": 131,
+      "rows": 50295,
+      "fields": 0
+    },
+    "rounds": [
+      {
+        "round": 1,
+        "mutation": {
+          "table": "ActionGuideParam",
+          "rowId": 0,
+          "fieldId": "textId",
+          "oldValue": -1,
+          "newValue": 0
+        },
+        "tables": 138,
+        "rows": 50302,
+        "fields": 6948832,
+        "chunks": 50303,
+        "refresh": "converged"
+      },
+      {
+        "round": 2,
+        "mutation": {
+          "table": "ActionGuideParam",
+          "rowId": 0,
+          "fieldId": "textId",
+          "oldValue": 0,
+          "newValue": 1
+        },
+        "tables": 138,
+        "rows": 50302,
+        "fields": 6948832,
+        "chunks": 50303,
+        "refresh": "converged"
+      }
+    ],
+    "budget": {
+      "samplingInterval": 100,
+      "allocationSamplingInterval": 1048576,
+      "snapshots": false,
+      "maxHeapUsed": 805306368,
+      "maxAggregateRss": 1610612736,
+      "maxDurationMs": 240000
+    },
+    "sampledPeakJsHeapBytes": 637551408,
+    "sampledPeakNodeRssBytes": 893054976,
+    "sampledPeakProcessTreeRssBytes": 1598631936,
+    "postGcCompletedHeapBytes": [
+      448907120,
+      449244488
+    ],
+    "releasedHeapBytes": 107208608,
+    "originalUnchanged": true,
+    "heapBudgetQualification": {
+      "maxOldSpaceSizeFlagMiB": 768,
+      "observedJsHeapStopBudgetBytes": 805306368,
+      "measuredTotalV8HeapLimitBytes": 1006632960,
+      "note": "The old-space flag and observed stop budget are separate from the reported total V8 heap limit."
+    }
+  }
+}

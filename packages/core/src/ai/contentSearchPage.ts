@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
+import { cursorIdentity } from '../workspace/cursorIdentity.js';
 
-type SearchTool = 'search_param_rows' | 'search_text_entries';
+type SearchTool = 'search_param_rows' | 'search_text_entries' | 'search_tae_events';
 interface SearchScope {
   workspaceId: string;
   tool: SearchTool;
@@ -9,6 +10,11 @@ interface SearchScope {
   paramNames: string[];
   limit: number;
 }
+
+// v3: the wire scope carries cursorIdentity(workspaceId), never the workspace
+// URL. v1/v2 tokens embedded the absolute workspace path and are rejected; a
+// cursor is only a session-local paging token, so the agent simply re-queries.
+const CONTENT_SEARCH_SESSION = 'content-search-v3';
 
 function invalid(message: string, code = 'SEARCH_CURSOR_SCOPE_MISMATCH'): never {
   throw Object.assign(new Error(message), { code });
@@ -37,24 +43,23 @@ export function contentSearchPage<T>(options: {
   };
   let offset = input.offset ?? 0;
   let expectedHash: string | undefined;
-  let legacyScope: SearchScope | undefined;
-  const domain = options.tool === 'search_param_rows' ? 'param' : 'fmg';
+  const domain = options.tool === 'search_param_rows' ? 'param' : options.tool === 'search_tae_events' ? 'tae' : 'fmg';
   if (input.cursor !== undefined) {
     if (typeof input.cursor !== 'string' || input.offset !== undefined) invalid('续页只传 cursor，不同时传 offset。');
     const payload = parseOpaqueCursor(input.cursor);
-    if (!['content-search-v1', 'content-search-v2'].includes(payload.sessionId) || payload.domain !== domain) invalid('游标不属于当前内容搜索。');
+    if (payload.sessionId !== CONTENT_SEARCH_SESSION || payload.domain !== domain) invalid('游标不属于当前内容搜索，请重新搜索。');
     let parsed: SearchScope;
     try { parsed = JSON.parse(payload.scope) as SearchScope; }
     catch { invalid('搜索游标范围无效。'); }
-    if (!parsed || parsed.workspaceId !== options.workspaceId || parsed.tool !== options.tool
+    if (!parsed || parsed.workspaceId !== cursorIdentity(options.workspaceId) || parsed.tool !== options.tool
       || typeof parsed.query !== 'string' || !Array.isArray(parsed.paramNames)
       || parsed.paramNames.some((name) => typeof name !== 'string')
       || !Number.isSafeInteger(parsed.limit) || parsed.limit < 1 || parsed.limit > 6) invalid('游标与当前工作区或搜索工具不匹配。');
     if ((input.query !== undefined && input.query !== parsed.query)
       || (input.paramNames !== undefined && JSON.stringify(paramNames) !== JSON.stringify(parsed.paramNames))) invalid('续页时不能改变搜索条件。');
     if (input.limit !== undefined && scope.limit > parsed.limit) invalid('恢复当前页只能缩小窗口，不能扩大 limit。');
-    if (payload.sessionId === 'content-search-v1') legacyScope = parsed;
-    scope = { ...parsed, limit: input.limit === undefined ? parsed.limit : scope.limit };
+    // Restore the real workspace id in memory only; it never returns to the wire.
+    scope = { ...parsed, workspaceId: options.workspaceId, limit: input.limit === undefined ? parsed.limit : scope.limit };
     offset = payload.offset;
     expectedHash = payload.sourceHash;
   }
@@ -64,20 +69,15 @@ export function contentSearchPage<T>(options: {
   // transport can retry the current cursor with fewer rows without skipping it.
   const { limit: _windowSize, ...snapshotScope } = scope;
   const hash = createHash('sha256').update(JSON.stringify(snapshotScope));
-  const legacyHash = legacyScope ? createHash('sha256').update(JSON.stringify(legacyScope)) : undefined;
-  for (const match of all) {
-    const fingerprint = JSON.stringify(options.fingerprint(match));
-    hash.update('\0').update(fingerprint);
-    legacyHash?.update('\0').update(fingerprint);
-  }
+  for (const match of all) hash.update('\0').update(JSON.stringify(options.fingerprint(match)));
   const sourceHash = hash.digest('hex');
-  const expectedSnapshotHash = legacyHash?.digest('hex') ?? sourceHash;
-  if (expectedHash !== undefined && expectedHash !== expectedSnapshotHash) invalid('搜索结果已变化，请重新搜索。', 'STALE_READ_CURSOR');
+  if (expectedHash !== undefined && expectedHash !== sourceHash) invalid('搜索结果已变化，请重新搜索。', 'STALE_READ_CURSOR');
   const matches = all.slice(offset, offset + scope.limit);
   const end = offset + matches.length;
   const truncated = end < all.length;
   const nextCursor = truncated ? createOpaqueCursor({
-    sessionId: 'content-search-v2', domain, scope: JSON.stringify(scope), sourceHash, offset: end
+    sessionId: CONTENT_SEARCH_SESSION, domain,
+    scope: JSON.stringify({ ...scope, workspaceId: cursorIdentity(options.workspaceId) }), sourceHash, offset: end
   }) : undefined;
   return {
     query: scope.query, matches, total: all.length, totalCount: all.length,

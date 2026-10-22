@@ -23,7 +23,7 @@ export interface ChangeDiagnostic {
 }
 
 export interface CandidateChange {
-  /** 稳定标识：kind:sourceUri:target（同源同目标的候选会被最新编辑替换） */
+  /** 同一未提交候选保持稳定标识；已在飞/已写入的同目标修订拥有独立 id。 */
   id: string;
   kind: ChangeKind;
   sourceUri: string;
@@ -120,6 +120,7 @@ const TRANSITIONS: Record<ChangeStatus, ChangeStatus[]> = {
 export class ChangeControlStore {
   private state: ChangeControlState = { items: [], committing: false };
   private listeners = new Set<() => void>();
+  private proposalSequence = 0;
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -154,11 +155,17 @@ export class ChangeControlStore {
 
   /** 提出候选：同源同目标的 draft/staged/failed/rejected 被最新编辑替换。 */
   propose(input: ProposeInput): CandidateChange {
-    const id = `${input.kind}:${input.sourceUri}:${input.target}`;
+    const baseId = `${input.kind}:${input.sourceUri}:${input.target}`;
     const replaceable = new Set<ChangeStatus>(['draft', 'staged', 'failed', 'rejected']);
-    const items = this.state.items.filter(
-      (item) => !(item.id === id && replaceable.has(item.status))
-    );
+    const sameTarget = (item: CandidateChange): boolean => item.kind === input.kind
+      && item.sourceUri === input.sourceUri && item.target === input.target;
+    const pending = this.state.items.find(item => sameTarget(item) && replaceable.has(item.status));
+    let id = pending?.id ?? baseId;
+    if (this.state.items.some(item => item.id === id && (!sameTarget(item) || !replaceable.has(item.status)))) {
+      do { id = `${baseId}:revision-${++this.proposalSequence}`; }
+      while (this.state.items.some(item => item.id === id));
+    }
+    const items = this.state.items.filter(item => !(sameTarget(item) && replaceable.has(item.status)));
     const change: CandidateChange = {
       ...input,
       id,

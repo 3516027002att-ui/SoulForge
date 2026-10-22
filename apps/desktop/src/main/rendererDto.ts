@@ -1,5 +1,18 @@
+import type {
+  RendererIndexedFile,
+  RendererBridgeResult,
+  RendererResourcePreview,
+  RendererSaveResult,
+  RendererPatchHistoryEntry
+} from '../ipc/publicTypes.js';
+export type {
+  RendererIndexedFile,
+  RendererBridgeResult,
+  RendererResourcePreview,
+  RendererSaveResult,
+  RendererPatchHistoryEntry
+} from '../ipc/publicTypes.js';
 import {
-  type BridgeResult,
   type Diagnostic,
   type EditorCatalogSummary,
   type EditorDocumentResult,
@@ -8,41 +21,7 @@ import {
   type ResourcePreview,
   type SaveTextResourceResult
 } from '@soulforge/shared';
-import { maskPathFragments } from '@soulforge/shared';
-
-export type RendererIndexedFile = Omit<
-  IndexedFile,
-  'id' | 'workspaceId' | 'sourcePath' | 'absolutePath'
->;
-
-export type RendererBridgeResult<T = unknown> = Omit<BridgeResult<T>, 'sourcePath'>;
-
-export type RendererResourcePreview = Omit<
-  ResourcePreview,
-  'file' | 'nativeInspection' | 'diagnostics'
-> & {
-  file: RendererIndexedFile;
-  nativeInspection?: RendererBridgeResult<unknown>;
-  diagnostics: Diagnostic[];
-};
-
-export type RendererSaveResult = Omit<
-  SaveTextResourceResult,
-  'backupRoot' | 'changedFiles' | 'diagnostics'
-> & {
-  changedFiles: string[];
-  diagnostics: Diagnostic[];
-  /** 成功 native 写回后的新 revision，供 renderer 失效旧文档状态。 */
-  sourceHash?: string;
-  sourceRevision?: number;
-};
-
-export type RendererPatchHistoryEntry = Omit<
-  PatchHistoryEntry,
-  'workspaceId' | 'changedPaths'
-> & {
-  changedPaths: string[];
-};
+import { maskPathFragments, isRendererBinaryPayload, isRendererDiagnosticContext } from '@soulforge/shared';
 
 const SOURCE_TEXT_KEYS = new Set([
   'dslTemplate',
@@ -52,6 +31,9 @@ const SOURCE_TEXT_KEYS = new Set([
   'nextDslTemplate',
   'text'
 ]);
+
+/** Save receipts only need primitive physical identity and logical labels. */
+export type RendererResourceLabelSource = Readonly<Pick<IndexedFile, 'absolutePath' | 'sourcePath' | 'sourceUri'>>;
 
 const SENSITIVE_PATH_KEYS = new Set([
   'absolutePath',
@@ -110,7 +92,7 @@ export function toRendererResourcePreview(preview: ResourcePreview): RendererRes
 
 export function toRendererSaveResult(
   result: SaveTextResourceResult,
-  files: readonly IndexedFile[]
+  files: readonly RendererResourceLabelSource[]
 ): RendererSaveResult {
   return {
     ok: result.ok,
@@ -150,14 +132,15 @@ export function toRendererCatalogSummary(summary: EditorCatalogSummary): EditorC
  * 类型化出口，避免 handler 返回 Promise<unknown> 旁路。
  */
 export function toRendererEditorDocumentResult<T>(
-  result: EditorDocumentResult<T>
+  result: EditorDocumentResult<T>,
+  channel?: 'document.readContent'
 ): EditorDocumentResult<T> {
-  return sanitizeRendererValue(result) as EditorDocumentResult<T>;
+  return (channel ? sanitizeRendererIpcResult(channel, result) : sanitizeRendererValue(result)) as EditorDocumentResult<T>;
 }
 
 export function toRendererHistoryEntry(
   entry: PatchHistoryEntry,
-  files: readonly IndexedFile[]
+  files: readonly RendererResourceLabelSource[]
 ): RendererPatchHistoryEntry {
   return {
     opId: entry.opId,
@@ -182,28 +165,55 @@ export function sanitizeDiagnostics(diagnostics: readonly Diagnostic[]): Diagnos
     code: item.code,
     message: sanitizeRendererString(item.message),
     ...(item.sourceUri ? { sourceUri: sanitizeRendererString(item.sourceUri) } : {}),
-    ...(item.details !== undefined ? { details: sanitizeRendererValue(item.details) } : {})
+    ...(item.details !== undefined ? { details: projectRendererValue(item.details, undefined, [], true) } : {})
   }));
 }
 
 /** Remove filesystem authority-bearing fields from generic Bridge/container DTOs. */
 export function sanitizeRendererValue(value: unknown): unknown {
+  return projectRendererValue(value);
+}
+
+/** Only main's registered channel (or the same service's early projection) selects the profile. */
+export function sanitizeRendererIpcResult(channel: string, value: unknown): unknown {
+  return projectRendererValue(value, channel);
+}
+
+function projectRendererValue(
+  value: unknown,
+  channel?: string,
+  path: readonly (string | number)[] = [],
+  diagnosticContext = false
+): unknown {
+  if (!diagnosticContext && channel && isRendererBinaryPayload(channel, path, value)) return value;
   if (typeof value === 'string') return sanitizeRendererString(value);
   if (value === null || typeof value !== 'object') return value;
-  if (value instanceof Uint8Array || value instanceof ArrayBuffer) return value;
-  if (Array.isArray(value)) return value.map(sanitizeRendererValue);
+  // Raw container bytes retain their existing transport outside diagnostic
+  // context. Diagnostics cannot smuggle opaque bytes instead of masked text.
+  if (value instanceof Uint8Array || value instanceof ArrayBuffer) return diagnosticContext ? '[二进制诊断已隐藏]' : value;
+  if (Array.isArray(value)) return channel || diagnosticContext
+    ? value.map((child, index) => projectRendererValue(child, channel, [...path, index], diagnosticContext))
+    : value.map(sanitizeRendererValue);
 
   const output: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
     if (SENSITIVE_PATH_KEYS.has(key)) continue;
     // Internal workspace ids are currently file URLs and therefore reveal the root.
     if (key === 'workspaceId') continue;
-    // 源码是内容，不是本机路径泄漏。70k 行 DarkScript 不得整串跑盘符/UNC 正则。
-    if (SOURCE_TEXT_KEYS.has(key) && typeof child === 'string') {
+    const childDiagnosticContext = diagnosticContext || isRendererDiagnosticContext(key);
+    const childPath = channel ? [...path, key] : path;
+    if (!childDiagnosticContext && channel && isRendererBinaryPayload(channel, childPath, child)) {
       output[key] = child;
       continue;
     }
-    output[key] = sanitizeRendererValue(child);
+    // 源码是内容，不是本机路径泄漏。70k 行 DarkScript 不得整串跑盘符/UNC 正则。
+    if (typeof child === 'string') {
+      output[key] = !childDiagnosticContext && SOURCE_TEXT_KEYS.has(key) ? child : sanitizeRendererString(child);
+    } else {
+      output[key] = child === null || typeof child !== 'object' ? child
+        : channel || childDiagnosticContext ? projectRendererValue(child, channel, childPath, childDiagnosticContext)
+          : sanitizeRendererValue(child);
+    }
   }
   return output;
 }
@@ -221,7 +231,7 @@ function sanitizeRendererString(value: string): string {
   return maskPathFragments(value);
 }
 
-function pathToResourceLabel(path: string, files: readonly IndexedFile[]): string {
+function pathToResourceLabel(path: string, files: readonly RendererResourceLabelSource[]): string {
   const match = files.find((file) => file.absolutePath === path || file.sourcePath === path);
   return match?.sourceUri ?? '[本机路径已隐藏]';
 }

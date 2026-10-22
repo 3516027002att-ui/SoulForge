@@ -1,17 +1,22 @@
 /**
  * Agent session host: runs one agent session end-to-end — file rollout
- * recording, event emission, cancellation — around runAgentToolLoop.
+ * recording, event emission and cancellation around the shared finite kernel.
  * Host-agnostic (no Electron imports): callers inject the sessions base dir,
  * the model adapter and the tool surface. Desktop wires it to userData +
  * credential vault + workspace tool registry.
  */
 
+import { createProviderBudget, type ProviderBudgetStats } from '../../../agent/src/providerBudget.mjs';
+import { runFiniteAgentAdapter } from './finiteAgentAdapter.js';
+import type { AgentProtocolEvent, FiniteAgentResult, KernelLimits } from '../../../agent/src/index.mjs';
 import { randomUUID } from 'node:crypto';
-import { runAgentToolLoop, redactSecrets } from './agentLoop.js';
+import { redactSecrets } from './agentPolicy.js';
 import { FileRolloutStorage, newRolloutFilePath } from './fileRolloutStorage.js';
 import { RolloutRecorder } from './rolloutRecorder.js';
 import type { ResumedRollout } from './rolloutRecorder.js';
 import { estimateContextTokens } from './contextCompactor.js';
+import { CredentialStreamRedactor } from './credentialStreamRedactor.js';
+import { AGENT_TOOL_RESULT_INSTRUCTIONS } from '../ai/agentToolBridge.js';
 import type {
   AgentEvent,
   AgentPermissionMode,
@@ -34,6 +39,13 @@ import type {
 } from './types.js';
 
 export interface AgentSessionRunParams {
+  /** Compatibility input; the only production kernel is finite. */
+  kernel?: 'finite';
+  runId?: string;
+  requestId?: string;
+  kernelLimits?: KernelLimits;
+  pricing?: { inputPerMillion: number; outputPerMillion: number };
+  onProtocolEvent?: (event: AgentProtocolEvent) => void;
   /** Base directory for rollout files (desktop: userData/agent). */
   sessionsDir: string;
   /** Pre-generated session id; defaults to a fresh UUID. */
@@ -58,8 +70,8 @@ export interface AgentSessionRunParams {
   signal?: AbortSignal;
   streaming?: boolean;
   /**
-   * Approval gate forwarded to the loop. Absent means no user checkpoint —
-   * the mode and registry gates still apply.
+   * Approval channel. Required approvals without a channel wait with a concrete proposal.
+   * A trusted host may explicitly grant an empty approvalRequiredLevels list.
    */
   requestApproval?: (request: ApprovalRequest) => Promise<ApprovalResponse>;
   /** Resolve a unified diff for a pending change; needs filesystem access. */
@@ -97,9 +109,26 @@ export interface AgentSessionRunResult {
   sessionId: string;
   rolloutPath: string;
   run: AgentRunResult;
+  kernel: FiniteAgentResult;
+  providerBudget?: ProviderBudgetStats;
+}
+
+/** Process result DTO. The complete transcript stays in the durable rollout. */
+export interface AgentSessionTerminalResult extends AgentSessionRunResult {
+  historyDelivery: { source: 'rollout'; messageCount: number; omitted: true };
+}
+
+export function toAgentSessionTerminalResult(result: AgentSessionRunResult): AgentSessionTerminalResult {
+  return {
+    ...result,
+    run: {...result.run,messages:[]},
+    kernel: {...result.kernel,messages:[]},
+    historyDelivery: {source:'rollout',messageCount:result.run.messages.length,omitted:true}
+  };
 }
 
 export async function runAgentSession(params: AgentSessionRunParams): Promise<AgentSessionRunResult> {
+  if (params.kernel !== undefined && params.kernel !== 'finite') throw Object.assign(new Error('The legacy production kernel was retired; explicit experiments use the pinned Git baseline.'), {code:'AGENT_LEGACY_KERNEL_RETIRED'});
   const sessionId = params.sessionId ?? randomUUID();
   const startedAt = new Date();
   const rolloutPath = newRolloutFilePath(params.sessionsDir, sessionId, startedAt);
@@ -112,6 +141,12 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     permissionMode: params.permissionMode,
     ...(params.config.model ? { model: params.config.model } : {})
   });
+  const redactActual = (text: string): string => redactSecrets(params.apiKey ? text.replaceAll(params.apiKey, '[REDACTED]') : text);
+  const emitProtocol = (envelope: AgentProtocolEvent): void => {
+    const safe = JSON.parse(JSON.stringify(envelope, (_key, value) => typeof value === 'string' ? redactActual(value) : value)) as AgentProtocolEvent;
+    recorder.enqueue({type:'protocol-event',envelope:safe});
+    params.onProtocolEvent?.(safe);
+  };
   let providerCallIndex = 0;
   const usagePersistenceErrors: string[] = [];
 
@@ -150,21 +185,37 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
       const estimated = estimateContextTokens(request.messages);
       const result = await params.adapter.complete({ ...request, sessionId: request.sessionId ?? sessionId });
       await persistUsage(callIndex, estimated, result.usage);
-      return result;
+      return {...result,message:{...result.message,content:redactActual(result.message.content),
+        ...(result.message.toolCalls ? {toolCalls:result.message.toolCalls.map(call=>({...call,argumentsJson:redactActual(call.argumentsJson)}))}: {})},
+        diagnostics:result.diagnostics.map(diagnostic=>({...diagnostic,message:redactActual(diagnostic.message)}))};
     },
     stream: async function* (request) {
       const callIndex = ++providerCallIndex;
       const estimated = estimateContextTokens(request.messages);
       let inputTokens: number | undefined;
       let outputTokens: number | undefined;
+      const redactors = {
+        'text-delta': new CredentialStreamRedactor(params.apiKey, redactActual),
+        'thinking-delta': new CredentialStreamRedactor(params.apiKey, redactActual)
+      };
       try {
         for await (const event of params.adapter.stream({ ...request, sessionId: request.sessionId ?? sessionId })) {
           if (event.type === 'usage') {
             if (event.inputTokens !== undefined) inputTokens = event.inputTokens;
             if (event.outputTokens !== undefined) outputTokens = event.outputTokens;
           }
-          yield event;
+          if (event.type === 'text-delta' || event.type === 'thinking-delta') {
+            for (const safe of redactors[event.type].push(event)) yield safe;
+          }
+          else if (event.type === 'message-stop') {
+            for (const redactor of Object.values(redactors)) for (const safe of redactor.flush()) yield safe;
+            yield event;
+          }
+          else if (event.type === 'tool-call') yield {...event,toolCall:{...event.toolCall,argumentsJson:redactActual(event.toolCall.argumentsJson)}};
+          else if (event.type === 'error') yield {...event,message:redactActual(event.message)};
+          else yield event;
         }
+        for (const redactor of Object.values(redactors)) for (const safe of redactor.flush()) yield safe;
       } finally {
         await persistUsage(callIndex, estimated, {
           ...(inputTokens !== undefined ? { inputTokens } : {}),
@@ -174,12 +225,20 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     }
   };
 
+  const providerBudget = createProviderBudget(trackedAdapter, {
+    maxOutputTokens: params.maxTotalOutputTokens ?? params.kernelLimits?.maxOutputTokens ?? 100_000,
+    ...(params.kernelLimits?.maxCost != null ? {maxCost:params.kernelLimits.maxCost}:{}),
+    ...(params.pricing ? {pricing:params.pricing}:{})
+  });
+  const activeAdapter = providerBudget.adapter;
+
   const messages: ChatMessage[] = [];
   const resumedMessages = (params.resumeFrom?.messages ?? [])
     .filter((message) => message.role !== 'system');
   if (params.systemPrompt !== undefined && params.systemPrompt.length > 0) {
     messages.push({ role: 'system', content: params.systemPrompt });
   }
+  if(params.tools.length>0 && !messages.some(message=>message.content===AGENT_TOOL_RESULT_INSTRUCTIONS))messages.push({role:'system',content:AGENT_TOOL_RESULT_INSTRUCTIONS});
   if (params.permissionMode === 'full') {
     messages.push({
       role: 'system',
@@ -193,7 +252,7 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     ...(params.userImages && params.userImages.length > 0 ? { images: params.userImages } : {})
   });
 
-  // runAgentToolLoop records only messages appended during execution. Seed the
+  // The kernel records only messages appended during execution. Seed the
   // durable rollout with the exact normalized history sent to the provider,
   // excluding this turn's transient image payload.
   for (const message of messages) {
@@ -209,17 +268,13 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
   // Deltas are transient UI payloads but still cross a process boundary —
   // redact secret-shaped text before emission, matching the durable policy.
   const emit = (event: AgentEvent): void => {
-    if (!params.onEvent) return;
-    params.onEvent(
-      event.type === 'agent-message-delta' || event.type === 'agent-thinking-delta'
-        ? { ...event, text: redactSecrets(event.text) }
-        : event
-    );
+    const safe = JSON.parse(JSON.stringify(event, (_key, value) => typeof value === 'string' ? redactActual(value) : value)) as AgentEvent;
+    params.onEvent?.(safe);
   };
 
   let primaryError: unknown = null;
   try {
-    const run = await runAgentToolLoop(trackedAdapter, {
+    const runRequest = {
       config: params.config,
       apiKey: params.apiKey,
       messages,
@@ -249,7 +304,14 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
         : {}),
       onEvent: emit,
       rollout: recorder
+    };
+    const finite = await runFiniteAgentAdapter(activeAdapter, runRequest, {
+      runId: params.runId ?? sessionId, requestId: params.requestId ?? sessionId,
+      onProtocolEvent: emitProtocol,
+      ...(params.kernelLimits ? { limits: params.kernelLimits } : {}),
+      ...(params.pricing ? { pricing: params.pricing } : {})
     });
+    const run = finite.run;
 
     if (usagePersistenceErrors.length > 0) {
       run.diagnostics.push({
@@ -258,7 +320,7 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
         message: `provider usage 已写入会话 rollout，但 app.db 索引失败 ${usagePersistenceErrors.length} 次。`
       });
     }
-    return { sessionId, rolloutPath, run };
+    return { sessionId, rolloutPath, run, kernel: finite.kernel, providerBudget:providerBudget.stats() };
   } catch (error) {
     primaryError = error;
     recorder.enqueue({ type: 'interrupted', at: new Date().toISOString() });

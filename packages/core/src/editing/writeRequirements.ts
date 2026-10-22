@@ -1,10 +1,11 @@
+import { parseActionAddress } from '@soulforge/shared';
 /** T09 写入要求：从实际修改 payload 逐项提取目标及所需读取形状；未分类工具失败关闭。 */
 import { resolveGameparamContainer } from '../param/containerParamEdit.js';
 import { ProofError } from './nativeReadProofStore.js';
 import { paramObjectKey, paramOuterKey, emevdObjectKey } from './proofIdentities.js';
 import {
   outerFileKey, fmgObjectKey, fmgContainerKey,
-  taeObjectKey, parseTaeAddress,
+  taeObjectKey, taeActionKey, parseTaeAddress,
   msbObjectKey, msbAddressKey, msbModifiedFields
 } from './proofIdentities.js';
 import type { WorkspaceSession } from '../workspace/workspaceSession.js';
@@ -96,6 +97,8 @@ export function buildWriteRequirement(toolName: string, input: unknown, outerSou
       const chain = Array.isArray(record.childChain) ? record.childChain.join('/') : '?';
       return [{ objectKey: `script|${chain}`, outerSourceKey, requiredShape: 'full-script' as const }];
     }
+    case 'insert_tae_events':
+      return taeInsertionRequirements(input, outerSourceKey, () => outerSourceKey);
     case 'mutate_tae_event_times': {
       const record = recordOf(input);
       const animId = intOf(record.animId);
@@ -284,6 +287,14 @@ export async function buildSessionWriteRequirements(
       };
     });
   }
+  if (toolName === 'insert_tae_events') {
+    try {
+      const outerKey = outerFileKey(overlayRoot, stringOf(record.file));
+      return taeInsertionRequirements(input, outerKey, file => outerFileKey(overlayRoot, file));
+    } catch (error) {
+      throw new ProofError('NATIVE_READ_REQUIRED', error instanceof Error ? error.message : String(error));
+    }
+  }
   if (toolName === 'mutate_tae_event_times') {
     const rawEdits = Array.isArray(record.edits) ? record.edits : [record];
     let outerKey: string;
@@ -412,12 +423,34 @@ export async function buildSessionWriteRequirements(
   );
 }
 
+function taeInsertionRequirements(input: unknown, outerKey: string, templateKey: (file: string) => string): WriteTargetRequirement[] {
+  const record = recordOf(input); const events = record.events;
+  if (!Array.isArray(events) || events.length === 0) throw new Error('WRITE_REQUIREMENT_EMPTY_EDITS');
+  return events.flatMap(raw => {
+    const event = recordOf(raw); const template = recordOf(event.template);
+    const target = parseActionAddress(stringOf(event.address) ?? '');
+    const source = parseTaeAddress(stringOf(template.address) ?? '');
+    if (!target || target.animId === undefined || target.eventIndex !== undefined || !source)
+      throw new Error('WRITE_REQUIREMENT_MISSING_FIELD');
+    const sourceKey = stringOf(template.file) ? templateKey(stringOf(template.file)!) : outerKey;
+    const fields = Array.isArray(event.fields) ? event.fields.flatMap(rawField => {
+      const field = recordOf(rawField); return [ ...(stringOf(field.fieldName) ? [stringOf(field.fieldName)!] : []),
+        ...(intOf(field.fieldIndex) === undefined ? [] : [`fieldIndex:${intOf(field.fieldIndex)}`]) ];
+    }) : [];
+    return [{ objectKey: taeActionKey(outerKey, target.chr, target.animId, target), outerSourceKey: outerKey,
+      requiredFields: ['actionIdentity'], requiredShape: 'fields' as const },
+      { objectKey: taeObjectKey(sourceKey, source.chrId, source.animId, source.eventIndex, source), outerSourceKey: sourceKey,
+        requiredFields: ['eventTypeId', ...fields], requiredShape: 'fields' as const }];
+  });
+}
+
 function probeInputFor(tool: string): unknown {
   switch (tool) {
     case 'mutate_param_fields': return { edits: [{ table: 'T', rowId: 1, fieldId: 'f', value: 1 }] };
     case 'mutate_fmg_entries': return { entries: [{ table: 'T', textId: 1 }] };
     case 'apply_emevd_dsl': return { events: [{ eventId: 1 }] };
     case 'mutate_luabnd_script': return { childChain: ['a.lua'] };
+    case 'insert_tae_events': return { file: 'c0000.tae', events: [{ address: 'c0000#A1', template: { address: 'c0000#A1.e0' } }] };
     case 'mutate_tae_event_times': return { taeEntryIndex: 0, animId: 1, eventIndex: 0 };
     case 'mutate_tae_event_fields': return { taeEntryIndex: 0, animId: 1, eventIndex: 0, fieldIndex: 0, value: 1 };
     case 'mutate_msb_part_transform': return { parts: [{ nativeObjectKey: 'k' }] };

@@ -35,6 +35,18 @@ export interface MapGeometryPrepareTelemetryEvent {
   errorCode?: MapGeometryPrepareErrorCode;
 }
 
+/** Renderer-local, per-call boundaries; worker duration is diagnostic only. */
+export interface MapGeometryPrepareObservation {
+  jobId: string;
+  status: MapGeometryPrepareTelemetryEvent['status'];
+  enqueuedAtMs: number;
+  startedAtMs: number | null;
+  completedAtMs: number;
+  timeOriginAtEnqueue: number | null;
+  timeOriginAtCompletion: number | null;
+  reportedWorkerDurationMs?: number;
+}
+
 export interface MapGeometryPrepareStats {
   submitted: number;
   completed: number;
@@ -67,6 +79,15 @@ function createDefaultWorker(): MapGeometryPrepareWorkerPort {
   return new Worker(new URL('./mapGeometryPrepareWorker.ts', import.meta.url), { type: 'module' });
 }
 
+function readRendererTimeOrigin(): number | null {
+  try {
+    const origin = performance.timeOrigin;
+    return Number.isFinite(origin) ? origin : null;
+  } catch {
+    return null;
+  }
+}
+
 interface PrepareJob {
   id: string;
   chunks: MapStaticGeometryChunk[];
@@ -76,6 +97,8 @@ interface PrepareJob {
   abortListener?: () => void;
   enqueuedAt: number;
   startedAt?: number;
+  timeOriginAtEnqueue: number | null;
+  onObservation: ((observation: MapGeometryPrepareObservation) => void) | undefined;
   timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   metadata: { texturePreviewToken?: string; textureColorSpace?: string };
 }
@@ -146,7 +169,8 @@ export class MapGeometryPrepareClient {
   public prepare(
     chunks: readonly MapStaticGeometryChunk[],
     signal?: AbortSignal,
-    metadata: { texturePreviewToken?: string; textureColorSpace?: string } = {}
+    metadata: { texturePreviewToken?: string; textureColorSpace?: string } = {},
+    onObservation?: (observation: MapGeometryPrepareObservation) => void
   ): Promise<PreparedMapGeometry> {
     if (this.disposed) {
       return Promise.reject(new MapGeometryPrepareError(
@@ -177,6 +201,8 @@ export class MapGeometryPrepareClient {
         reject,
         signal,
         enqueuedAt: performance.now(),
+        timeOriginAtEnqueue: onObservation ? readRendererTimeOrigin() : null,
+        onObservation,
         timeoutHandle: undefined,
         metadata
       };
@@ -397,8 +423,12 @@ export class MapGeometryPrepareClient {
   }
 
   private recordJobOutcome(job: PrepareJob, error: unknown | null, prepareDurationMs?: number): void {
-    const clientDurationMs = Math.max(0, performance.now() - (job.startedAt ?? job.enqueuedAt));
-    const queueWaitMs = Math.max(0, (job.startedAt ?? performance.now()) - job.enqueuedAt);
+    const completedAtMs = performance.now();
+    const onObservation = job.onObservation;
+    job.onObservation = undefined;
+    const timeOriginAtCompletion = onObservation ? readRendererTimeOrigin() : null;
+    const clientDurationMs = Math.max(0, completedAtMs - (job.startedAt ?? job.enqueuedAt));
+    const queueWaitMs = Math.max(0, (job.startedAt ?? completedAtMs) - job.enqueuedAt);
     this.totalDurationMs += clientDurationMs;
     if (prepareDurationMs !== undefined && Number.isFinite(prepareDurationMs) && prepareDurationMs >= 0) {
       this.totalPrepareDurationMs += prepareDurationMs;
@@ -428,6 +458,20 @@ export class MapGeometryPrepareClient {
       });
     } catch {
       // Observability must never change the prepare/commit result.
+    }
+    try {
+      onObservation?.({
+        jobId: job.id,
+        status,
+        enqueuedAtMs: job.enqueuedAt,
+        startedAtMs: job.startedAt ?? null,
+        completedAtMs,
+        timeOriginAtEnqueue: job.timeOriginAtEnqueue,
+        timeOriginAtCompletion,
+        ...(prepareDurationMs === undefined ? {} : { reportedWorkerDurationMs: prepareDurationMs })
+      });
+    } catch {
+      // Per-call diagnostics must never change the prepare/commit result.
     }
   }
 

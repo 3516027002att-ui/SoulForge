@@ -1,0 +1,61 @@
+
+/* ═══════════ 欢迎页：真实工作区摘要（统计/待审查/最近打开） ═══════════ */
+/* 隐藏不用 transition：节流窗口下过渡冻结可能残留幽灵遮罩。 */
+.editor-welcome {
+  position: absolute; inset: 0; display: grid; place-items: start center;
+  background: var(--canvas, var(--forge-1)); z-index: 3; overflow-y: auto; padding: 8vh 0 32px;
+}
+.editor-welcome.is-hidden { display: none; }
+.welcome { width: min(720px, 92%); color: var(--ink-1); animation: rise-in var(--dur-trans) var(--ease-standard); }
+.welcome__head { display: flex; align-items: center; gap: 10px; }
+.welcome-mark { display: block; flex: none; width: 26px; height: 26px; object-fit: contain; }
+.welcome__head h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink-0); }
+.welcome__ws { font-size: 11px; color: var(--ink-2); font-family: var(--font-mono); }
+.welcome__stats { font-size: 12px; color: var(--ink-2); margin: 8px 0 20px; }
+.welcome__section { margin-bottom: 20px; }
+.welcome-empty { text-align: left; padding: 8px 0; }
+
+/* 待审查变更行：对象 + 摘要 + 动作 */
+.review-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+  border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--forge-1);
+  margin-bottom: 6px; font-size: 12px;
+}
+.review-row__target { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-0); flex: none; max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.review-row__delta { flex: 1; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.review-row .btn { flex: none; }
+
+/* 最近打开 */
+.welcome-quick__label {
+  font-size: 11px; font-weight: 600; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--ink-2); margin-bottom: 8px;
+}
+.welcome-quick__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; }
+.quick-item {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px; text-align: left;
+  background: var(--forge-1); border: 1px solid var(--line); border-radius: var(--radius-l);
+  transition: border-color var(--dur-micro), background var(--dur-micro);
+}
+.quick-item:hover { border-color: var(--line-strong); background: var(--forge-2); }
+.quick-item__body { flex: 1; min-width: 0; }
+.quick-item__name {
+  display: block; font-size: 12px; font-family: var(--font-mono); color: var(--ink-0);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.quick-item__desc { display: block; font-size: 10.5px; color: var(--ink-2); margin-top: 1px; }
+.quick-item__ext {
+  font-size: 9.5px; font-weight: 600; font-family: var(--font-mono);
+  color: var(--ink-2); flex: none;
+}
+
+.welcome-meta {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  margin-top: 24px; padding-top: 12px; border-top: 1px solid var(--line);
+  font-size: 11px; color: var(--ink-3);
+}
+.welcome-shortcuts { display: flex; gap: 16px; flex: none; }
+@media (max-width: 720px) {
+  .welcome-meta { flex-direction: column; align-items: flex-start; }
+  .review-row { flex-wrap: wrap; }
+  .review-row__target { max-width: 100%; }
+}

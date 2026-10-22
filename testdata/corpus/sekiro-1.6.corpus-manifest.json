@@ -2198,5 +2198,765 @@
       "format": "KRAK",
       "observedVariant": "DCX_KRAK_11000_44_6_0"
     }
-  ]
+  ],
+  "correctnessFixtures": {
+    "schemaVersion": "1.0.0",
+    "version": "sekiro-transferred-mods-2026-09-30-bb5eccc152ad",
+    "sourceSnapshotId": "bb5eccc152ad0f07853855f4aeab18fc2ce086098355fcd223fb27339f4ae34d",
+    "oracle": {
+      "repository": "https://github.com/soulsmods/SoulsFormatsNEXT",
+      "commit": "ee1dd61958f60bdc51ce3da548e9a90a8ab39905",
+      "assemblySha256": "59b0367fd093fbff3a1cc661ee59a350f22a0480e4733ff47c28623a9b2a8228",
+      "exporterSha256": "0f6c60fc45ba631ac0195134a6a868c5d53bbc693df1f5454b525526b19fd8fc",
+      "lineageLimit": "Independent execution; shared upstream format knowledge is not independent format discovery"
+    },
+    "expectationChange": "Replaces unbound historical 33266/142 and >=200 assumptions with independently parsed counts for these explicit transferred source hashes; the legacy release corpus entries remain a separate fixed input set.",
+    "fixtures": [
+      {
+        "role": "emevd-primary",
+        "relativePath": "mods/event/common.emevd.dcx",
+        "sha256": "3a3a0a40f77b558349983e69d30250d9cd900ba70190d32e5e8d4aadabdb4a04",
+        "byteLength": 336578,
+        "expected": {
+          "format": "EMEVD",
+          "eventCount": 1783,
+          "instructionCount": 87892,
+          "instructionKindCount": 144,
+          "distribution": [
+            {
+              "bank": 0,
+              "id": 0,
+              "count": 1329
+            },
+            {
+              "bank": 1,
+              "id": 0,
+              "count": 31
+            },
+            {
+              "bank": 3,
+              "id": 0,
+              "count": 619
+            },
+            {
+              "bank": 3,
+              "id": 1,
+              "count": 59
+            },
+            {
+              "bank": 3,
+              "id": 2,
+              "count": 45
+            },
+            {
+              "bank": 3,
+              "id": 3,
+              "count": 40
+            },
+            {
+              "bank": 3,
+              "id": 4,
+              "count": 663
+            },
+            {
+              "bank": 3,
+              "id": 8,
+              "count": 57
+            },
+            {
+              "bank": 3,
+              "id": 10,
+              "count": 3
+            },
+            {
+              "bank": 3,
+              "id": 12,
+              "count": 16
+            },
+            {
+              "bank": 3,
+              "id": 17,
+              "count": 12
+            },
+            {
+              "bank": 3,
+              "id": 20,
+              "count": 1
+            },
+            {
+              "bank": 3,
+              "id": 24,
+              "count": 5
+            },
+            {
+              "bank": 3,
+              "id": 26,
+              "count": 1
+            },
+            {
+              "bank": 4,
+              "id": 0,
+              "count": 103
+            },
+            {
+              "bank": 4,
+              "id": 2,
+              "count": 17
+            },
+            {
+              "bank": 4,
+              "id": 5,
+              "count": 3359
+            },
+            {
+              "bank": 4,
+              "id": 7,
+              "count": 1
+            },
+            {
+              "bank": 4,
+              "id": 8,
+              "count": 4
+            },
+            {
+              "bank": 4,
+              "id": 9,
+              "count": 30
+            },
+            {
+              "bank": 4,
+              "id": 28,
+              "count": 12
+            },
+            {
+              "bank": 4,
+              "id": 34,
+              "count": 18
+            },
+            {
+              "bank": 4,
+              "id": 35,
+              "count": 5
+            },
+            {
+              "bank": 4,
+              "id": 36,
+              "count": 3
+            },
+            {
+              "bank": 4,
+              "id": 37,
+              "count": 54
+            },
+            {
+              "bank": 4,
+              "id": 39,
+              "count": 8
+            },
+            {
+              "bank": 12,
+              "id": 2,
+              "count": 20
+            },
+            {
+              "bank": 12,
+              "id": 3,
+              "count": 1
+            },
+            {
+              "bank": 12,
+              "id": 4,
+              "count": 6
+            },
+            {
+              "bank": 1000,
+              "id": 1,
+              "count": 38
+            },
+            {
+              "bank": 1000,
+              "id": 2,
+              "count": 23
+            },
+            {
+              "bank": 1000,
+              "id": 3,
+              "count": 2
+            },
+            {
+              "bank": 1000,
+              "id": 4,
+              "count": 1777
+            },
+            {
+              "bank": 1000,
+              "id": 5,
+              "count": 11
+            },
+            {
+              "bank": 1000,
+              "id": 6,
+              "count": 1
+            },
+            {
+              "bank": 1000,
+              "id": 8,
+              "count": 1
+            },
+            {
+              "bank": 1000,
+              "id": 101,
+              "count": 92
+            },
+            {
+              "bank": 1000,
+              "id": 103,
+              "count": 144
+            },
+            {
+              "bank": 1000,
+              "id": 105,
+              "count": 3
+            },
+            {
+              "bank": 1000,
+              "id": 107,
+              "count": 34
+            },
+            {
+              "bank": 1001,
+              "id": 0,
+              "count": 219
+            },
+            {
+              "bank": 1001,
+              "id": 1,
+              "count": 3661
+            },
+            {
+              "bank": 1001,
+              "id": 2,
+              "count": 1
+            },
+            {
+              "bank": 1003,
+              "id": 1,
+              "count": 240
+            },
+            {
+              "bank": 1003,
+              "id": 2,
+              "count": 108
+            },
+            {
+              "bank": 1003,
+              "id": 3,
+              "count": 42
+            },
+            {
+              "bank": 1003,
+              "id": 4,
+              "count": 1
+            },
+            {
+              "bank": 1003,
+              "id": 7,
+              "count": 10
+            },
+            {
+              "bank": 1003,
+              "id": 11,
+              "count": 1
+            },
+            {
+              "bank": 1003,
+              "id": 13,
+              "count": 1
+            },
+            {
+              "bank": 1003,
+              "id": 101,
+              "count": 281
+            },
+            {
+              "bank": 1003,
+              "id": 103,
+              "count": 8
+            },
+            {
+              "bank": 1003,
+              "id": 107,
+              "count": 19
+            },
+            {
+              "bank": 1003,
+              "id": 111,
+              "count": 2
+            },
+            {
+              "bank": 1003,
+              "id": 200,
+              "count": 1
+            },
+            {
+              "bank": 1014,
+              "id": 0,
+              "count": 55
+            },
+            {
+              "bank": 1014,
+              "id": 1,
+              "count": 42
+            },
+            {
+              "bank": 1014,
+              "id": 2,
+              "count": 14
+            },
+            {
+              "bank": 1014,
+              "id": 3,
+              "count": 12
+            },
+            {
+              "bank": 1014,
+              "id": 4,
+              "count": 12
+            },
+            {
+              "bank": 1014,
+              "id": 5,
+              "count": 42
+            },
+            {
+              "bank": 1014,
+              "id": 6,
+              "count": 22
+            },
+            {
+              "bank": 1014,
+              "id": 7,
+              "count": 7
+            },
+            {
+              "bank": 1014,
+              "id": 8,
+              "count": 4
+            },
+            {
+              "bank": 1014,
+              "id": 9,
+              "count": 2
+            },
+            {
+              "bank": 1014,
+              "id": 10,
+              "count": 9
+            },
+            {
+              "bank": 1014,
+              "id": 11,
+              "count": 5
+            },
+            {
+              "bank": 1014,
+              "id": 12,
+              "count": 5
+            },
+            {
+              "bank": 1014,
+              "id": 13,
+              "count": 5
+            },
+            {
+              "bank": 1014,
+              "id": 14,
+              "count": 4
+            },
+            {
+              "bank": 1014,
+              "id": 15,
+              "count": 1
+            },
+            {
+              "bank": 1014,
+              "id": 18,
+              "count": 1
+            },
+            {
+              "bank": 1014,
+              "id": 19,
+              "count": 1
+            },
+            {
+              "bank": 1014,
+              "id": 20,
+              "count": 13
+            },
+            {
+              "bank": 2000,
+              "id": 0,
+              "count": 1942
+            },
+            {
+              "bank": 2000,
+              "id": 2,
+              "count": 5
+            },
+            {
+              "bank": 2000,
+              "id": 3,
+              "count": 38
+            },
+            {
+              "bank": 2000,
+              "id": 5,
+              "count": 11
+            },
+            {
+              "bank": 2000,
+              "id": 6,
+              "count": 69
+            },
+            {
+              "bank": 2002,
+              "id": 1,
+              "count": 1
+            },
+            {
+              "bank": 2003,
+              "id": 2,
+              "count": 584
+            },
+            {
+              "bank": 2003,
+              "id": 4,
+              "count": 56
+            },
+            {
+              "bank": 2003,
+              "id": 5,
+              "count": 544
+            },
+            {
+              "bank": 2003,
+              "id": 17,
+              "count": 21
+            },
+            {
+              "bank": 2003,
+              "id": 18,
+              "count": 3146
+            },
+            {
+              "bank": 2003,
+              "id": 22,
+              "count": 70
+            },
+            {
+              "bank": 2003,
+              "id": 23,
+              "count": 1
+            },
+            {
+              "bank": 2003,
+              "id": 24,
+              "count": 461
+            },
+            {
+              "bank": 2003,
+              "id": 28,
+              "count": 3
+            },
+            {
+              "bank": 2003,
+              "id": 31,
+              "count": 5
+            },
+            {
+              "bank": 2003,
+              "id": 32,
+              "count": 5
+            },
+            {
+              "bank": 2003,
+              "id": 36,
+              "count": 6
+            },
+            {
+              "bank": 2003,
+              "id": 41,
+              "count": 1
+            },
+            {
+              "bank": 2003,
+              "id": 42,
+              "count": 6
+            },
+            {
+              "bank": 2003,
+              "id": 62,
+              "count": 26
+            },
+            {
+              "bank": 2003,
+              "id": 63,
+              "count": 24
+            },
+            {
+              "bank": 2003,
+              "id": 76,
+              "count": 2
+            },
+            {
+              "bank": 2003,
+              "id": 80,
+              "count": 61
+            },
+            {
+              "bank": 2003,
+              "id": 82,
+              "count": 12
+            },
+            {
+              "bank": 2003,
+              "id": 83,
+              "count": 2
+            },
+            {
+              "bank": 2003,
+              "id": 85,
+              "count": 1
+            },
+            {
+              "bank": 2003,
+              "id": 86,
+              "count": 1
+            },
+            {
+              "bank": 2003,
+              "id": 88,
+              "count": 19
+            },
+            {
+              "bank": 2003,
+              "id": 90,
+              "count": 64
+            },
+            {
+              "bank": 2003,
+              "id": 91,
+              "count": 153
+            },
+            {
+              "bank": 2003,
+              "id": 93,
+              "count": 3
+            },
+            {
+              "bank": 2003,
+              "id": 94,
+              "count": 4
+            },
+            {
+              "bank": 2004,
+              "id": 5,
+              "count": 415
+            },
+            {
+              "bank": 2004,
+              "id": 8,
+              "count": 27867
+            },
+            {
+              "bank": 2004,
+              "id": 10,
+              "count": 4
+            },
+            {
+              "bank": 2004,
+              "id": 12,
+              "count": 136
+            },
+            {
+              "bank": 2004,
+              "id": 14,
+              "count": 1
+            },
+            {
+              "bank": 2004,
+              "id": 15,
+              "count": 137
+            },
+            {
+              "bank": 2004,
+              "id": 17,
+              "count": 1
+            },
+            {
+              "bank": 2004,
+              "id": 20,
+              "count": 1
+            },
+            {
+              "bank": 2004,
+              "id": 21,
+              "count": 1219
+            },
+            {
+              "bank": 2004,
+              "id": 34,
+              "count": 36000
+            },
+            {
+              "bank": 2004,
+              "id": 39,
+              "count": 305
+            },
+            {
+              "bank": 2004,
+              "id": 40,
+              "count": 4
+            },
+            {
+              "bank": 2004,
+              "id": 41,
+              "count": 37
+            },
+            {
+              "bank": 2004,
+              "id": 42,
+              "count": 136
+            },
+            {
+              "bank": 2004,
+              "id": 63,
+              "count": 4
+            },
+            {
+              "bank": 2004,
+              "id": 65,
+              "count": 55
+            },
+            {
+              "bank": 2005,
+              "id": 3,
+              "count": 46
+            },
+            {
+              "bank": 2005,
+              "id": 6,
+              "count": 1
+            },
+            {
+              "bank": 2005,
+              "id": 19,
+              "count": 17
+            },
+            {
+              "bank": 2006,
+              "id": 1,
+              "count": 108
+            },
+            {
+              "bank": 2006,
+              "id": 2,
+              "count": 79
+            },
+            {
+              "bank": 2006,
+              "id": 3,
+              "count": 1
+            },
+            {
+              "bank": 2007,
+              "id": 2,
+              "count": 3
+            },
+            {
+              "bank": 2007,
+              "id": 11,
+              "count": 3
+            },
+            {
+              "bank": 2007,
+              "id": 12,
+              "count": 4
+            },
+            {
+              "bank": 2007,
+              "id": 13,
+              "count": 4
+            },
+            {
+              "bank": 2007,
+              "id": 14,
+              "count": 22
+            },
+            {
+              "bank": 2007,
+              "id": 16,
+              "count": 17
+            },
+            {
+              "bank": 2007,
+              "id": 17,
+              "count": 25
+            },
+            {
+              "bank": 2008,
+              "id": 1,
+              "count": 1
+            },
+            {
+              "bank": 2008,
+              "id": 4,
+              "count": 1
+            },
+            {
+              "bank": 2010,
+              "id": 2,
+              "count": 114
+            },
+            {
+              "bank": 2010,
+              "id": 3,
+              "count": 1
+            },
+            {
+              "bank": 2010,
+              "id": 8,
+              "count": 105
+            },
+            {
+              "bank": 2010,
+              "id": 9,
+              "count": 5
+            },
+            {
+              "bank": 2011,
+              "id": 1,
+              "count": 9
+            },
+            {
+              "bank": 2012,
+              "id": 1,
+              "count": 158
+            }
+          ]
+        }
+      },
+      {
+        "role": "luabnd-primary",
+        "relativePath": "mods/script/aicommon.luabnd.dcx",
+        "sha256": "64bb64f2669157c11c93030da07360e0ed94b45fab7641fea7b3df0ca6be8269",
+        "byteLength": 105378,
+        "expected": {
+          "format": "BND4",
+          "entryCount": 106,
+          "luaEntryCount": 104
+        }
+      }
+    ]
+  }
 }

@@ -187,6 +187,40 @@ internal sealed class LuabndNativeDocument
     public object ExportAll(string outputDirectory, bool includeMetadataJson = true)
     {
         Directory.CreateDirectory(outputDirectory);
+        var plannedNames = Scripts.Select(script => script.SanitizedName).ToList();
+        if (GnlEntry != null && Gnl != null)
+        {
+            plannedNames.Add(SanitizeEntryBasename(GnlEntry.Name));
+            if (includeMetadataJson) plannedNames.Add("luagnl.symbols.json");
+        }
+        if (InfoEntry != null && Info != null)
+        {
+            plannedNames.Add(SanitizeEntryBasename(InfoEntry.Name));
+            if (includeMetadataJson) plannedNames.Add("luainfo.goals.json");
+        }
+        if (includeMetadataJson) plannedNames.Add("luabnd.manifest.json");
+        if (plannedNames.Distinct(StringComparer.OrdinalIgnoreCase).Count() != plannedNames.Count)
+            throw new InvalidDataException("LUABND_EXPORT_NAME_AMBIGUOUS: export basenames must uniquely identify physical entries.");
+        string ValidateDestination(string path)
+        {
+            var boundary = BridgePathBoundary.Verify(path, new[] { outputDirectory });
+            if (!boundary.Ok) throw new InvalidDataException("LUABND_EXPORT_OUTPUT_OUTSIDE_ROOTS: " + boundary.Message);
+            return boundary.CanonicalPath;
+        }
+        // Check the whole plan before creating any output, including JSON files.
+        foreach (var name in plannedNames) _ = ValidateDestination(Path.Combine(outputDirectory, name));
+        void WriteExport(string path, byte[] bytes)
+        {
+            var destination = ValidateDestination(path);
+            var temporary = Path.Combine(outputDirectory, ".soulforge-lua-export-" + Guid.NewGuid() + ".tmp");
+            try
+            {
+                using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None)) stream.Write(bytes);
+                destination = ValidateDestination(path);
+                File.Move(temporary, destination, overwrite: true);
+            }
+            finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        }
         var exportedFiles = new List<object>();
 
         // 导出每个 Lua 脚本
@@ -194,7 +228,7 @@ internal sealed class LuabndNativeDocument
         {
             var rawBytes = Binder.GetStoredBytes(script.Index);
             var destPath = Path.Combine(outputDirectory, script.SanitizedName);
-            File.WriteAllBytes(destPath, rawBytes);
+            WriteExport(destPath, rawBytes);
             exportedFiles.Add(new
             {
                 kind = "script",
@@ -212,7 +246,7 @@ internal sealed class LuabndNativeDocument
         {
             var gnlBytes = Binder.GetStoredBytes(GnlEntry.Index);
             var gnlDest = Path.Combine(outputDirectory, SanitizeEntryBasename(GnlEntry.Name));
-            File.WriteAllBytes(gnlDest, gnlBytes);
+            WriteExport(gnlDest, gnlBytes);
             exportedFiles.Add(new
             {
                 kind = "luagnl_raw",
@@ -234,7 +268,7 @@ internal sealed class LuabndNativeDocument
                     is64Bit = Gnl.Is64Bit,
                     symbols = Gnl.Symbols
                 }, new JsonSerializerOptions { WriteIndented = true });
-                File.WriteAllText(jsonDest, jsonText, new UTF8Encoding(false));
+                WriteExport(jsonDest, new UTF8Encoding(false).GetBytes(jsonText));
                 exportedFiles.Add(new
                 {
                     kind = "luagnl_json",
@@ -250,7 +284,7 @@ internal sealed class LuabndNativeDocument
         {
             var infoBytes = Binder.GetStoredBytes(InfoEntry.Index);
             var infoDest = Path.Combine(outputDirectory, SanitizeEntryBasename(InfoEntry.Name));
-            File.WriteAllBytes(infoDest, infoBytes);
+            WriteExport(infoDest, infoBytes);
             exportedFiles.Add(new
             {
                 kind = "luainfo_raw",
@@ -272,7 +306,7 @@ internal sealed class LuabndNativeDocument
                     is64Bit = Info.Is64Bit,
                     goals = Info.Goals
                 }, new JsonSerializerOptions { WriteIndented = true });
-                File.WriteAllText(jsonDest, jsonText, new UTF8Encoding(false));
+                WriteExport(jsonDest, new UTF8Encoding(false).GetBytes(jsonText));
                 exportedFiles.Add(new
                 {
                     kind = "luainfo_json",
@@ -308,7 +342,7 @@ internal sealed class LuabndNativeDocument
                     s.Variant
                 }).ToArray()
             }, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(manifestDest, manifestJson, new UTF8Encoding(false));
+            WriteExport(manifestDest, new UTF8Encoding(false).GetBytes(manifestJson));
         }
 
         return new

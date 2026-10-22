@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * 明文脚本条目源码级编辑 smoke。
  *
@@ -49,7 +50,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -77,8 +78,7 @@ interface SmokeResult {
   nonClaims: string[];
 }
 
-const MOD_WORKSPACE = process.env.SOULFORGE_SEKIRO_ROOT
-  ?? 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
+const MOD_WORKSPACE = process.env.SOULFORGE_SEKIRO_ROOT?.trim() ?? '';
 
 function sha256(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
@@ -672,10 +672,11 @@ export async function runPlaintextScriptEditSmoke(): Promise<SmokeResult> {
 
   /* --- Case 14: 真实语料(有则跑,无则结构化跳过) --- */
   {
-    const actionDir = join(MOD_WORKSPACE, 'mods', 'action');
+    const actionDir = MOD_WORKSPACE ? join(MOD_WORKSPACE, 'mods', 'action') : '';
     const targets = ['eventnameid.txt', 'statenameid.txt', 'variablenameid.txt'];
     let available = false;
     try {
+      if (!actionDir) throw new Error('SOULFORGE_SEKIRO_ROOT is not set');
       await stat(join(actionDir, targets[0]!));
       available = true;
     } catch {
@@ -701,7 +702,7 @@ export async function runPlaintextScriptEditSmoke(): Promise<SmokeResult> {
         // 解码前先剥掉尾部对齐填充。
         //
         // 第一版把含填充的整个 buffer 喂给 decodePlaintext,那 3 个 NUL 被解成
-        // 3 个   字符,编回来就多出 3 字节，往返断言差的正好是填充数。
+        // 3 个 \0 字符,编回来就多出 3 字节，往返断言差的正好是填充数。
         // 填充属于容器对齐而非文本内容，两侧必须用同一基准。
         const contentForDecode = verdict.trailingPaddingBytes > 0
           ? bytes.subarray(0, bytes.length - verdict.trailingPaddingBytes)

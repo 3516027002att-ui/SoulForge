@@ -1,0 +1,7 @@
+
+/* ── 脚本源码只读视图（SCRIPT-41）────────────────────────────────── */
+/* 中栏是 Source/只读反汇编主区（flex）；明文按真实 encoding 显示，字节码只给
+   只读字节证据。pre 用等宽字体 + 可滚动容器：大明文（实测 120 KB 级）不把
+   整页顶出滚动条（硬约束 17）。 */
+.script-source { padding: 4px 8px; }
+.script-source__meta { margin-top: 0; align-items: center; }

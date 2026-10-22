@@ -1,0 +1,13 @@
+
+/* Shared ambient field. CSS fallback is static, directional and parameterized. */
+body::before {
+  content: ""; position: fixed; inset: 0; z-index: 0;
+  pointer-events: none;
+  background: var(--field-fallback-background, var(--canvas));
+}
+.sf-ambient-field {
+  position: fixed; inset: 0; z-index: 0;
+  width: 100%; height: 100%; display: none; pointer-events: none;
+}
+html[data-ambient="shader"] .sf-ambient-field { display: block; }
+html[data-ambient="shader"] body::before { display: none; }

@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * Inbound frame reader smoke (BridgeDaemonClient.consumeStdout).
  *
@@ -17,7 +18,7 @@
  *   huge — a single frame past 2x the limit must still trip the guard, so
  *          under-counting cannot silently disable it.
  */
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BridgeDaemonClient, BridgeDaemonError } from '../bridge/bridgeDaemonClient.js';
@@ -143,27 +144,31 @@ async function run(results: Record<string, unknown>, daemonPath: string): Promis
     results.manyTotalBytesExceedsLimit = true;
 
     // The guard alone is a weak witness: it only trips at 2x the limit, so a
-    // small per-frame drift (e.g. measuring the trimmed line and losing CRLF's
-    // '\r') would need ~131072 frames to surface. Assert the invariant instead
-    // — the counter must exactly equal the live buffer's byte length, which
-    // pins drift of even one byte. TS `private` is erased at runtime.
+    // small per-frame drift (e.g. losing CRLF's '\r') would need many frames
+    // to surface. Assert that the UTF-8 byte counter still exactly describes
+    // the incomplete line fragments. TS `private` is erased at runtime.
     const internals = manyClient as unknown as {
-      stdoutBuffer: string;
       stdoutBufferBytes: number;
-      stdoutScanned: number;
+      stdoutBlocks: string[];
+      stdoutTailFragments: string[];
+      stdoutTailBytes: number;
     };
-    const actualBytes = Buffer.byteLength(internals.stdoutBuffer, 'utf8');
+    const actualBytes = [...internals.stdoutBlocks, ...internals.stdoutTailFragments]
+      .reduce((total, fragment) => total + Buffer.byteLength(fragment, 'utf8'), 0);
     if (internals.stdoutBufferBytes !== actualBytes) {
       throw new Error(
-        `inbound byte accounting drifted: counter=${internals.stdoutBufferBytes} actual=${actualBytes}`
+        `inbound fragment byte accounting drifted: counter=${internals.stdoutBufferBytes} actual=${actualBytes}`
       );
     }
-    if (internals.stdoutScanned > internals.stdoutBuffer.length) {
+    const tailBytes = internals.stdoutTailFragments
+      .reduce((total, fragment) => total + Buffer.byteLength(fragment, 'utf8'), 0);
+    if (tailBytes !== internals.stdoutTailBytes || tailBytes >= 16 * 1024) {
       throw new Error(
-        `scan offset past buffer end: scanned=${internals.stdoutScanned} length=${internals.stdoutBuffer.length}`
+        `inbound fragment tail accounting drifted: counter=${internals.stdoutTailBytes} actual=${tailBytes}`
       );
     }
-    results.byteCounterMatchesBuffer = `${internals.stdoutBufferBytes}==${actualBytes}`;
+    results.byteCounterMatchesFragments = `${internals.stdoutBufferBytes}==${actualBytes}`;
+    results.stdoutFragmentBlockCount = internals.stdoutBlocks.length;
   } finally {
     await manyClient.dispose();
   }

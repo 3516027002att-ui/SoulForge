@@ -8,6 +8,7 @@ import {
 } from './mapGeometryPrepare.js';
 import {
   MapGeometryPrepareClient,
+  type MapGeometryPrepareObservation,
   type MapGeometryPrepareTelemetryEvent,
   type MapGeometryPrepareWorkerPort
 } from './mapGeometryPrepareClient.js';
@@ -87,6 +88,307 @@ class StartupErrorWorker implements MapGeometryPrepareWorkerPort {
   public postMessage(_message: MapGeometryPrepareWorkerRequest): void {}
   public terminate(): void {}
 }
+
+async function withRendererClock(
+  clock: { now: () => number; readonly timeOrigin: number },
+  run: () => Promise<void>
+): Promise<void> {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'performance')!;
+  Object.defineProperty(globalThis, 'performance', { configurable: true, value: clock });
+  try {
+    await run();
+  } finally {
+    Object.defineProperty(globalThis, 'performance', original);
+  }
+}
+
+describe('MAP geometry prepare per-call observations', () => {
+  it('records one raw renderer interval and diagnostic worker duration for repeated terminal callbacks', async () => {
+    let now = 20;
+    let origin = 1000;
+    let clockReads = 0;
+    await withRendererClock({
+      now: () => { clockReads += 1; return now; },
+      get timeOrigin() { return origin; }
+    }, async () => {
+      const worker = new FakeWorker();
+      const observations: MapGeometryPrepareObservation[] = [];
+      const telemetry: MapGeometryPrepareTelemetryEvent[] = [];
+      const client = new MapGeometryPrepareClient(() => {
+        now = 10;
+        return worker;
+      }, {
+        concurrency: 1,
+        onTelemetry: (event) => {
+          telemetry.push(event);
+          now = 999;
+          origin = 9999;
+        }
+      });
+      try {
+        const promise = client.prepare([geometryChunk(0)], undefined, {}, (event) => observations.push(event));
+        const callback = worker.onmessage!;
+        const jobId = worker.posted[0]!.jobId;
+        now = 5;
+        origin = 2000;
+        const prepared = prepareMapStaticGeometryChunks([geometryChunk(0)]);
+        const response: MapGeometryPrepareWorkerResponse = {
+          kind: 'result', jobId, prepared, prepareDurationMs: -7
+        };
+        callback({ data: response } as MessageEvent<MapGeometryPrepareWorkerResponse>);
+        callback({ data: response } as MessageEvent<MapGeometryPrepareWorkerResponse>);
+        callback({ data: { kind: 'error', jobId, error: { code: 'late', message: 'late' } } } as MessageEvent<MapGeometryPrepareWorkerResponse>);
+        const result = await promise;
+        assert.equal(clockReads, 3, 'enqueue, worker start and one terminal sample');
+        assert.deepEqual(observations, [{
+          jobId,
+          status: 'completed',
+          enqueuedAtMs: 20,
+          startedAtMs: 10,
+          completedAtMs: 5,
+          timeOriginAtEnqueue: 1000,
+          timeOriginAtCompletion: 2000,
+          reportedWorkerDurationMs: -7
+        }]);
+        assert.equal(result.positionsBytes, prepared.positionsBytes);
+        assert.deepEqual(result, { ...prepared, cacheKey: jobId });
+        assert.equal(client.getStats().completed, 1);
+        assert.equal(client.getStats().totalDurationMs, 0);
+        assert.equal(client.getStats().totalPrepareDurationMs, 0);
+        assert.deepEqual(telemetry, [{
+          kind: 'map-geometry-prepare', status: 'completed', clientDurationMs: 0,
+          prepareDurationMs: -7, queueWaitMs: 0, activeWorkers: 0, queuedJobs: 0
+        }]);
+      } finally {
+        client.dispose();
+      }
+    });
+  });
+
+  it('keeps identical shared geometry calls independent and observation data off the worker DTO', async () => {
+    let now = 10;
+    await withRendererClock({ now: () => now, timeOrigin: 1000 }, async () => {
+      const worker = new FakeWorker();
+      const observationsA: MapGeometryPrepareObservation[] = [];
+      const observationsB: MapGeometryPrepareObservation[] = [];
+      const client = new MapGeometryPrepareClient(() => worker, { concurrency: 1 });
+      try {
+        const chunks = [geometryChunk(0)];
+        const prepared = prepareMapStaticGeometryChunks(chunks);
+        const metadata = { textureColorSpace: 'srgb' };
+        const promiseA = client.prepare(chunks, undefined, metadata, (event) => observationsA.push(event));
+        const idA = worker.posted[0]!.jobId;
+        now = 20;
+        const promiseB = client.prepare(chunks, undefined, metadata, (event) => observationsB.push(event));
+        now = 30;
+        worker.onmessage!({ data: { kind: 'result', jobId: idA, prepared } } as MessageEvent<MapGeometryPrepareWorkerResponse>);
+        const idB = worker.posted[1]!.jobId;
+        assert.notEqual(idA, idB);
+        assert.deepEqual(Object.keys(worker.posted[0]!).sort(), ['chunks', 'jobId', 'kind', 'textureColorSpace']);
+        assert.deepEqual(Object.keys(worker.posted[1]!).sort(), ['chunks', 'jobId', 'kind', 'textureColorSpace']);
+        // An older job's repeat on the same current port cannot settle B.
+        worker.onmessage!({ data: { kind: 'result', jobId: idA, prepared } } as MessageEvent<MapGeometryPrepareWorkerResponse>);
+        assert.equal(observationsB.length, 0);
+        now = 40;
+        worker.onmessage!({ data: { kind: 'result', jobId: idB, prepared } } as MessageEvent<MapGeometryPrepareWorkerResponse>);
+        const [resultA, resultB] = await Promise.all([promiseA, promiseB]);
+        assert.deepEqual(observationsA, [{
+          jobId: idA, status: 'completed', enqueuedAtMs: 10, startedAtMs: 10,
+          completedAtMs: 30, timeOriginAtEnqueue: 1000, timeOriginAtCompletion: 1000
+        }]);
+        assert.deepEqual(observationsB, [{
+          jobId: idB, status: 'completed', enqueuedAtMs: 20, startedAtMs: 30,
+          completedAtMs: 40, timeOriginAtEnqueue: 1000, timeOriginAtCompletion: 1000
+        }]);
+        assert.equal(resultA.positionsBytes, prepared.positionsBytes);
+        assert.equal(resultB.positionsBytes, prepared.positionsBytes);
+        assert.deepEqual(resultA, { ...prepared, cacheKey: idA });
+        assert.deepEqual(resultB, { ...prepared, cacheKey: idB });
+        assert.equal(client.getStats().completed, 2);
+      } finally {
+        client.dispose();
+      }
+    });
+  });
+
+  it('ignores the old port after active cancellation and replacement even with the current job id', async () => {
+    const workers: FakeWorker[] = [];
+    const observationsA: MapGeometryPrepareObservation[] = [];
+    const observationsB: MapGeometryPrepareObservation[] = [];
+    const client = new MapGeometryPrepareClient(() => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    }, { concurrency: 1 });
+    try {
+      const abort = new AbortController();
+      const promiseA = client.prepare([geometryChunk(0)], abort.signal, {}, (event) => {
+        observationsA.push(event);
+        throw new Error('cancel observer unavailable');
+      });
+      const oldCallback = workers[0]!.onmessage!;
+      const oldError = workers[0]!.onerror!;
+      const idA = workers[0]!.posted[0]!.jobId;
+      abort.abort();
+      await assert.rejects(promiseA, { code: 'MAP_PREPARE_CANCELLED' });
+      const promiseB = client.prepare([geometryChunk(10)], undefined, {}, (event) => observationsB.push(event));
+      const workerB = workers[1]!;
+      const idB = workerB.posted[0]!.jobId;
+      for (const jobId of [idA, idB]) {
+        oldCallback({ data: { kind: 'result', jobId, prepared: prepareMapStaticGeometryChunks([geometryChunk(999)]) } } as MessageEvent<MapGeometryPrepareWorkerResponse>);
+      }
+      oldError({ message: 'late cancelled worker error' } as ErrorEvent);
+      assert.equal(observationsB.length, 0);
+      workerB.result(10);
+      const result = await promiseB;
+      assert.deepEqual(result.bounds?.min, [10, 0, 0]);
+      assert.deepEqual(observationsA.map((event) => [event.jobId, event.status]), [[idA, 'cancelled']]);
+      assert.deepEqual(observationsB.map((event) => [event.jobId, event.status]), [[idB, 'completed']]);
+      assert.equal(client.getStats().cancelled, 1);
+      assert.equal(client.getStats().completed, 1);
+    } finally {
+      client.dispose();
+    }
+  });
+
+  it('reports queued cancellation and active or queued disposal once without completing them', async () => {
+    const worker = new FakeWorker();
+    const client = new MapGeometryPrepareClient(() => worker, { concurrency: 1, maxQueued: 2 });
+    const active: MapGeometryPrepareObservation[] = [];
+    const cancelled: MapGeometryPrepareObservation[] = [];
+    const queued: MapGeometryPrepareObservation[] = [];
+    const abort = new AbortController();
+    const promiseA = client.prepare([geometryChunk(0)], undefined, {}, (event) => {
+      active.push(event);
+      throw new Error('active disposal observer unavailable');
+    });
+    const promiseB = client.prepare([geometryChunk(1)], abort.signal, {}, (event) => {
+      cancelled.push(event);
+      throw new Error('queued cancel observer unavailable');
+    });
+    const promiseC = client.prepare([geometryChunk(2)], undefined, {}, (event) => {
+      queued.push(event);
+      throw new Error('queued disposal observer unavailable');
+    });
+    const oldCallback = worker.onmessage!;
+    const idA = worker.posted[0]!.jobId;
+    const outcomes = Promise.all([
+      assert.rejects(promiseA, { code: 'MAP_PREPARE_CLIENT_DISPOSED' }),
+      assert.rejects(promiseB, { code: 'MAP_PREPARE_CANCELLED' }),
+      assert.rejects(promiseC, { code: 'MAP_PREPARE_CLIENT_DISPOSED' })
+    ]);
+    abort.abort();
+    client.dispose();
+    client.dispose();
+    oldCallback({ data: { kind: 'result', jobId: idA, prepared: prepareMapStaticGeometryChunks([geometryChunk(999)]) } } as MessageEvent<MapGeometryPrepareWorkerResponse>);
+    await outcomes;
+    assert.deepEqual(active.map((event) => event.status), ['cancelled']);
+    assert.deepEqual(cancelled.map((event) => event.status), ['cancelled']);
+    assert.deepEqual(queued.map((event) => event.status), ['cancelled']);
+    assert.equal(typeof active[0]!.startedAtMs, 'number');
+    assert.equal(cancelled[0]!.startedAtMs, null);
+    assert.equal(queued[0]!.startedAtMs, null);
+    assert.equal(new Set([active[0]!.jobId, cancelled[0]!.jobId, queued[0]!.jobId]).size, 3);
+    assert.equal(client.getStats().completed, 0);
+    assert.equal(client.getStats().cancelled, 3);
+    assert.equal(client.getStats().activeWorkers, 0);
+    assert.equal(client.getStats().queuedJobs, 0);
+  });
+
+  it('reports worker failure from the real callback without changing its structured error', async () => {
+    const worker = new FakeWorker();
+    const observations: MapGeometryPrepareObservation[] = [];
+    const client = new MapGeometryPrepareClient(() => worker, { concurrency: 1 });
+    try {
+      const promise = client.prepare([geometryChunk(0)], undefined, {}, (event) => {
+        observations.push(event);
+        throw new Error('failure observer unavailable');
+      });
+      const jobId = worker.posted[0]!.jobId;
+      const response: MapGeometryPrepareWorkerResponse = {
+        kind: 'error', jobId, error: { code: 'DECODE_FAILED', message: 'decode failed' }, prepareDurationMs: Infinity
+      };
+      worker.onmessage!({ data: response } as MessageEvent<MapGeometryPrepareWorkerResponse>);
+      worker.onmessage!({ data: response } as MessageEvent<MapGeometryPrepareWorkerResponse>);
+      await assert.rejects(promise, { code: 'MAP_PREPARE_WORKER_FAILED', message: 'decode failed' });
+      assert.equal(observations.length, 1);
+      assert.equal(observations[0]!.jobId, jobId);
+      assert.equal(observations[0]!.status, 'failed');
+      assert.equal(observations[0]!.reportedWorkerDurationMs, Infinity);
+      assert.equal(client.getStats().failed, 1);
+      assert.equal(client.getStats().totalPrepareDurationMs, 0);
+    } finally {
+      client.dispose();
+    }
+  });
+
+  it('reports timeout once and ignores a saved callback from the timed-out worker', async () => {
+    const workers: FakeWorker[] = [];
+    const observations: MapGeometryPrepareObservation[] = [];
+    const client = new MapGeometryPrepareClient(() => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    }, { concurrency: 1, timeoutMs: 5 });
+    try {
+      const promise = client.prepare([geometryChunk(0)], undefined, {}, (event) => {
+        observations.push(event);
+        throw new Error('timeout observer unavailable');
+      });
+      const oldCallback = workers[0]!.onmessage!;
+      const jobId = workers[0]!.posted[0]!.jobId;
+      await assert.rejects(promise, { code: 'MAP_PREPARE_TIMEOUT' });
+      oldCallback({ data: { kind: 'result', jobId, prepared: prepareMapStaticGeometryChunks([geometryChunk(999)]) } } as MessageEvent<MapGeometryPrepareWorkerResponse>);
+      assert.deepEqual(observations.map((event) => [event.jobId, event.status]), [[jobId, 'timeout']]);
+      assert.equal(client.getStats().timedOut, 1);
+      assert.equal(client.getStats().completed, 0);
+      assert.equal(workers.length, 2);
+    } finally {
+      client.dispose();
+    }
+  });
+
+  for (const [label, enqueueOrigin, completionOrigin] of [
+    ['throwing enqueue', () => { throw new Error('origin unavailable'); }, () => 1000],
+    ['throwing completion', () => 1000, () => { throw new Error('origin unavailable'); }],
+    ['nonfinite origins', () => NaN, () => Infinity]
+  ] as const) {
+    it(`preserves success when ${label} and a throwing observer cannot supply diagnostics`, async () => {
+      let atCompletion = false;
+      await withRendererClock({
+        now: () => 25,
+        get timeOrigin() { return (atCompletion ? completionOrigin : enqueueOrigin)(); }
+      }, async () => {
+        const worker = new FakeWorker();
+        const observations: MapGeometryPrepareObservation[] = [];
+        const client = new MapGeometryPrepareClient(() => worker, { concurrency: 1 });
+        try {
+          const promise = client.prepare([geometryChunk(0)], undefined, {}, (event) => {
+            observations.push(event);
+            throw new Error('observer unavailable');
+          });
+          const jobId = worker.posted[0]!.jobId;
+          const prepared = prepareMapStaticGeometryChunks([geometryChunk(0)]);
+          atCompletion = true;
+          worker.onmessage!({ data: { kind: 'result', jobId, prepared } } as MessageEvent<MapGeometryPrepareWorkerResponse>);
+          const result = await promise;
+          assert.deepEqual(result, { ...prepared, cacheKey: jobId });
+          assert.equal(result.positionsBytes, prepared.positionsBytes);
+          assert.equal(observations.length, 1);
+          assert.equal(observations[0]!.status, 'completed');
+          assert.equal(observations[0]!.timeOriginAtEnqueue, label === 'throwing completion' ? 1000 : null);
+          assert.equal(observations[0]!.timeOriginAtCompletion, label === 'throwing enqueue' ? 1000 : null);
+          assert.equal(client.getStats().completed, 1);
+          assert.equal(client.getStats().failed, 0);
+          assert.equal(client.getStats().activeWorkers, 0);
+          assert.equal(client.getStats().queuedJobs, 0);
+        } finally {
+          client.dispose();
+        }
+      });
+    });
+  }
+});
 
 describe('MAP geometry prepare worker client', () => {
   it('cancellation terminates A and ignores its late callback before B commits', async () => {

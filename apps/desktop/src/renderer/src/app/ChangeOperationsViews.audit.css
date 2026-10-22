@@ -1,0 +1,33 @@
+
+/* ── 暂存区备注 ── */
+.staging-note { font-size: 11px; color: var(--ink-2); margin-top: 12px; }
+
+/* ── 审计时间线 ── */
+.audit-timeline { position: relative; padding-left: 20px; }
+.audit-timeline::before {
+  content: ""; position: absolute; left: 6px; top: 8px; bottom: 8px; width: 1px;
+  background: var(--line-strong);
+}
+.audit-entry { position: relative; padding: 8px 0 12px; }
+.audit-entry::before {
+  content: ""; position: absolute; left: -17.5px; top: 13px; width: 7px; height: 7px;
+  border-radius: 50%; background: var(--forge-2); border: 1.5px solid var(--ink-3);
+}
+.audit-entry--commit::before { border-color: var(--ok); background: var(--ok-soft); }
+.audit-entry--rollback::before { border-color: var(--warn); background: var(--warn-soft); }
+.audit-entry--failed::before { border-color: var(--danger); background: var(--danger-soft); }
+.audit-entry__title { font-size: 12px; font-weight: 550; word-break: break-all; }
+.audit-entry__meta {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 10.5px; color: var(--ink-3); font-family: var(--font-mono); margin-top: 2px;
+}
+.audit-entry__actions { margin-top: 6px; display: flex; gap: 8px; }
+
+/* 操作状态徽标 */
+.op-status {
+  font-size: 10px; font-weight: 600; padding: 1px 8px; border-radius: 999px;
+  color: var(--ink-1); background: var(--forge-2);
+}
+.op-status-committed { color: var(--ok); background: var(--ok-soft); }
+.op-status-rolled_back { color: var(--warn); background: var(--warn-soft); }
+.op-status-failed, .op-status-recovery_required { color: var(--danger-text); background: var(--danger-soft); }

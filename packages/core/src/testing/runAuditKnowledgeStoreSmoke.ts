@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { pathToFileURL } from 'node:url';
 import { KnowledgeStore } from '../knowledge/knowledgeStore.js';
 import { ingestKnowledgeSource } from '../knowledge/knowledgeIngest.js';
 import type { KnowledgeClaim, KnowledgeScope } from '../knowledge/knowledgeTypes.js';
@@ -26,4 +27,4 @@ export function runKnowledgeStoreSmoke(): void {
   console.log(JSON.stringify({ ok: true, taskId: 'SF-23', suite: 'store', layer: process.argv.includes('--layer') ? process.argv[process.argv.indexOf('--layer') + 1] : 'unit', executedCases: 8, production: ['KnowledgeStore', 'ingestKnowledgeSource'], message: 'knowledge CURRENT/CAS、source幂等、代际与claim DAG拒绝通过' }));
 }
 
-if (import.meta.url === `file://${process.argv[1]?.replaceAll('\\', '/')}`) runKnowledgeStoreSmoke();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) runKnowledgeStoreSmoke();

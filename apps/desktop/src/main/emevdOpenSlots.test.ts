@@ -94,3 +94,9 @@ test('dispose 中止在飞的读并回收槽位', () => {
   slots.dispose(1);
   assert.equal(slots.size, 1, 'dispose 幂等：重复调用不得抛错也不得影响别的窗口');
 });
+
+test('workspace release aborts every window and rejects delayed old slot settlement',()=>{
+  const slots=new EmevdOpenSlots();const old=slots.begin(1,'old');const other=slots.begin(2,'other');
+  slots.clear();assert.equal(old.signal.aborted,true);assert.equal(other.signal.aborted,true);assert.equal(slots.size,0);
+  const current=slots.begin(1,'new');assert.equal(slots.finish(1,'old',old),false);assert.equal(current.signal.aborted,false);assert.equal(slots.size,1);
+});

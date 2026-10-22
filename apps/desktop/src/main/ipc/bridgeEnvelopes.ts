@@ -26,6 +26,8 @@ export interface NativeBnd4DocumentLike {
 }
 
 export interface NativeDcxEnvelopeLike {
+  /** Physical source file hash; distinct from the decoded container payload hash. */
+  sourceHash?: string;
   format?: string;
   compressionFormat?: string;
   nested?: NativeBnd4DocumentLike;

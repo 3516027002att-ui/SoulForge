@@ -83,6 +83,15 @@ export function runEvidenceChildScopeSmoke(): void {
   }, options);
   assert.equal(inherited[0]?.identity.namespace, 'root-namespace');
   assert.deepEqual(inherited[0]?.identity.childChain, ['root-child']);
+
+  const actions = projectEvidenceClaims({ filePath: 'chr/c0000.anibnd.dcx', sourceHash,
+    events: [
+      { animId: 2010, eventIndex: 0, uri: 'action://c0000/tae/1/A2010/e0' },
+      { animId: 2010, eventIndex: 1, uri: 'action://c0000/tae/1/A2010/e1' },
+      { animId: 2010, eventIndex: 0, uri: 'action://c0000/tae/3/A2010/e0' }
+    ] }, { workspaceId: 'workspace-fixture', domain: 'tae' });
+  assert.equal(new Set(actions.map(claim => claim.key)).size, 3, 'TAE section and event ordinal cannot collapse to animId');
+  assert.ok(actions.every(claim => claim.identity.objectHandle.startsWith('action://')));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -53,6 +53,18 @@ await write('apps/desktop/.native/better_sqlite3.node', 'synthetic-native-bindin
 await write('apps/desktop/.native/better_sqlite3.json', '{"fixture":true}\n');
 await write('README.md', 'fixture repository\n');
 
+// The target describes the bound build inputs, including a Linux native binding.
+for (const [platform, expectedTarget] of [['linux', 'linux-x64'], ['win32', 'win-x64']]) {
+  await write('apps/desktop/.native/better_sqlite3.json', JSON.stringify({ platform, arch: 'x64' }));
+  const platformManifest = await createReleaseComplianceManifest(root, policy);
+  assert(platformManifest.product.target === expectedTarget, `${platform} native inputs must not inherit a different policy target`);
+  assert(platformManifest.scope === `unsigned-${expectedTarget}-build-inputs`, 'scope must agree with the actual bound target');
+  assert(platformManifest.product.targetSource === 'native/better_sqlite3.json', 'target evidence must identify the bound native metadata');
+}
+await write('apps/desktop/.native/better_sqlite3.json', 'not valid metadata');
+const unboundTarget = await createReleaseComplianceManifest(root, policy);
+assert(unboundTarget.product.targetSource === 'declared-policy', 'invalid metadata must not be called a bound native target');
+await write('apps/desktop/.native/better_sqlite3.json', '{"fixture":true}\n');
 const first = await createReleaseComplianceManifest(root, policy);
 assert(
   first.licenses.packages.some((item) => item.name === '@soulforge/external'),

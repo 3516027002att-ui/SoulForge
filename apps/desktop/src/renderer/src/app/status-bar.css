@@ -1,0 +1,17 @@
+
+/* ═══════════ 状态栏（e2e 钩子：.status-bar） ═══════════ */
+.status-bar {
+  height: var(--statusbar-h); flex: none; display: flex; align-items: center;
+  justify-content: space-between; gap: 12px; padding: 0 12px;
+  background: var(--forge-1); border-top: 1px solid var(--line);
+  font-size: 11px; color: var(--ink-3);
+}
+.statusbar__left, .statusbar__right { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.st-item {
+  display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px;
+  border-radius: var(--radius-s); cursor: default; white-space: nowrap;
+  transition: background var(--dur-micro), color var(--dur-micro);
+}
+.st-item:hover { background: var(--forge-hover); color: var(--ink-1); }
+.st-status { max-width: 42ch; overflow: hidden; text-overflow: ellipsis; }
+.st-ok { color: var(--ok); }

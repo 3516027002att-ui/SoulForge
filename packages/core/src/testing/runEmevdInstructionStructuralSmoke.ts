@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * S14 指令级增删 / 事件增删的 production 验证：
  * synthetic EMEVD → Bridge write-emevd（insert_instruction / delete_instruction /
@@ -5,7 +6,7 @@
  *
  * 合成 fixture 口径：不提升 native authority，只证明写链闭环可用。
  */
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { commitEmevdBatchViaBridge } from '../editing/emevdBridgeCommit.js';

@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * S37 / S40 本机五件套：只读 mods 覆盖层，写入全部落临时暂存。
  * 不碰原版游戏目录，不提升 native-verified，不走 Electron UI。
@@ -8,7 +9,7 @@
  */
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
@@ -20,7 +21,6 @@ import { locateDsLuaDecompilerSync } from './dsLuaDecompilerLocator.js';
 import { searchRealEmedf } from './realEmedfLocator.js';
 import type { ParamDefDocument } from '@soulforge/shared';
 
-const DEFAULT_GAME = 'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro';
 
 interface CaseResult {
   id: string;
@@ -41,7 +41,13 @@ async function assertUnchanged(path: string, before: Buffer, label: string): Pro
 }
 
 function gameRoot(): string {
-  return process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() || DEFAULT_GAME;
+  const root = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+  // Real game data never ships with the repository; without the game root this smoke skips honestly.
+  if (!root) {
+    console.log(JSON.stringify({ status: 'skipped', skipped: true, reason: 'SOULFORGE_SEKIRO_GAME_ROOT is not set' }));
+    process.exit(0);
+  }
+  return root;
 }
 
 function modsRoot(): string {

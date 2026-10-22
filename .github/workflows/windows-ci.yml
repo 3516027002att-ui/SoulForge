@@ -2,13 +2,13 @@ name: windows-ci
 
 on:
   push:
-    branches: [main, master, agent/frontend-renovation]
+    branches: [main]
   pull_request:
-    branches: [main, master]
+    branches: [main]
   workflow_dispatch:
     inputs:
-      installer:
-        description: Run unsigned NSIS and installer lifecycle acceptance
+      extended:
+        description: Also run renderer e2e, owned update installers, NSIS and installer lifecycle
         type: boolean
         default: false
 
@@ -17,34 +17,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      build: ${{ steps.scope.outputs.build }}
-      installer: ${{ steps.scope.outputs.installer }}
-      tiers: ${{ steps.scope.outputs.tiers }}
+  # The merge gate. This is the required check; it runs exactly `npm run gate`.
+  gate:
+    # Keep native Electron builds on the same verified MSVC baseline as desktop CI.
+    runs-on: windows-2022
+    # A local gate takes about 20 minutes; the hosted runner was 2-3x slower on the old pipeline.
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Select checks from changed paths
-        id: scope
-        env:
-          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
-          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          CI_INSTALLER: ${{ inputs.installer || false }}
-          CI_MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
-        run: node scripts/ci-change-scope.mjs
-
-  verify:
-    needs: changes
-    runs-on: windows-latest
-    timeout-minutes: 90
-    steps:
-      # Freshness checks need the Evidence anchor's Git ancestry.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -53,46 +32,28 @@ jobs:
           node-version: '22'
           cache: npm
       - uses: actions/setup-dotnet@v4
-        if: needs.changes.outputs.build == 'true'
         with:
           dotnet-version: '10.0.x'
       - run: npm ci
-      - run: node scripts/verify.mjs --audit
-      # One build includes the database smoke entry. That smoke verifies source
-      # and output fingerprints before reusing this exact artifact.
-      - name: Build shared production artifacts
-        if: needs.changes.outputs.build == 'true'
-        run: node scripts/ensure-agent-production-build.mjs --database-smoke
-      - name: Public checks (single execution plan)
+      - name: Gate
         env:
-          VERIFY_TIERS: ${{ needs.changes.outputs.tiers }}
-          SOULFORGE_CONTRACT_REQUIRE_BUNDLES: '1'
-        run: node scripts/verify.mjs --tier $env:VERIFY_TIERS --require-tier governance,unit --require-suite test:renderer-e2e --json-out output/verify-ci-public.json --timeout-ms 1200000
-      # Public runners have no private corpus. Keep the honest skip reports.
-      - name: Native honest-skip contracts
-        if: needs.changes.outputs.build == 'true'
-        run: |
-          node scripts/verify.mjs --tier native --filter private-native-gate --json-out output/verify-ci-native-private.json
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/verify.mjs --tier native --filter section28-sekiro-gate --json-out output/verify-ci-native-section28.json
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/verify.mjs --tier native --filter me3-sekiro-session --json-out output/verify-ci-native-me3.json
-      - name: Upload verification evidence
+          # Trust-zone isolation compares against the merge-base with this commit.
+          TRUST_ZONE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: node scripts/gate.mjs
+      - name: Upload gate report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: public-verification
-          path: |
-            apps/desktop/e2e/playwright/playwright-report/
-            apps/desktop/e2e/playwright/test-results/
-            output/verify-ci-*.json
+          name: gate
+          path: output/gate-checks.json
           if-no-files-found: ignore
 
-  installer:
-    needs: [changes, verify]
-    if: needs.changes.outputs.installer == 'true'
-    runs-on: windows-latest
-    timeout-minutes: 60
+  # Not part of the merge gate: needs packaged installers and a desktop session.
+  extended:
+    needs: gate
+    if: github.event_name == 'workflow_dispatch' && inputs.extended
+    runs-on: windows-2022
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
@@ -105,30 +66,40 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - run: npm ci
-      # Rebuild in isolation without test-only entrypoints for the release checks.
       - run: npm run bridge:publish
       - run: npm run build
+      - name: Prepare owned A/B update installers
+        run: |
+          npm install --prefix .local-validation/update-tools --no-audit --no-fund --ignore-scripts --no-package-lock electron-builder@26.16.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/update/prepare-owned-installers.mjs --allow-owned-installation
+      - name: Renderer e2e and owned update lifecycle
+        run: node scripts/check.mjs --suite test:renderer-e2e,test:update:installed,test:update:all --require-executed --json-out output/verify-ci-extended.json --timeout-ms 2700000
       - name: Build unsigned NSIS installer
         working-directory: apps/desktop
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npx --yes electron-builder@26.16.1 --win nsis
       - run: npm run release:installer:manifest
-      - name: Package integrity and reproducibility
-        run: |
-          node scripts/verify.mjs --tier release --filter release- --exclude release:manifest,release:installer:manifest,test:release-cross-machine --json-out output/verify-ci-release.json
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/verify.mjs --tier release --filter portable-packaging --json-out output/verify-ci-portable.json
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/verify.mjs --suite test:packaged-bridge-runtime --require-executed --json-out output/verify-ci-packaged-bridge.json
-      - name: Installer lifecycle (execute mode)
+      - name: Package integrity and installer lifecycle
         env:
           SOULFORGE_INSTALLER_LIFECYCLE_RUN: '1'
-        run: node scripts/verify.mjs --tier release --filter installer-lifecycle --require-executed --json-out output/verify-ci-installer.json
-      - name: Upload installer evidence
+        run: |
+          node scripts/check.mjs --tier release --filter release- --exclude release:manifest,release:installer:manifest,test:release-cross-machine --json-out output/verify-ci-release.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/check.mjs --tier release --filter portable-packaging --json-out output/verify-ci-portable.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/check.mjs --suite test:packaged-bridge-runtime,test:first-party-schema-package --require-executed --json-out output/verify-ci-package.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/check.mjs --tier release --filter installer-lifecycle --require-executed --json-out output/verify-ci-installer.json
+      - name: Upload extended evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: installer-verification
-          path: output/verify-ci-*.json
+          name: extended-verification
+          path: |
+            apps/desktop/e2e/playwright/playwright-report/
+            apps/desktop/e2e/playwright/test-results/
+            output/verify-ci-*.json
+            output/update/
           if-no-files-found: ignore

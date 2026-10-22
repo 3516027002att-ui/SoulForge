@@ -24,6 +24,7 @@ export type ResourceOpenIpcMethod =
   | 'readTpfDocument'
   | 'readFxrDocument'
   | 'scriptContainerEvidence'
+  | 'readScriptSource'
   | 'listContainerChildrenPage';
 
 export interface ResourceOpenPlan {
@@ -111,6 +112,7 @@ export function planResourceOpen(
   options: { previewKind?: string; textEditable?: boolean; bnd4Forced?: boolean } = {}
 ): ResourceOpenPlan {
   const family = classifyWorkspaceOpen(file.relativePath);
+  const standaloneScript = family.openKind === 'script' && /\.(?:hks|lua)$/iu.test(file.relativePath);
   const editorInput: SelectEditorInput = {
     centerView: 'resource',
     resourceMode: 'all',
@@ -127,6 +129,10 @@ export function planResourceOpen(
   return {
     editorId: selectEditor(editorInput),
     openKind: family.openKind,
-    ipcMethods: IPC_BY_KIND[family.openKind]
+    // Loose scripts open through the existing source reader; only containers
+    // require the BND4 evidence/index route.
+    ipcMethods: standaloneScript
+      ? ['openResourcePreview', 'readScriptSource']
+      : IPC_BY_KIND[family.openKind]
   };
 }

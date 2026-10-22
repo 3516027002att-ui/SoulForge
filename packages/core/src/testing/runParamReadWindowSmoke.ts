@@ -1,14 +1,18 @@
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
 import { expandParamFieldQuery } from '../param/containerParamEdit.js';
 import { paramContainerRecoveryUri, paramReadCoverage, paramReadSourceHash, paramReadWindow } from '../param/paramReadWindow.js';
 
-const overlayRoot = 'C:\\workspace\\mods';
+const fixtureRoot = join(tmpdir(), 'soulforge-param-read-window-fixture');
+const overlayRoot = join(fixtureRoot, 'mods');
 assert.equal(
-  paramContainerRecoveryUri(overlayRoot, 'C:\\workspace\\mods\\param\\gameparam\\gameparam.parambnd.dcx'),
+  paramContainerRecoveryUri(overlayRoot, join(overlayRoot, 'param', 'gameparam', 'gameparam.parambnd.dcx')),
   'file://param/gameparam/gameparam.parambnd.dcx'
 );
-assert.equal(paramContainerRecoveryUri(overlayRoot, 'D:\\outside\\gameparam.parambnd.dcx'), undefined);
+assert.equal(paramContainerRecoveryUri(overlayRoot, join(fixtureRoot, 'outside', 'gameparam.parambnd.dcx')), undefined);
+assert.equal(paramContainerRecoveryUri(overlayRoot, join(fixtureRoot, 'mods-other', 'gameparam.parambnd.dcx')), undefined);
 assert.ok(expandParamFieldQuery('ninsatsuNum').includes('ninsatu'), 'near-name recovery must surface the trusted field ID spelling');
 
 assert.deepEqual(paramReadCoverage({ missingRows: 0, missingFields: 0, hasMore: false }), {

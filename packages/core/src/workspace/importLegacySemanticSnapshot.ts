@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import { chmod, copyFile, mkdir, readFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
-import type { ResourceEdge, ResourceNode } from '@soulforge/shared';
 import type { SqliteDatabase } from '../storage/sqliteDatabase.js';
 import type { SemanticSnapshot } from './semanticWorkspaceIndex.js';
 
@@ -13,7 +12,7 @@ export interface LegacySemanticSnapshotImportOptions {
 }
 
 export interface LegacySemanticSnapshotImportResult {
-  status: 'imported' | 'already_imported' | 'source_missing';
+  status: 'archived' | 'already_imported' | 'source_missing';
   nodeCount: number;
   edgeCount: number;
   contentHash?: string;
@@ -49,30 +48,8 @@ WHERE source_kind = ? AND source_path_hash = ? AND content_hash = ?
   await chmod(backupPath, 0o444).catch(() => undefined);
   const importedAt = new Date().toISOString();
   options.database.transaction(() => {
-    options.database.prepare('DELETE FROM resource_edges WHERE workspace_id = ?').run(options.workspaceId);
-    options.database.prepare('DELETE FROM resource_nodes WHERE workspace_id = ?').run(options.workspaceId);
-    const insertNode = options.database.prepare(`
-INSERT INTO resource_nodes (
- node_id, workspace_id, kind, uri, resource_kind, overlay, label, properties_json,
- confidence_json, provenance_json, diagnostics_json, content_hash, version, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    for (const node of snapshot.graph.nodes) insertNode.run(...nodeParameters(options.workspaceId, snapshot.version, node));
-    const insertEdge = options.database.prepare(`
-INSERT INTO resource_edges (
- edge_id, workspace_id, kind, from_id, to_id, uri, label, properties_json,
- confidence_json, provenance_json, diagnostics_json, version, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    for (const edge of snapshot.graph.edges) insertEdge.run(...edgeParameters(options.workspaceId, snapshot.version, edge));
-    options.database.prepare(`
-INSERT INTO resource_graph_snapshots (
- workspace_id, graph_version, created_at, imported_at, node_count, edge_count, metadata_json
-) VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(workspace_id) DO UPDATE SET graph_version=excluded.graph_version,
- created_at=excluded.created_at, imported_at=excluded.imported_at,
- node_count=excluded.node_count, edge_count=excluded.edge_count, metadata_json=excluded.metadata_json
-`).run(options.workspaceId, snapshot.version, snapshot.createdAt, importedAt,
-      snapshot.graph.nodes.length, snapshot.graph.edges.length,
-      JSON.stringify({ vfsUriCount: snapshot.vfsUriCount, sourceContentHash: contentHash }));
+    // These graph tables were write-only. Keep the validated source archive and
+    // import receipt; live semantic/knowledge projections rebuild from resources.
     options.database.prepare(`
 INSERT INTO legacy_imports (
  source_kind, source_path_hash, content_hash, imported_at, record_count, backup_path
@@ -81,7 +58,7 @@ INSERT INTO legacy_imports (
       snapshot.graph.nodes.length + snapshot.graph.edges.length, backupPath);
   }).immediate();
   return {
-    status: 'imported', nodeCount: snapshot.graph.nodes.length,
+    status: 'archived', nodeCount: snapshot.graph.nodes.length,
     edgeCount: snapshot.graph.edges.length, contentHash, backupPath
   };
 }
@@ -121,18 +98,6 @@ function parseAndValidate(bytes: Buffer, workspaceId: string): SemanticSnapshot 
   return value as unknown as SemanticSnapshot;
 }
 
-function nodeParameters(workspaceId: string, version: string, node: ResourceNode): unknown[] {
-  return [node.id, workspaceId, node.kind, node.uri, node.resourceKind ?? null, node.overlay ?? null,
-    node.label, JSON.stringify(node.properties), jsonOrNull(node.confidence), jsonOrNull(node.provenance),
-    JSON.stringify(node.diagnostics ?? []), node.contentHash ?? null, node.version ?? version,
-    node.createdAt, node.updatedAt];
-}
-function edgeParameters(workspaceId: string, version: string, edge: ResourceEdge): unknown[] {
-  return [edge.id, workspaceId, edge.kind, edge.fromId, edge.toId, edge.uri ?? null, edge.label ?? null,
-    JSON.stringify(edge.properties), jsonOrNull(edge.confidence), jsonOrNull(edge.provenance),
-    JSON.stringify(edge.diagnostics ?? []), edge.version ?? version, edge.createdAt, edge.updatedAt];
-}
-function jsonOrNull(value: unknown): string | null { return value === undefined ? null : JSON.stringify(value); }
 function requiredStrings(value: Record<string, unknown>, fields: string[]): boolean {
   return fields.every((field) => typeof value[field] === 'string' && (value[field] as string).length > 0);
 }

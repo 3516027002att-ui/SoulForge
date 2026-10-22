@@ -631,7 +631,7 @@ async function verifyViaAiTool(
 async function runInWorkspace(root: string): Promise<PlaintextWriteSmokeResult> {
   const corpusRoot = process.argv[2]?.trim()
     ?? process.env.SOULFORGE_SEKIRO_ROOT?.trim()
-    ?? 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
+    ?? '';
 
   try {
     await stat(corpusRoot);

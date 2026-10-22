@@ -71,6 +71,15 @@ public static class OodleDoctor
             FixDescription = "自动从只狼游戏目录安全复制 oo2core_6_win64.dll"
         };
 
+        if (!OperatingSystem.IsWindows())
+        {
+            item.Status = DoctorStatus.Warn;
+            item.Fixable = false;
+            item.FixDescription = null;
+            item.Message = "此平台没有配置兼容的原生 Oodle/KRAK 解压支持；Windows 游戏 DLL 不能作为本机运行库，自动复制不可用。";
+            return item;
+        }
+
         string? sekiroOodlePath = null;
         if (!string.IsNullOrWhiteSpace(sekiroDir) && Directory.Exists(sekiroDir))
         {
@@ -126,6 +135,7 @@ public static class OodleDoctor
 
     public static bool CopyOodle(string sourceSekiroDir, string destinationDir)
     {
+        if (!OperatingSystem.IsWindows()) return false;
         if (string.IsNullOrWhiteSpace(sourceSekiroDir) || string.IsNullOrWhiteSpace(destinationDir)) return false;
         var src = Path.Combine(sourceSekiroDir, ExpectedDllName);
         if (!File.Exists(src)) return false;

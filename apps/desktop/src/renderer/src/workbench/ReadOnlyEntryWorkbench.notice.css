@@ -1,0 +1,38 @@
+
+/* ══════════ 底部日志区 ══════════ */
+/* 诊断码与解析细节的唯一去处。默认收起只占一行，展开时压缩编辑区而不是挤掉
+   某一栏 —— 三/四栏编辑器最缺横向空间，所以日志放底部而不是侧栏。 */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/* grid 而非 flex：严重度/码/文案三列必须对齐，否则上千行读起来像散文。 */
+
+
+
+
+
+
+
+
+
+
+/* ── 延期 / 只读横幅 ── */
+/* 延期格式保留标记：做成好用的只读工作台不等于假装可编辑。用 warn 语义而非
+   danger——延期是范围裁定，不是故障。 */
+.wb-notice {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 5px 10px; font-size: 11px; color: var(--warn);
+  background: var(--warn-soft); border-bottom: 1px solid var(--line);
+}

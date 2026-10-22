@@ -1,0 +1,8 @@
+.script-source__text {
+  margin: 0; padding: 8px 10px;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.5;
+  background: var(--forge-2); border: 1px solid var(--line); border-radius: var(--radius-m);
+  white-space: pre-wrap; word-break: break-word;
+  overflow: auto; max-height: 62vh; min-height: 90px;
+  color: var(--ink-1);
+}

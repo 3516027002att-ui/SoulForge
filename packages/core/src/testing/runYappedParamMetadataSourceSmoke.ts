@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -91,38 +92,37 @@ try {
   }
   if (parseYappedNamesText('')?.size !== 0) throw new Error('Empty names text must parse empty.');
 
-  // 真实机器路径（本机 Yapped 安装）：存在则必须可读且覆盖 160 定义。
+  // 真实 Yapped 安装（可选增强）：SOULFORGE_YAPPED_SDT_ROOT 指向 `<Yapped>/Paramdex/SDT`。
+  // 未设置就跳过；设置了就必须可读且覆盖 160 定义，失败直接让 smoke 失败，不再吞掉断言。
   let realExecuted = false;
   let realDefCount: number | null = null;
   let realRowNameCount: number | null = null;
-  const realRoot = 'D:/mystream/Sekiro Shadows Die Twice/tools/Yapped Rune Bear v2.14.1'
-    + '/Yapped Rune Bear v2.14.1/Paramdex/SDT';
-  try {
+  const realRoot = process.env.SOULFORGE_YAPPED_SDT_ROOT?.trim();
+  if (realRoot) {
     const real = await readYappedSdtDefsIndex(join(realRoot, 'Defs'));
-    if (real.defCount > 0) {
-      realExecuted = true;
-      realDefCount = real.defCount;
-      // 160 个 Defs 文件，实测一个重复 ParamType（GraphicsConfig_ver2）被去重、
-      // 个别文件文法畸形被跳过 —— 用下界而不是精确值，避免把发布工具自身的
-      // 小瑕疵当成导入失败。
-      if (real.defCount < 150) {
-        throw new Error(`Real Yapped Defs count is ${real.defCount}, expected >= 150.`);
-      }
-      const realSp = real.byTypeName.get('SP_EFFECT_PARAM_ST');
-      // 真实 DisplayName 实测是「持续时间——Duration」这种带英文对照后缀的写法，
-      // 只断言中文前缀，不要求逐字相等（翻译文本并非我们控制的产物）。
-      const enduranceName = realSp?.fields.get('effectEndurance')?.displayName;
-      if (!enduranceName?.startsWith('持续时间')) {
-        throw new Error(`Real Yapped SP_EFFECT_PARAM_ST lacks Chinese effectEndurance name: ${enduranceName}`);
-      }
-      const realNames = await readYappedSdtRowNamesIndex(join(realRoot, 'Names'));
-      realRowNameCount = realNames.byEntryName.get('SpEffectParam')?.size ?? null;
-      if (realRowNameCount === null || realRowNameCount <= 0) {
-        throw new Error('Real Yapped SpEffectParam row-name table is empty.');
-      }
+    if (!real.ok || real.defCount === 0) {
+      throw new Error(`SOULFORGE_YAPPED_SDT_ROOT has no readable Defs: ${JSON.stringify(real.diagnostics.slice(0, 3))}`);
     }
-  } catch {
-    // 本机未装 Yapped：跳过真实校验，不视为失败（可选增强）。
+    realExecuted = true;
+    realDefCount = real.defCount;
+    // 160 个 Defs 文件，实测一个重复 ParamType（GraphicsConfig_ver2）被去重、
+    // 个别文件文法畸形被跳过 —— 用下界而不是精确值，避免把发布工具自身的
+    // 小瑕疵当成导入失败。
+    if (real.defCount < 150) {
+      throw new Error(`Real Yapped Defs count is ${real.defCount}, expected >= 150.`);
+    }
+    const realSp = real.byTypeName.get('SP_EFFECT_PARAM_ST');
+    // 真实 DisplayName 实测是「持续时间——Duration」这种带英文对照后缀的写法，
+    // 只断言中文前缀，不要求逐字相等（翻译文本并非我们控制的产物）。
+    const enduranceName = realSp?.fields.get('effectEndurance')?.displayName;
+    if (!enduranceName?.startsWith('持续时间')) {
+      throw new Error(`Real Yapped SP_EFFECT_PARAM_ST lacks Chinese effectEndurance name: ${enduranceName}`);
+    }
+    const realNames = await readYappedSdtRowNamesIndex(join(realRoot, 'Names'));
+    realRowNameCount = realNames.byEntryName.get('SpEffectParam')?.size ?? null;
+    if (realRowNameCount === null || realRowNameCount <= 0) {
+      throw new Error('Real Yapped SpEffectParam row-name table is empty.');
+    }
   }
 
   process.stdout.write(`${JSON.stringify({

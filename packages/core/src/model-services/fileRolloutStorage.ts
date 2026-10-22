@@ -6,8 +6,9 @@
  * Electron userData, never at the Mod workspace (hard constraint 3).
  */
 
-import { appendFile, mkdir, readFile, readdir, stat } from 'node:fs/promises';
+import { appendFile, mkdir, open, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { isPathInside } from '../workspace/pathBoundary.js';
 import type { RolloutStorage } from './rolloutRecorder.js';
 import { parseRolloutLines, type ResumedRollout } from './rolloutRecorder.js';
 
@@ -30,8 +31,7 @@ export class FileRolloutStorage implements RolloutStorage {
   }
 
   async readLines(): Promise<string[]> {
-    const raw = await readFile(this.filePath, 'utf8');
-    return raw.split('\n').filter((line) => line.trim() !== '');
+    return splitRolloutLines(await readFile(this.filePath, 'utf8'));
   }
 
   async flush(): Promise<void> {
@@ -79,16 +79,36 @@ export interface RolloutSessionSummary {
 /**
  * List rollout sessions under the base dir, newest first, bounded by `limit`.
  * Files are read fully for the summary; the bound keeps listing lazy.
+ *
+ * Every directory level and every file is resolved with realpath before use:
+ * a junction or symbolic link under sessions/ must not redirect the walk (or
+ * the later summary read) outside the physical sessions directory.
  */
 export async function listRolloutSessions(
   baseDir: string,
   limit = 50
 ): Promise<RolloutSessionSummary[]> {
   const root = join(baseDir, 'sessions');
+  let physicalRoot: string;
+  try {
+    const physicalBase = await realpath(baseDir);
+    physicalRoot = await realpath(root);
+    // sessions/ itself must not be an alias for a directory outside the base.
+    if (!isPathInside(physicalBase, physicalRoot)) return [];
+  } catch {
+    return [];
+  }
+  const checkedPath = async (candidate: string): Promise<string> => {
+    const physicalPath = await realpath(candidate);
+    if (!isPathInside(physicalRoot, physicalPath)) {
+      throw Object.assign(new Error('Rollout path must stay inside the sessions directory.'), { code: 'ROLLOUT_PATH_FORBIDDEN' });
+    }
+    return physicalPath;
+  };
   const files: Array<{ path: string; fileName: string; sizeBytes: number; modifiedAt: string }> = [];
   let yearDirs: string[] = [];
   try {
-    yearDirs = await readdir(root);
+    yearDirs = await readdir(physicalRoot);
   } catch {
     return [];
   }
@@ -96,7 +116,7 @@ export async function listRolloutSessions(
     const yearPath = join(root, year);
     let monthDirs: string[] = [];
     try {
-      monthDirs = await readdir(yearPath);
+      monthDirs = await readdir(await checkedPath(yearPath));
     } catch {
       continue;
     }
@@ -104,7 +124,7 @@ export async function listRolloutSessions(
       const monthPath = join(yearPath, month);
       let dayDirs: string[] = [];
       try {
-        dayDirs = await readdir(monthPath);
+        dayDirs = await readdir(await checkedPath(monthPath));
       } catch {
         continue;
       }
@@ -112,7 +132,7 @@ export async function listRolloutSessions(
         const dayPath = join(monthPath, day);
         let entries: string[] = [];
         try {
-          entries = await readdir(dayPath);
+          entries = await readdir(await checkedPath(dayPath));
         } catch {
           continue;
         }
@@ -120,7 +140,8 @@ export async function listRolloutSessions(
           if (!entry.endsWith('.jsonl')) continue;
           const filePath = join(dayPath, entry);
           try {
-            const info = await stat(filePath);
+            const info = await stat(await checkedPath(filePath));
+            if (!info.isFile()) continue;
             files.push({
               path: filePath,
               fileName: entry,
@@ -138,8 +159,11 @@ export async function listRolloutSessions(
   const summaries: RolloutSessionSummary[] = [];
   for (const file of files.slice(0, limit)) {
     try {
-      const storage = new FileRolloutStorage(file.path);
-      const lines = await storage.readLines();
+      // Re-check at read time and read the checked target, so an alias that is
+      // retargeted after listing cannot redirect the summary read. The returned
+      // path stays lexical for existing consumers.
+      const raw = await readRolloutFileWithinSessions(baseDir, file.path);
+      const lines = raw.split('\n').filter((line) => line.trim() !== '');
       const resumed = parseRolloutLines(lines);
       summaries.push({
         path: file.path,
@@ -160,18 +184,60 @@ export async function listRolloutSessions(
   return summaries;
 }
 
+/**
+ * Read a rollout file only if it is physically inside `<baseDir>/sessions`.
+ *
+ * Callers such as SessionFeedbackService receive lexical paths from
+ * listRolloutSessions; a directory level can be swapped for a junction between
+ * listing and reading. The file is opened first, then its realpath is checked
+ * against the physical sessions root, and the open handle must be the same file
+ * (dev/ino) as the checked target, so the returned bytes always come from a file
+ * that resolved inside sessions/. Throws ROLLOUT_PATH_FORBIDDEN otherwise.
+ */
+export async function readRolloutFileWithinSessions(baseDir: string, path: string): Promise<string> {
+  const forbidden = () => Object.assign(new Error('Rollout path must stay inside the sessions directory.'), { code: 'ROLLOUT_PATH_FORBIDDEN' });
+  const physicalBase = await realpath(baseDir);
+  const physicalRoot = await realpath(join(baseDir, 'sessions'));
+  if (!isPathInside(physicalBase, physicalRoot)) throw forbidden();
+  const handle = await open(path, 'r');
+  try {
+    const opened = await handle.stat({ bigint: true });
+    const physicalPath = await realpath(path);
+    if (!isPathInside(physicalRoot, physicalPath)) throw forbidden();
+    const checked = await stat(physicalPath, { bigint: true });
+    if (!opened.isFile() || opened.dev !== checked.dev || opened.ino !== checked.ino) throw forbidden();
+    return await handle.readFile({ encoding: 'utf8' });
+  } finally {
+    await handle.close();
+  }
+}
+
+function splitRolloutLines(raw: string): string[] {
+  return raw.split('\n').filter((line) => line.trim() !== '');
+}
+
 export type LoadRolloutSessionResult =
   | ({ ok: true; path: string } & ResumedRollout)
-  | { ok: false; code: 'ROLLOUT_NOT_FOUND' | 'ROLLOUT_READ_FAILED'; message: string };
+  | { ok: false; code: 'ROLLOUT_NOT_FOUND' | 'ROLLOUT_READ_FAILED' | 'ROLLOUT_PATH_FORBIDDEN'; message: string };
 
-export async function loadRolloutSession(path: string): Promise<LoadRolloutSessionResult> {
+/**
+ * With sessionsBaseDir the file is read through readRolloutFileWithinSessions: the bytes come from the handle whose real
+ * path was checked to be inside the physical sessions root, so a path checked earlier and then swapped for a junction is
+ * not followed (ROLLOUT_PATH_FORBIDDEN). Without it the path is read as given (CLI and tests pass their own files).
+ */
+export async function loadRolloutSession(path: string, options: { sessionsBaseDir?: string } = {}): Promise<LoadRolloutSessionResult> {
   let lines: string[];
   try {
-    const storage = new FileRolloutStorage(path);
-    lines = await storage.readLines();
+    lines = options.sessionsBaseDir === undefined
+      ? await new FileRolloutStorage(path).readLines()
+      : splitRolloutLines(await readRolloutFileWithinSessions(options.sessionsBaseDir, path));
   } catch (error) {
-    if (typeof error === 'object' && error !== null && (error as { code?: string }).code === 'ENOENT') {
+    const code = typeof error === 'object' && error !== null ? (error as { code?: string }).code : undefined;
+    if (code === 'ENOENT') {
       return { ok: false, code: 'ROLLOUT_NOT_FOUND', message: '会话记录不存在。' };
+    }
+    if (code === 'ROLLOUT_PATH_FORBIDDEN') {
+      return { ok: false, code: 'ROLLOUT_PATH_FORBIDDEN', message: '会话记录不在会话目录内。' };
     }
     return {
       ok: false,

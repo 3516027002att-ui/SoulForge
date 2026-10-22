@@ -116,6 +116,18 @@ async function snapshotChild(
       }
     };
   }
+  // Native sourceHash identifies the physical DCX/BND source, not decoded payload or child bytes.
+  const expectedContainerHash = containerHashOf(op);
+  if (!expectedContainerHash || result.data.sourceHash !== expectedContainerHash) {
+    return {
+      diagnostic: {
+        severity: 'error',
+        code: 'CONTAINER_CHILD_INVERSE_CAPTURE_FAILED',
+        message: '条目快照的容器源 hash 与预期不一致或缺失，已阻止写入。',
+        details: { expectedContainerHash, actualSourceHash: result.data.sourceHash ?? null }
+      }
+    };
+  }
   if (op.expectedChildHash && result.data.contentHash !== op.expectedChildHash) {
     return {
       diagnostic: {

@@ -1,0 +1,19 @@
+
+/* ── FMG §9.1：左 Categories + 右上 Entries + 右下 Text，不是四条竖栏 ──
+   左栏：树滚动、Toolbar(flex:none)叠在 Categories 下方。右区：Entries 55% /
+   Text 45% 上下两块，各带独立滚动宿主。column-body 只做宿主，滚动权交给内层。
+   极矮视口下右区两块 min-height 之和超出栏高，.fmg-right 兜底可滚，内容不丢。 */
+.workbench__column-body:has(> .fmg-categories),
+.workbench__column-body:has(> .fmg-entries),
+.workbench__column-body:has(> .fmg-text) {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.fmg-categories { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.fmg-categories__search { flex: none; padding: 4px 8px 0; }
+.fmg-categories__search input { width: 100%; box-sizing: border-box; }
+.fmg-categories__tree { flex: 1 1 0; min-height: 0; overflow-y: auto; }
+
+
+/* 11-B：文本目录按容器分组 —— item / menu 各一组，组头可见、可点。 */

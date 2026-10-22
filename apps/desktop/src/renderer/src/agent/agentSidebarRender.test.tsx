@@ -28,6 +28,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { AgentMessageDto, AgentResourceReference, EditorSelectionContext } from '@soulforge/shared';
 import { AgentSidebar, type AgentSidebarProps } from './AgentSidebar.js';
 import { AgentSecondaryDrawer } from './AgentSecondaryDrawer.js';
+import { readOrderedStyleSource } from '../styleSource.testSupport.js';
 import {
   INITIAL_AGENT_TASK_STATE,
   type AgentApprovalView,
@@ -504,10 +505,10 @@ describe('§12.8/§12.11 上下文、资源引用与消息流（AGENT-60C）', (
   it('绝对路径选区回退空态，不进入 DOM', () => {
     const leaking = {
       ...selection0('param'),
-      documentId: 'D:\\mystream\\Sekiro\\param\\gameparam.parambnd.dcx'
+      documentId: 'D:\\GameLibrary\\Sekiro\\param\\gameparam.parambnd.dcx'
     };
     const html = render({ selection: leaking });
-    assert.ok(!html.includes('D:\\mystream'), 'DOM 不应包含绝对路径');
+    assert.ok(!html.includes('D:\\GameLibrary'), 'DOM 不应包含绝对路径');
     assert.ok(!html.includes('gameparam.parambnd.dcx'), '泄漏的 documentId 不应进入 DOM');
     assert.ok(!html.includes('data-testid="agent-context-picker"'), '空的上下文 chip 已从输入区移除');
   });
@@ -620,6 +621,31 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
     assert.match(html, /批准并提交/, '唯一主按钮');
     assert.match(html, /data-testid="agent-approval-card-approve"/);
     assert.match(html, /data-testid="agent-approval-card-reject"/);
+  });
+
+  it('Change Review 卡将文件头形状的 hunk 内容保留为红绿改动行', () => {
+    const fixture = approvalFixture();
+    const approval = fixture.pendingApprovals[0]!;
+    const html = approvalTask({
+      state: {
+        pendingApprovals: [{
+          ...approval,
+          diff: {
+            targetPath: 'mods/example.txt',
+            unifiedDiff: '--- mods/example.txt\n+++ mods/example.txt\n@@ -1,2 +1,2 @@\n---flag\n+++counter\n--- before.txt\n+++ after.txt',
+            addedLines: 2,
+            removedLines: 2,
+            newFile: false
+          }
+        }]
+      }
+    });
+    assert.match(html, /class="diff-line is-header">--- mods\/example\.txt/);
+    assert.match(html, /class="diff-line is-header">\+\+\+ mods\/example\.txt/);
+    assert.match(html, /class="diff-line is-remove">---flag/);
+    assert.match(html, /class="diff-line is-add">\+\+\+counter/);
+    assert.match(html, /class="diff-line is-remove">--- before\.txt/);
+    assert.match(html, /class="diff-line is-add">\+\+\+ after\.txt/);
   });
 
   it('缺 diff 的审批如实显示不可用，不编造内容', () => {
@@ -798,7 +824,7 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
     assert.ok(!drawerHtml.includes('>SoulForge<'), '抽屉面不含 SoulForge 产品名');
     // 抽屉背景必须不透明：浅色主题 8% --forge-0 会把底下字透出来（叠字根因）。
     assert.match(
-      readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'styles.css'), 'utf8'),
+      readOrderedStyleSource(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'styles.css')),
       /\.agent-secondary-drawer \{[\s\S]*?background: var\(--forge-1\);/,
       '抽屉背景是不透明实色'
     );
@@ -924,9 +950,8 @@ function render0Task(): AgentSidebarProps['task'] {
 
 describe('S9：Ask 菜单 portal 后 CSS 用 fixed（锚点是 viewport 坐标）', () => {
   it('agent-mode-menu 是 position:fixed，不是 absolute（absolute 相对初始包含块，滚动漂移）', () => {
-    const css = readFileSync(
-      join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'styles.css'),
-      'utf8'
+    const css = readOrderedStyleSource(
+      join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'styles.css')
     );
     assert.match(css, /\.agent-mode-menu \{ position: fixed;/);
     assert.doesNotMatch(css, /\.agent-mode-menu \{ position: absolute;/);

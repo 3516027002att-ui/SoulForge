@@ -51,17 +51,28 @@ export async function createReleaseComplianceManifest(root, policy) {
   validatePackageLock(lock, findings);
   const licenses = collectProductionLicenses(root, rootPackage, lock, policy, findings);
   const artifacts = await collectArtifactSnapshot(root, policy, findings);
+  let targetMetadata = {};
+  try {
+    targetMetadata = JSON.parse(await readFile(resolve(root, 'apps/desktop/.native/better_sqlite3.json'), 'utf8'));
+  } catch {
+    // The artifact snapshot retains validation findings; no actual target is inferred.
+  }
+  const boundTarget = targetMetadata?.arch === 'x64'
+    ? ({ linux: 'linux-x64', win32: 'win-x64' })[targetMetadata.platform]
+    : undefined;
+  const target = boundTarget ?? policy.target;
   const policyHash = sha256Text(canonicalJson(policy));
   const lockfileSha256 = sha256Text(lockText);
 
   return {
     schemaVersion: 1,
     authority: 'partial',
-    scope: 'unsigned-win-x64-build-inputs',
+    scope: `unsigned-${target}-build-inputs`,
     product: {
       name: rootPackage.name,
       version: rootPackage.version,
-      target: policy.target
+      target,
+      targetSource: boundTarget ? 'native/better_sqlite3.json' : 'declared-policy'
     },
     policy: {
       path: RELEASE_POLICY_RELATIVE_PATH,

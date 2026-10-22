@@ -1,0 +1,18 @@
+
+/* ═══════════ 基础 ═══════════ */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; overflow: hidden; }
+body {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-0);
+  background: var(--canvas);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+#root { height: 100%; }
+.app-root { height: 100%; display: flex; flex-direction: column; overflow: hidden; position: relative; z-index: 1; }
+button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+input, textarea, select { font: inherit; color: inherit; }
+::selection { background: var(--ember-soft); }

@@ -266,8 +266,9 @@ export function formatActionAddress(address: ActionAddress): string {
  * 解析动作地址字符串（A 主键形式：`c1050#A0200.e0.startFrame`）。
  *
  * hkx 茎别名（`c1050#a000_020000`）能被 extractAtomicAddressTokens 整体保留供
- * 检索，但别名无法从本身无损还原 animId（stem 编号与 AE animId 不是同一套数，
- * 对应表本版没有），而 write-tae-document 需要数值 animId。故解析器对别名形式
+ * 检索，但别名不能单凭文件名还原目标 TAE 段和 animId：标准 own-HKX 动作
+ * 可以与 stem 编号相同，import/alias 和跨段重号仍需原生映射确认。writer 需要
+ * 完整目标身份，故解析器对别名形式
  * fail-closed 返回 null，不编造主键 —— 未知映射不能开放读写目标。
  */
 export function parseActionAddress(value: string): ActionAddress | null {

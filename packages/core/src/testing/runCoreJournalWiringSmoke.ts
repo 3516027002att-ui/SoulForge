@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * Core journal wiring smoke — W-A-RECOVERY-INTEGRATION-04.
  *
@@ -41,7 +42,7 @@
 
 import { createHash } from 'node:crypto';
 import { chmodSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { PatchIR, PatchIrOperation } from '@soulforge/shared';

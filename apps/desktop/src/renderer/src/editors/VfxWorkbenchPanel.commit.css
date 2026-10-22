@@ -1,0 +1,9 @@
+
+.vfx-commit {
+  flex: none; padding: 1px 8px; font-size: 11px;
+  color: var(--ink-1); background: var(--control-rest-bg);
+  border: 1px solid var(--line-strong); border-radius: var(--radius-s);
+  cursor: pointer;
+}
+.vfx-commit:hover:not(:disabled) { background: var(--control-hover-bg); color: var(--ink-0); }
+.vfx-commit:disabled { color: var(--ink-3); cursor: not-allowed; }

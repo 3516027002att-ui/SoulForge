@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * Native KRAK-inner-BND4 combined mutation / repack matrix against the
  * registered local Sekiro corpus (talkesdbnd m00/m11, mapbnd m10).
@@ -19,7 +20,7 @@
  * temporary overlay and are cleaned up.
  */
 import { createHash } from 'node:crypto';
-import { access, copyFile, mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
+import { access, copyFile, mkdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';

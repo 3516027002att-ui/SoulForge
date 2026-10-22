@@ -11,6 +11,10 @@
 #include "lopcodes.h"
 #ifdef _WIN32
 #include <windows.h>
+#define SF_HKS_EXPORT __declspec(dllexport)
+#else
+#include <iconv.h>
+#define SF_HKS_EXPORT __attribute__((visibility("default")))
 #endif
 #include <stdlib.h>
 #include <stdio.h>
@@ -111,8 +115,8 @@ static int sf_buffer_doublele(sf_buffer *out, lua_Number value) {
  * LuaP stores strings as Shift-JIS, while the first-party compiler receives
  * UTF-8 source.  Keep the conversion in the native emitter so a Japanese
  * identifier/string does not become mojibake after a round trip.  The
- * non-Windows fallback is only for source builds; Sekiro production binaries
- * are built on Windows and use CP932 explicitly.
+ * Windows uses its code-page API and Linux uses the system iconv converter.
+ * Unrepresentable strings fail rather than silently changing their value.
  */
 static int sf_lua50_string_bytes(const TString *string, unsigned char **bytes, size_t *size) {
     const char *source;
@@ -132,6 +136,7 @@ static int sf_lua50_string_bytes(const TString *string, unsigned char **bytes, s
         int encoded_size;
         wchar_t *wide;
         unsigned char *encoded;
+        BOOL used_default = FALSE;
         if (source_size > 0x7fffffffU) { sf_lua50_failure = "string-too-large"; return 1; }
         wide_size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
             source, (int)source_size, NULL, 0);
@@ -165,7 +170,7 @@ static int sf_lua50_string_bytes(const TString *string, unsigned char **bytes, s
             sf_lua50_failure = "string-cp932-allocation"; return 1;
         }
         if (WideCharToMultiByte(932, WC_NO_BEST_FIT_CHARS,
-            wide, wide_size, (char *)encoded, encoded_size, NULL, NULL) != encoded_size) {
+            wide, wide_size, (char *)encoded, encoded_size, NULL, &used_default) != encoded_size || used_default) {
             free(encoded);
             free(wide);
             sf_lua50_failure = "string-cp932-encode"; return 1;
@@ -176,11 +181,30 @@ static int sf_lua50_string_bytes(const TString *string, unsigned char **bytes, s
         return 0;
     }
 #else
-    *bytes = (unsigned char *)malloc(source_size == 0 ? 1 : source_size);
-    if (!*bytes) return 1;
-    if (source_size > 0) memcpy(*bytes, source, source_size);
-    *size = source_size;
-    return 0;
+    {
+        iconv_t converter = iconv_open("CP932", "UTF-8");
+        unsigned char *encoded;
+        char *input = (char *)source;
+        char *output;
+        size_t input_left = source_size;
+        size_t output_left = source_size;
+        size_t converted;
+        if (converter == (iconv_t)-1) { sf_lua50_failure = "string-cp932-converter"; return 1; }
+        /* CP932 never expands a representable UTF-8 string. */
+        encoded = (unsigned char *)malloc(source_size);
+        if (!encoded) { iconv_close(converter); sf_lua50_failure = "string-cp932-allocation"; return 1; }
+        output = (char *)encoded;
+        converted = iconv(converter, &input, &input_left, &output, &output_left);
+        iconv_close(converter);
+        if (converted != 0 || input_left != 0) {
+            free(encoded);
+            sf_lua50_failure = "string-cp932-encode";
+            return 1;
+        }
+        *bytes = encoded;
+        *size = source_size - output_left;
+        return 0;
+    }
 #endif
 }
 
@@ -732,7 +756,7 @@ static int sf_compile(
     return 0;
 }
 
-__declspec(dllexport) int SoulForgeHksCompile(
+SF_HKS_EXPORT int SoulForgeHksCompile(
     const char *source,
     size_t source_size,
     unsigned char **output,
@@ -742,7 +766,7 @@ __declspec(dllexport) int SoulForgeHksCompile(
     return sf_compile(source, source_size, output, output_size, error, error_size, 0);
 }
 
-__declspec(dllexport) int SoulForgeLua50Compile(
+SF_HKS_EXPORT int SoulForgeLua50Compile(
     const char *source,
     size_t source_size,
     unsigned char **output,
@@ -752,6 +776,6 @@ __declspec(dllexport) int SoulForgeLua50Compile(
     return sf_compile(source, source_size, output, output_size, error, error_size, 1);
 }
 
-__declspec(dllexport) void SoulForgeHksFree(void *pointer) {
+SF_HKS_EXPORT void SoulForgeHksFree(void *pointer) {
     free(pointer);
 }

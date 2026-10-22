@@ -143,6 +143,12 @@ export class EmevdSourceTokens {
     }
   }
 
+  /** Source slices are valid only for the workspace which produced them. */
+  clear():void {
+    this.byToken.clear();
+    this.tokenByWindow.clear();
+  }
+
   get size(): number {
     return this.byToken.size;
   }

@@ -28,9 +28,8 @@
  * 不许写进 playwright.config.mjs 或 launchApp 默认值 —— 那会让默认套件左栏
  * 变成 138 项，现有 PARAM e2e 无故变慢或变脆。
  */
-import { test, expect, _electron as electron } from '@playwright/test';
+import { test, expect, electron, testWorkspace } from '../owned-test.mjs';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -50,11 +49,12 @@ async function launchApp(env = {}) {
   // App.tsx 6-C 经 localStorage 恢复）跨运行残留 —— 残留一旦命中 fixture-session，
   // 打开工作区后会被直接恢复进别的领域，开始页 h1 断言就挂。临时目录让每次
   // 运行都从全新 shell 状态开始。
-  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-e2e-param-perf-'));
+  const userDataDir = path.join(testWorkspace().root, 'profile');
   const app = await electron.launch({
     args: [fixtureMain, `--user-data-dir=${userDataDir}`],
     env: { ...process.env, ...env }
   });
+  await testWorkspace().registerApp(app);
   const window = await app.firstWindow();
   window.on('dialog', (dialog) => {
     dialog.accept().catch(() => undefined);
@@ -69,7 +69,6 @@ async function launchApp(env = {}) {
   await window.setViewportSize({ width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT });
   const cleanup = async () => {
     await app.close().catch(() => undefined);
-    fs.rmSync(userDataDir, { recursive: true, force: true });
   };
   return { app, window, cleanup };
 }
@@ -100,18 +99,18 @@ async function openParamContainer(window) {
   await window.locator('[data-domain="text"]').click();
   await window.locator('[data-domain="param"]').click();
   await closeAgentPanel(window);
-  await expect(window.getByRole('region', { name: 'Params' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Rows' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Fields' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '参数文件' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '行', exact: true })).toBeVisible();
+  await expect(window.getByRole('region', { name: '字段', exact: true })).toBeVisible();
 }
 
 /** 点左栏大表，等中栏首批行可见，返回中栏 hint 文本。 */
 async function openLargeParam(window) {
-  await window.getByRole('region', { name: 'Params' })
+  await window.getByRole('region', { name: '参数文件' })
     .locator('.wb-row', { hasText: 'BehaviorParam' })
     .click();
   await expect(window.locator('.wb-virtual-row').first()).toBeVisible();
-  return window.getByRole('region', { name: 'Rows' }).locator('.workbench__column-hint').innerText();
+  return window.getByRole('region', { name: '行', exact: true }).locator('.workbench__column-hint').innerText();
 }
 
 /**
@@ -131,12 +130,16 @@ async function measureScroll(window, stepPx, durationMs) {
     let last = null;
     const startedScrollTop = el.scrollTop;
     const containerRect = el.getBoundingClientRect();
+    const startedAt = performance.now();
+    const visibility = { start: document.visibilityState, hiddenSamples: 0, unfocusedSamples: 0 };
     return await new Promise((resolve) => {
       let rafId = 0;
       const tick = () => {
         const now = performance.now();
         if (last !== null) frames.push(now - last);
         last = now;
+        if (document.hidden) visibility.hiddenSamples += 1;
+        if (!document.hasFocus()) visibility.unfocusedSamples += 1;
         // 露白：可视区内行覆盖的下沿（不早于容器顶）到容器下沿的未覆盖高度。
         let maxBottom = containerRect.top;
         for (const row of el.querySelectorAll('.wb-virtual-row')) {
@@ -156,11 +159,92 @@ async function measureScroll(window, stepPx, durationMs) {
           frames,
           blank,
           scrolled: el.scrollTop - startedScrollTop,
-          samples: blank.length
+          samples: blank.length,
+          elapsedMs: performance.now() - startedAt,
+          visibility: { ...visibility, end: document.visibilityState }
         });
       }, durationMs);
     });
   }, { stepPx, durationMs });
+}
+
+/** The empty shell and loaded table distinguish host-wide slow frames from scroll work. */
+async function measureIdleFrames(window, durationMs = 1000) {
+  return window.evaluate((durationMs) => new Promise((resolve) => {
+    const frames = [];
+    const startedAt = performance.now();
+    const visibility = { start: document.visibilityState, hiddenSamples: 0, unfocusedSamples: 0 };
+    let last = null;
+    let samples = 0;
+    let rafId = 0;
+    const tick = () => {
+      const now = performance.now();
+      if (last !== null) frames.push(now - last);
+      last = now;
+      samples += 1;
+      if (document.hidden) visibility.hiddenSamples += 1;
+      if (!document.hasFocus()) visibility.unfocusedSamples += 1;
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    setTimeout(() => {
+      cancelAnimationFrame(rafId);
+      resolve({ frames, samples, elapsedMs: performance.now() - startedAt,
+        visibility: { ...visibility, end: document.visibilityState } });
+    }, durationMs);
+  }), durationMs);
+}
+
+async function readRuntimeDiagnostics(app, window) {
+  const runtime = await app.evaluate(async ({ app, BrowserWindow }) => {
+    let timeout;
+    let gpuInfo;
+    try {
+      const info = await Promise.race([
+        app.getGPUInfo('basic'),
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(new Error('GPU_DIAGNOSTIC_TIMEOUT')), 5000);
+        })
+      ]);
+      const fields = ['active', 'vendorId', 'deviceId', 'vendorString', 'deviceString', 'driverVendor', 'driverVersion'];
+      gpuInfo = { status: 'available', gpuDevice: (info?.gpuDevice ?? []).map((device) =>
+        Object.fromEntries(fields.filter((field) => field in device).map((field) => [field, device[field]]))) };
+    } catch (error) {
+      gpuInfo = { status: 'unavailable', code: 'GPU_DIAGNOSTIC_FAILED', message: String(error) };
+    } finally {
+      clearTimeout(timeout);
+    }
+    return {
+      platform: process.platform,
+      versions: { electron: process.versions.electron, chrome: process.versions.chrome },
+      ci: process.env.CI === 'true',
+      gpuFeatureStatus: app.getGPUFeatureStatus(),
+      gpuInfo,
+      windows: BrowserWindow.getAllWindows().map((window) => ({
+        visible: window.isVisible(), focused: window.isFocused(), minimized: window.isMinimized(),
+        bounds: window.getBounds(), backgroundThrottling: window.webContents.getBackgroundThrottling()
+      })),
+      processes: app.getAppMetrics().map(({ type, cpu }) => ({ type, cpu }))
+    };
+  });
+  const ambientField = await window.evaluate(() => {
+    const canvas = document.querySelector('#sf-ambient-field');
+    const ambient = document.documentElement.dataset.ambient;
+    const gl = ambient === 'shader' ? canvas?.getContext('webgl') : null;
+    const debug = gl?.getExtension('WEBGL_debug_renderer_info');
+    return {
+      ambient, renderer: gl ? String(gl.getParameter(debug?.UNMASKED_RENDERER_WEBGL ?? gl.RENDERER)) : null,
+      drawWidth: canvas?.width, drawHeight: canvas?.height, devicePixelRatio: window.devicePixelRatio
+    };
+  });
+  return { ...runtime, ambientField };
+}
+
+function frameSummary(run) {
+  const sorted = [...run.frames].sort((a, b) => a - b);
+  return { samples: run.samples, elapsedMs: run.elapsedMs,
+    maxMs: sorted.at(-1) ?? 0, p95Ms: percentile(sorted, 95), visibility: run.visibility,
+    ...(run.blank ? { worstGapPx: Math.max(0, ...run.blank), scrolledPx: run.scrolled } : {}) };
 }
 
 function percentile(sorted, p) {
@@ -169,17 +253,16 @@ function percentile(sorted, p) {
   return sorted[index];
 }
 
-test.describe.configure({ mode: 'serial' });
-
 test.beforeEach(({ }, testInfo) => {
   test.skip(!hasBuild, 'renderer 未构建：先运行 npm run build -w @soulforge/desktop');
   void testInfo;
 });
 
-test('大表（5275 行 / 221 字段）：打开即出行，且选中行后快速下拉不卡顿', async () => {
+test('大表（5275 行 / 221 字段）：打开即出行，且选中行后快速下拉不卡顿', async ({}, testInfo) => {
   // SF_TEST_LARGE_PARAM 只能由本条自己打开（默认 fixture 3 张表，本测试没有对象）。
   test.setTimeout(180_000);
-  const { window, cleanup } = await launchApp({ SF_TEST_LARGE_PARAM: '1' });
+  const { app, window, cleanup } = await launchApp({ SF_TEST_LARGE_PARAM: '1' });
+  const emptyIdle = await measureIdleFrames(window);
   await openFixtureWorkspace(window);
   await openParamContainer(window);
   const hint = await openLargeParam(window);
@@ -192,12 +275,24 @@ test('大表（5275 行 / 221 字段）：打开即出行，且选中行后快�
   // 选中首行 → 右栏按大表自己的 221 字段定义渲染（fixture 开关开着才有
   // fieldDefs；回落默认 4 个就测不出字段栏成本）。
   await window.locator('.wb-virtual-row').first().click();
-  await expect(window.getByRole('region', { name: 'Fields' }).locator('.wb-prop')).toHaveCount(221);
+  await expect(window.getByRole('region', { name: '字段', exact: true }).locator('.wb-prop')).toHaveCount(221);
 
   // 平缓下拉：240px/帧（≈11 行/帧），跑 ~1s。
   const jank = await measureScroll(window, 240, 1000);
   // 甩滚：2200px/帧（整窗换新 ≈100 行/帧），跑 ~1.2s（约 72 帧样本）。
   const fling = await measureScroll(window, 2200, 1200);
+
+  // Sample loaded idle after scrolling so diagnostics do not warm up the measured workload.
+  const loadedIdle = await measureIdleFrames(window);
+  const runtime = await readRuntimeDiagnostics(app, window);
+  const diagnostics = { emptyIdle, jank, fling, loadedIdle, runtime };
+  await testInfo.attach('param-performance-diagnostics', {
+    body: JSON.stringify(diagnostics, null, 2), contentType: 'application/json'
+  });
+  console.log('PARAM_PERF_DIAGNOSTICS', JSON.stringify({
+    emptyIdle: frameSummary(emptyIdle), jank: frameSummary(jank),
+    fling: frameSummary(fling), loadedIdle: frameSummary(loadedIdle), runtime
+  }));
 
   for (const [label, run] of [['jank', jank], ['fling', fling]]) {
     const sorted = [...run.frames].sort((a, b) => a - b);
@@ -228,8 +323,8 @@ test('打开大表的等待期间：中栏给出加载反馈，而不是纯空�
   await openFixtureWorkspace(window);
   await openParamContainer(window);
 
-  const rowsRegion = window.getByRole('region', { name: 'Rows' });
-  await window.getByRole('region', { name: 'Params' })
+  const rowsRegion = window.getByRole('region', { name: '行', exact: true });
+  await window.getByRole('region', { name: '参数文件' })
     .locator('.wb-row', { hasText: 'BehaviorParam' })
     .click();
 

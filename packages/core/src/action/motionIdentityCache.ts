@@ -1,3 +1,5 @@
+import { TAE_IDENTITY_PROJECTION_VERSION } from '@soulforge/shared';
+
 /**
  * Revision-scoped ACTION motion identity cache.
  *
@@ -27,5 +29,5 @@ export class ActionMotionIdentityCache<T> {
 }
 
 function makeKey(sourceUri: string, revisionKey: string, animId: number, entryKey: string): string {
-  return JSON.stringify([sourceUri, revisionKey, entryKey, animId]);
+  return JSON.stringify([TAE_IDENTITY_PROJECTION_VERSION, sourceUri, revisionKey, entryKey, animId]);
 }

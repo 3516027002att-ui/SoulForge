@@ -53,7 +53,10 @@ describe('显示层不得再按条数砍列表（问题 5）', () => {
    * FMG/TAE/MSB 由问题 3/4 完工后的「问题4-D/4-A」describe 另作源码头对账。
    */
   const NO_RENDER_SLICE_SITES: ReadonlyArray<{ file: string; why: string }> = [
-    { file: 'App.tsx', why: '资源浏览器文件列表、搜索结果、命令面板命中、欢迎页待审查摘要全量渲染' },
+    { file: 'App.tsx', why: '布局外壳不得引入列表截断' },
+    { file: 'app/WorkspaceSummaryView.tsx', why: '欢迎页待审查摘要全量渲染' },
+    { file: 'app/NavigationSidebarViews.tsx', why: '资源浏览器文件列表与搜索结果全量渲染' },
+    { file: 'app/CommandPaletteView.tsx', why: '命令面板命中全量渲染' },
     { file: 'components/PreviewCards.tsx', why: '预览卡片各列表全量 map' },
     { file: 'workbench/MsbDataWorkbench.tsx', why: 'MSB 条目列表不再 100 一页' },
     { file: 'workbench/ReadOnlyEntryWorkbench.tsx', why: '只读条目列表不再 100 一页' },
@@ -127,7 +130,9 @@ describe('问题4-D/4-A：TAE/MSB 不再静默截断（显示层取消条数上�
 
 describe('资源浏览器全量渲染（问题 5）', () => {
   it('App.tsx 不再渲染截断说明 testid（search / cmdk / welcome-draft）', () => {
-    const source = readRendererSource('App.tsx');
+    const source = [
+      'App.tsx', 'app/NavigationSidebarViews.tsx', 'app/CommandPaletteView.tsx', 'app/WorkspaceSummaryView.tsx'
+    ].map(readRendererSource).join('\n');
     for (const testid of ['search-truncation', 'cmdk-truncation', 'welcome-draft-truncation']) {
       assert.ok(
         !source.includes(`data-testid="${testid}"`),
@@ -136,8 +141,11 @@ describe('资源浏览器全量渲染（问题 5）', () => {
     }
   });
 
-  it('资源浏览器全量渲染：App.tsx 对过滤后的完整集合直接 map，且不再有页大小常量', () => {
-    const source = readRendererSource('App.tsx');
+  it('资源浏览器全量渲染：实际导航 view 对过滤后的完整集合直接 map，且不再有页大小常量', () => {
+    const appSource = readRendererSource('App.tsx');
+    assert.match(appSource, /import \{ NavigationSidebarViews \} from '\.\/app\/NavigationSidebarViews\.js'/);
+    assert.match(appSource, /<NavigationSidebarViews navigation=\{navigation\} resource=\{resourceDocument\} workspace=\{workspace\}/);
+    const source = readRendererSource('app/NavigationSidebarViews.tsx');
     assert.match(
       source,
       /\{physicalBrowseFiles\.map\(/,

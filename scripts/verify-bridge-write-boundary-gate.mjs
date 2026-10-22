@@ -27,16 +27,20 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
+import { generateBridgeCommands } from './generate-bridge-commands.mjs';
 
 let declaredDiskWritingCommands = [];
 let coveredWriteCommands = [];
 let stagingWriteCodeContract = null;
 const LABEL = 'bridge-write-boundary';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const runtime = `${process.platform === 'win32' ? 'win' : process.platform}-${process.arch}`;
+const executableName = process.platform === 'win32' ? 'SoulForge.Bridge.exe' : 'SoulForge.Bridge';
 const EXE_CANDIDATES = [
-  join(root, 'bridge', 'SoulForge.Bridge', 'bin', 'Release', 'net10.0', 'win-x64', 'publish', 'SoulForge.Bridge.exe'),
-  join(root, 'bridge', 'SoulForge.Bridge', 'bin', 'Debug', 'net10.0', 'win-x64', 'SoulForge.Bridge.exe')
-];
+  process.env.SOULFORGE_BRIDGE_EXE,
+  join(root, 'bridge', 'SoulForge.Bridge', 'bin', 'Release', 'net10.0', runtime, 'publish', executableName),
+  join(root, 'bridge', 'SoulForge.Bridge', 'bin', 'Debug', 'net10.0', runtime, executableName)
+].filter(Boolean);
 
 function report(payload, exitCode) {
   const stream = exitCode === 0 ? console.log : console.error;
@@ -423,23 +427,15 @@ try {
    * 错误，也不会让任何测试失败，门禁照样全绿——正是本门禁注释里描述的事故形态。
    * 此前实测就是这个状态：集合 7 个，门禁测 3 个，4 个从未被越界测过。
    *
-   * 判据直接从 C# 源码解析集合初始化块，因此新增写命令时若忘了补测，这里立刻报红。
+   * 判据从生成 C# / TS 的同一份命令定义读取；新增写命令时若忘了补测，这里立刻报红。
    * 解析失败也失败关闭——提取不到集合就等于判据消失。
    */
   {
-    const hostSource = readFileSync(
-      resolve(root, 'bridge', 'SoulForge.Bridge', 'BridgeDaemonHost.cs'), 'utf8'
-    );
-    const blockMatch = /DiskWritingCommands\s*=\s*new\([^)]*\)\s*\{([^}]*)\}/s.exec(hostSource);
-    if (blockMatch === null) {
-      throw new Error(
-        'WRITE_BOUNDARY_REGISTRY_UNREADABLE: 无法从 BridgeDaemonHost.cs 解析'
-        + ' DiskWritingCommands 集合。提取失败必须失败关闭，否则覆盖面判据会消失。'
-      );
-    }
-    const declared = [...blockMatch[1].matchAll(/"([a-z0-9-]+)"/g)].map((m) => m[1]);
+    const manifest = JSON.parse(readFileSync(resolve(root, 'bridge', 'commands.json'), 'utf8'));
+    generateBridgeCommands(manifest); // Validate the same authoritative definition used by both projections.
+    const declared = manifest.commands.filter(command => command.requiresOutputPath).map(command => command.name);
     if (declared.length === 0) {
-      throw new Error('WRITE_BOUNDARY_REGISTRY_EMPTY: DiskWritingCommands 解析结果为空。');
+      throw new Error('WRITE_BOUNDARY_REGISTRY_EMPTY: commands.json 没有磁盘命令。');
     }
     const covered = new Set(writeCommands.map((entry) => entry.command));
     const missing = declared.filter((name) => !covered.has(name));

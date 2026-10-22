@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { TAE_IDENTITY_PROJECTION_VERSION } from '@soulforge/shared';
 import type {
   Diagnostic,
   IndexedFile,
@@ -200,8 +201,8 @@ FROM background_jobs WHERE workspace_id = ? ORDER BY created_at DESC, job_id`).a
 INSERT INTO rag_chunks (
  chunk_id, workspace_id, source_uri, symbol_uri, family, title, body,
  numeric_ids_json, relative_path, resource_kind, confidence, content_hash,
- source_revision, source_hash, outer_file_hash, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+ source_revision, source_hash, outer_file_hash, native_metadata_json, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     const insertFts = this.database.prepare(`
 INSERT INTO rag_chunks_fts (rowid, chunk_id, title, body) VALUES (?, ?, ?, ?)`);
     const insertTrigram = this.database.prepare(`
@@ -219,7 +220,7 @@ INSERT INTO rag_chunks_fts_trigram (rowid, chunk_id, title, body) VALUES (?, ?, 
           chunk.chunkId, this.workspaceId, chunk.sourceUri, chunk.symbolUri, chunk.family,
           chunk.title, chunk.body, JSON.stringify(chunk.numericIds),
           chunk.relativePath ?? null, chunk.resourceKind ?? null, chunk.confidence ?? null,
-          chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, chunk.outerFileHash ?? null, createdAt
+          chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, chunk.outerFileHash ?? null, serializeRagNativeMetadata(chunk), createdAt
         );
         const mainRowId = Number(result.lastInsertRowid);
         insertFts.run(mainRowId, chunk.chunkId, chunk.title, chunk.body);
@@ -254,7 +255,7 @@ SELECT rowid AS mainRowId, chunk_id AS chunkId, workspace_id AS workspaceId, sou
  symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
  relative_path AS relativePath, resource_kind AS resourceKind, confidence,
  content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash,
- outer_file_hash AS outerFileHash
+ outer_file_hash AS outerFileHash, native_metadata_json AS nativeMetadataJson
 FROM rag_chunks WHERE workspace_id = ?`).all(this.workspaceId)
       .map((row) => [row.chunkId, row] as const));
     for (const chunk of chunks) {
@@ -281,7 +282,8 @@ FROM rag_chunks WHERE workspace_id = ?`).all(this.workspaceId)
         || row.contentHash !== chunk.contentHash
         || (row.sourceRevision ?? null) !== (chunk.sourceRevision ?? null)
         || (row.sourceHash ?? null) !== (chunk.sourceHash ?? null)
-        || (row.outerFileHash ?? null) !== (chunk.outerFileHash ?? null);
+        || (row.outerFileHash ?? null) !== (chunk.outerFileHash ?? null)
+        || (row.nativeMetadataJson ?? null) !== serializeRagNativeMetadata(chunk);
     });
     if (deleted.length === 0 && changed.length === 0) return;
     const ftsRebuild = changed.filter((chunk) => {
@@ -305,15 +307,15 @@ FROM rag_chunks WHERE workspace_id = ?`).all(this.workspaceId)
 INSERT INTO rag_chunks (
  chunk_id, workspace_id, source_uri, symbol_uri, family, title, body,
  numeric_ids_json, relative_path, resource_kind, confidence, content_hash,
- source_revision, source_hash, outer_file_hash, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ source_revision, source_hash, outer_file_hash, native_metadata_json, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
  source_uri=excluded.source_uri, symbol_uri=excluded.symbol_uri, family=excluded.family,
  title=excluded.title, body=excluded.body, numeric_ids_json=excluded.numeric_ids_json,
  relative_path=excluded.relative_path, resource_kind=excluded.resource_kind,
  confidence=excluded.confidence, content_hash=excluded.content_hash,
  source_revision=excluded.source_revision, source_hash=excluded.source_hash,
- outer_file_hash=excluded.outer_file_hash,
+ outer_file_hash=excluded.outer_file_hash, native_metadata_json=excluded.native_metadata_json,
  created_at=excluded.created_at`);
     const insertFts = this.database.prepare(
       'INSERT INTO rag_chunks_fts (rowid, chunk_id, title, body) VALUES (?, ?, ?, ?)');
@@ -333,7 +335,7 @@ ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
           chunk.chunkId, this.workspaceId, chunk.sourceUri, chunk.symbolUri, chunk.family,
           chunk.title, chunk.body, JSON.stringify(chunk.numericIds),
           chunk.relativePath ?? null, chunk.resourceKind ?? null, chunk.confidence ?? null,
-          chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, chunk.outerFileHash ?? null, createdAt
+          chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, chunk.outerFileHash ?? null, serializeRagNativeMetadata(chunk), createdAt
         );
         if (ftsRebuildIds.has(chunk.chunkId)) {
           const mainRowId = existingRow?.mainRowId ?? Number(result.lastInsertRowid);
@@ -387,7 +389,7 @@ ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
  symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
  relative_path AS relativePath, resource_kind AS resourceKind, confidence,
  content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash,
- outer_file_hash AS outerFileHash
+ outer_file_hash AS outerFileHash, native_metadata_json AS nativeMetadataJson
 FROM rag_chunks WHERE workspace_id = ? AND chunk_id IN (${placeholders})`
       ).all(this.workspaceId, ...chunkIds) as RagChunkRow[];
       for (const row of rows) existingRows.set(row.chunkId, row);
@@ -464,15 +466,15 @@ FROM rag_chunks WHERE workspace_id = ? AND chunk_id IN (${placeholders})`
 INSERT INTO rag_chunks (
  chunk_id, workspace_id, source_uri, symbol_uri, family, title, body,
  numeric_ids_json, relative_path, resource_kind, confidence, content_hash,
- source_revision, source_hash, outer_file_hash, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ source_revision, source_hash, outer_file_hash, native_metadata_json, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
  source_uri=excluded.source_uri, symbol_uri=excluded.symbol_uri, family=excluded.family,
  title=excluded.title, body=excluded.body, numeric_ids_json=excluded.numeric_ids_json,
  relative_path=excluded.relative_path, resource_kind=excluded.resource_kind,
  confidence=excluded.confidence, content_hash=excluded.content_hash,
  source_revision=excluded.source_revision, source_hash=excluded.source_hash,
- outer_file_hash=excluded.outer_file_hash,
+ outer_file_hash=excluded.outer_file_hash, native_metadata_json=excluded.native_metadata_json,
  created_at=excluded.created_at`);
     const insertFts = this.database.prepare(
       'INSERT INTO rag_chunks_fts (rowid, chunk_id, title, body) VALUES (?, ?, ?, ?)');
@@ -497,7 +499,7 @@ ON CONFLICT(chunk_id) DO UPDATE SET workspace_id=excluded.workspace_id,
           chunk.chunkId, this.workspaceId, chunk.sourceUri, chunk.symbolUri, chunk.family,
           chunk.title, chunk.body, JSON.stringify(chunk.numericIds),
           chunk.relativePath ?? null, chunk.resourceKind ?? null, chunk.confidence ?? null,
-          chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, chunk.outerFileHash ?? null, createdAt
+          chunk.contentHash, chunk.sourceRevision ?? null, chunk.sourceHash ?? null, chunk.outerFileHash ?? null, serializeRagNativeMetadata(chunk), createdAt
         );
         if (ftsRebuildIdSet.has(chunk.chunkId)) {
           const existingRow = existingRows.get(chunk.chunkId);
@@ -518,7 +520,7 @@ SELECT rowid AS mainRowId, chunk_id AS chunkId, workspace_id AS workspaceId, sou
  symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
  relative_path AS relativePath, resource_kind AS resourceKind, confidence,
  content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash,
- outer_file_hash AS outerFileHash
+ outer_file_hash AS outerFileHash, native_metadata_json AS nativeMetadataJson
 FROM rag_chunks WHERE workspace_id = ? ORDER BY family, title, chunk_id`)
       .all(this.workspaceId);
     return rows.map(hydrateRagChunk);
@@ -535,7 +537,7 @@ SELECT c.rowid AS mainRowId, c.chunk_id AS chunkId, c.workspace_id AS workspaceI
  c.symbol_uri AS symbolUri, c.family, c.title, c.body, c.numeric_ids_json AS numericIdsJson,
  c.relative_path AS relativePath, c.resource_kind AS resourceKind, c.confidence,
  c.content_hash AS contentHash, c.source_revision AS sourceRevision, c.source_hash AS sourceHash,
- c.outer_file_hash AS outerFileHash
+ c.outer_file_hash AS outerFileHash, c.native_metadata_json AS nativeMetadataJson
 FROM rag_chunks c
 JOIN rag_chunks_fts x ON x.rowid = c.rowid
 WHERE c.workspace_id = ? AND rag_chunks_fts MATCH ? ORDER BY rank LIMIT ?`;
@@ -554,7 +556,7 @@ SELECT c.rowid AS mainRowId, c.chunk_id AS chunkId, c.workspace_id AS workspaceI
  c.symbol_uri AS symbolUri, c.family, c.title, c.body, c.numeric_ids_json AS numericIdsJson,
  c.relative_path AS relativePath, c.resource_kind AS resourceKind, c.confidence,
  c.content_hash AS contentHash, c.source_revision AS sourceRevision, c.source_hash AS sourceHash,
- c.outer_file_hash AS outerFileHash
+ c.outer_file_hash AS outerFileHash, c.native_metadata_json AS nativeMetadataJson
 FROM rag_chunks c
 JOIN rag_chunks_fts_trigram x ON x.rowid = c.rowid
 WHERE c.workspace_id = ? AND rag_chunks_fts_trigram MATCH ? ORDER BY rank LIMIT ?`)
@@ -568,7 +570,7 @@ SELECT rowid AS mainRowId, chunk_id AS chunkId, workspace_id AS workspaceId, sou
  symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
  relative_path AS relativePath, resource_kind AS resourceKind, confidence,
  content_hash AS contentHash, source_revision AS sourceRevision, source_hash AS sourceHash,
- outer_file_hash AS outerFileHash
+ outer_file_hash AS outerFileHash, native_metadata_json AS nativeMetadataJson
 FROM rag_chunks
 WHERE workspace_id = ? AND (title LIKE ? OR body LIKE ?)
 ORDER BY family, title LIMIT ?`).all(this.workspaceId, needle, needle, boundedLimit);
@@ -849,6 +851,7 @@ interface RagChunkRow {
   sourceRevision: number | null;
   sourceHash: string | null;
   outerFileHash: string | null;
+  nativeMetadataJson: string | null;
 }
 
 function deleteFtsByMainRowId(
@@ -891,6 +894,27 @@ FROM rag_chunks WHERE chunk_id IN (${placeholders})`
   }
 }
 
+function serializeRagNativeMetadata(chunk: RagChunk): string | null {
+  if (chunk.family !== 'tae_event' || !chunk.chunkId.startsWith(`rag:tae_event:v${TAE_IDENTITY_PROJECTION_VERSION}:`)
+    || (!chunk.outerFileHash && !chunk.sourceHash) || !Number.isSafeInteger(chunk.taeActionEventCount)
+    || chunk.taeActionEventCount! < 0 || typeof chunk.taeActionEventsComplete !== 'boolean') return null;
+  return JSON.stringify({ version: 1, chunkId: chunk.chunkId, sourceUri: chunk.sourceUri, symbolUri: chunk.symbolUri,
+    sourceHash: chunk.sourceHash ?? null, outerFileHash: chunk.outerFileHash ?? null, sourceRevision: chunk.sourceRevision ?? null,
+    contentHash: chunk.contentHash, eventCount: chunk.taeActionEventCount, eventsComplete: chunk.taeActionEventsComplete });
+}
+
+function hydrateRagNativeMetadata(row: RagChunkRow): Pick<RagChunk, 'taeActionEventCount' | 'taeActionEventsComplete'> {
+  if (row.family !== 'tae_event' || !row.chunkId.startsWith(`rag:tae_event:v${TAE_IDENTITY_PROJECTION_VERSION}:`) || !row.nativeMetadataJson) return {};
+  try {
+    const value = JSON.parse(row.nativeMetadataJson);
+    if (value?.version !== 1 || value.chunkId !== row.chunkId || value.sourceUri !== row.sourceUri || value.symbolUri !== row.symbolUri
+      || value.sourceHash !== row.sourceHash || value.outerFileHash !== row.outerFileHash || value.sourceRevision !== row.sourceRevision
+      || value.contentHash !== row.contentHash || !Number.isSafeInteger(value.eventCount) || value.eventCount < 0
+      || typeof value.eventsComplete !== 'boolean') return {};
+    return { taeActionEventCount: value.eventCount, taeActionEventsComplete: value.eventsComplete };
+  } catch { return {}; }
+}
+
 function hydrateRagChunk(row: RagChunkRow): RagChunk {
   return {
     chunkId: row.chunkId,
@@ -902,6 +926,7 @@ function hydrateRagChunk(row: RagChunkRow): RagChunk {
     body: row.body,
     numericIds: parseJson(row.numericIdsJson, 'rag numeric ids'),
     contentHash: row.contentHash,
+    ...hydrateRagNativeMetadata(row),
     ...(row.sourceRevision !== null ? { sourceRevision: row.sourceRevision } : {}),
     ...(row.sourceHash !== null ? { sourceHash: row.sourceHash } : {}),
     ...(row.outerFileHash !== null ? { outerFileHash: row.outerFileHash } : {}),

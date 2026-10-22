@@ -1,0 +1,29 @@
+
+/* ═══════════ 顶层工作域栏（产品 IA，不等同于物理资源目录） ═══════════ */
+.domain-bar {
+  flex: none; display: flex; align-items: center; min-width: 0;
+  height: 36px; padding: 0 12px;
+  background: var(--forge-1); border-bottom: 1px solid var(--line);
+  position: relative; z-index: 35;
+}
+.domain-bar__tabs {
+  flex: 1; min-width: 0; display: flex; align-items: stretch; gap: 1px;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+}
+.domain-bar__tabs::-webkit-scrollbar { display: none; }
+.domain-tab {
+  flex: none; display: inline-flex; align-items: center; gap: 5px;
+  height: 30px; padding: 0 9px; align-self: center;
+  color: var(--ink-2); font-size: 11.5px; border-radius: var(--radius-s);
+  position: relative; background: var(--control-rest-bg);
+  transition: color var(--dur-micro), background var(--dur-micro), box-shadow var(--dur-micro);
+}
+.domain-tab:hover { color: var(--ink-1); background: var(--control-hover-bg); box-shadow: var(--control-hover-shadow); }
+.domain-tab:active { background: var(--control-active-bg); box-shadow: var(--control-active-shadow); }
+.domain-tab.is-selected { color: var(--ember-text); }
+.domain-tab.is-selected::after {
+  content: ""; position: absolute; left: 7px; right: 7px; bottom: -3px;
+  height: 2px; border-radius: 1px; background: var(--ember);
+}
+.domain-tab__label { white-space: nowrap; }
+/* SHELL-09 §3.3：领域栏不显示无单位文件数，count 样式已随实现删除 */

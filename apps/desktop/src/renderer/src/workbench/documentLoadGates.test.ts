@@ -57,6 +57,18 @@ describe('documentLoadGates', () => {
     assert.equal(shouldLoadScript(hks), true);
   });
 
+  it('独立 .hks/.lua 计划走源码读链，脚本容器仍走容器证据', () => {
+    for (const path of ['action/script/c0000_transition.hks', 'script/goal_list.lua']) {
+      const plan = planResourceOpen(file(path));
+      assert.ok(plan.ipcMethods.includes('readScriptSource'), `${path} includes readScriptSource`);
+      assert.ok(!plan.ipcMethods.includes('scriptContainerEvidence'), `${path} does not request container evidence`);
+    }
+
+    const container = planResourceOpen(file('script/aicommon.luabnd.dcx'));
+    assert.ok(container.ipcMethods.includes('scriptContainerEvidence'));
+    assert.ok(!container.ipcMethods.includes('readScriptSource'));
+  });
+
   it('gfx / behbnd / bak 不是语义打开', () => {
     assert.equal(classifyWorkspaceOpen('menu/05_000_title.gfx').openKind, 'blocked-no-parser');
     assert.equal(classifyWorkspaceOpen('chr/c4510.behbnd.dcx').openKind, 'blocked-scope');

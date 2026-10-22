@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * Smoke: EMEVD DSL plan → Bridge mutation conversion and PatchIR commit wiring.
  *
@@ -21,7 +22,7 @@
  * Authority cap: partial; only covers actual wired mutations, not full EMEDF/layer/game-load.
  */
 
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { EmevdDslCompileRequest, EmevdMutationPlan, ValidatorContract, ValidatorResult } from '@soulforge/shared';

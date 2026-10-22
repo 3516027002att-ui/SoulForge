@@ -416,6 +416,7 @@ function parseMsgExport(value: unknown, sourceUri: string, fallbackProvenance: S
   const exportProvenance = sourceProvenance(record, fallbackProvenance);
   return {
     value: {
+      ...(typeof record.readerSchemaRevision === 'number' ? {readerSchemaRevision: record.readerSchemaRevision} : {}),
       ...(asString(record.category) ? { category: asString(record.category) } : {}),
       ...exportProvenance,
       entries: Array.isArray(record.entries) ? record.entries.flatMap((item, index) => parseTextEntry(item, sourceUri, index, exportProvenance)) : []
@@ -656,6 +657,8 @@ function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | 
     animations.push({
       animId,
       code,
+      ...(asNumber(anim.eventCount) === null ? {} : { eventCount: asNumber(anim.eventCount)! }),
+      eventsComplete: asNumber(anim.eventCount) === events.length,
       ...(identity ?? {}),
       ...(motionAnimId === null ? {} : { motionAnimId }),
       ...(asString(anim.hkxName) ? { hkxName: asString(anim.hkxName) } : {}),
@@ -685,6 +688,7 @@ function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | 
       chrId,
       sourceUri,
       ...exportProvenance,
+      readerSchemaRevision: asNumber(record.identityProjectionVersion) ?? 0,
       ...(taeEntryCount !== null ? { taeEntryCount } : {}),
       ...(taeEntries.length > 0 ? { taeEntries } : {}),
       animations

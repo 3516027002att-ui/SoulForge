@@ -13,6 +13,8 @@ import { MemoryOperationLogStore } from '../patch/operationLog.js';
 export async function runEmevdOutlinePagingSmoke(): Promise<void> {
   const registryUrl = new URL('../ai/toolRegistry.js', import.meta.url);
   registryUrl.search = '?outline-paging-fixture';
+  const toolUrl = new URL('../ai/tools/read_emevd_outline.js', import.meta.url);
+  toolUrl.search = registryUrl.search;
   const readerUrl = new URL('../editing/emevdEdit.js', import.meta.url).href;
   const mockUrl = 'soulforge-outline-fixture:reader';
   const callbackKey = Symbol.for('soulforge.outline-paging-fixture.reader');
@@ -30,11 +32,15 @@ export async function runEmevdOutlinePagingSmoke(): Promise<void> {
     nativeCalls += 1;
     return { ok: true, filePath, sourceHash, events: allEvents, diagnostics: [] };
   };
-  // The isolated registry instance resolves only its EMEVD reader to this mock.
+  // Isolate both the registry and its split tool module, including when the
+  // canonical tool was already cached by the production bridge import above.
   // Canonical production module caches remain untouched after hooks deregister.
   const hooks = registerHooks({
     resolve(specifier, context, nextResolve) {
-      if (context.parentURL === registryUrl.href && specifier === '../editing/emevdEdit.js') {
+      if (context.parentURL === registryUrl.href && specifier === './tools/read_emevd_outline.js') {
+        return { url: toolUrl.href, shortCircuit: true };
+      }
+      if (context.parentURL === toolUrl.href && specifier === '../../editing/emevdEdit.js') {
         return { url: mockUrl, shortCircuit: true };
       }
       return nextResolve(specifier, context);

@@ -610,9 +610,7 @@ function computeBounds(items: SceneDrawItem[]): SceneDrawList['bounds'] {
 
 function assertNoAbsolutePathLeak(value: unknown): void {
   const text = typeof value === 'string' ? value : JSON.stringify(value);
-  if (/(?:^|["'\s])(?:[A-Za-z]:[\\/]|\\\\)/.test(text)
-    || /file:\/\/{1,3}[A-Za-z]:/i.test(text)
-    || /\/(?:Users|home)\//i.test(text)) {
+  if (/(?:^|["'\s])(?:[A-Za-z]:[\\/]|\\\\)|file:\/\/{1,3}[A-Za-z]:|\/(?:Users|home)\//i.test(text)) {
     throw new SceneProjectionError('SCENE_ABSOLUTE_PATH_LEAK', '场景投影包含绝对文件系统路径。');
   }
 }

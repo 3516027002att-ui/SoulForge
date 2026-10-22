@@ -1,10 +1,11 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * EMEDF coverage smoke:
  * 1) Synthetic distribution assertions (always run, deterministic).
  * 2) Real corpus distribution when a native fixture is injected (arg 2),
  *    mirroring runNativeEmevdSmoke's fixture contract.
  */
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';

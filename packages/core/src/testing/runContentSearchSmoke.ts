@@ -5,9 +5,37 @@ import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { resolveEntity } from '../ai/entityResolution.js';
 import { buildNameMatchEdges } from '../references/referenceProviderRegistry.js';
 import { buildParamReferenceEdges } from '../references/paramReferenceProvider.js';
+import { assertCursorPrivacy } from './harness/assertCursorPrivacy.js';
+import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
 
 const original = ('函数("中文 😀", "\\路径");\n').repeat(600);
 let cursor: string | undefined;
+// sourceKey embeds the workspace id (absolute file:// URL): only its digest may reach the wire.
+const privateSourceKey = 'file:///home/alice/private-mod-workspace|file://msg/item.msgbnd.dcx|Title|10';
+for (const domain of ['script', 'fmg'] as const) {
+  const privatePage = sourceTextPage({ text: 'native-text'.repeat(500), sourceKey: privateSourceKey, sourceHash: 'native-child', domain });
+  assert.equal(assertCursorPrivacy(privatePage, [privateSourceKey, '/home/alice', 'private-mod-workspace']), 1);
+  assert.equal(parseOpaqueCursor(privatePage.nextCursor!).sessionId, 'source-text-v2');
+  const continued = sourceTextPage({ text: 'native-text'.repeat(500), sourceKey: privateSourceKey, sourceHash: 'native-child', domain, cursor: privatePage.nextCursor! });
+  assert.equal(continued.offset, privatePage.returned);
+  assert.throws(() => sourceTextPage({ text: 'native-text'.repeat(500), sourceKey: privateSourceKey + '-other-resource', sourceHash: 'native-child', domain, cursor: privatePage.nextCursor! }), { code: 'SOURCE_CURSOR_SCOPE_MISMATCH' });
+  // Unhashed v1 cursors are rejected (not migrated).
+  const legacy = createOpaqueCursor({ ...parseOpaqueCursor(privatePage.nextCursor!), sessionId: 'source-text-v1',
+    scope: JSON.stringify({ sourceKey: privateSourceKey, limit: privatePage.limit }) });
+  assert.throws(() => sourceTextPage({ text: 'native-text'.repeat(500), sourceKey: privateSourceKey, sourceHash: 'native-child', domain, cursor: legacy }), (error: unknown) => {
+    assert.ok(!String(error).includes('private-mod-workspace'), 'rejection must not echo the decodable path');
+    return (error as { code?: string }).code === 'SOURCE_CURSOR_SCOPE_MISMATCH';
+  });
+}
+// contentSearchPage: workspace id is a digest on the wire; pre-hash v2 is rejected.
+const privateWorkspace = 'file:///home/alice/private-mod-workspace';
+const privateSearch = { tool: 'search_text_entries' as const, workspaceId: privateWorkspace, search: () => [1, 2, 3], fingerprint: (row: number) => row };
+const privateSearchFirst = contentSearchPage({ ...privateSearch, input: { query: 'x', limit: 1 } });
+assert.equal(assertCursorPrivacy(privateSearchFirst, [privateWorkspace, '/home/alice', 'private-mod-workspace']), 2);
+assert.deepEqual(contentSearchPage({ ...privateSearch, input: { cursor: privateSearchFirst.nextCursor } }).matches, [2]);
+const preHashSearch = createOpaqueCursor({ ...parseOpaqueCursor(privateSearchFirst.nextCursor!), sessionId: 'content-search-v2',
+  scope: JSON.stringify({ workspaceId: privateWorkspace, tool: 'search_text_entries', query: 'x', paramNames: [], limit: 1 }) });
+assert.throws(() => contentSearchPage({ ...privateSearch, input: { cursor: preHashSearch } }), { code: 'SEARCH_CURSOR_SCOPE_MISMATCH' });
 let assembled = '';
 let pages = 0;
 do {

@@ -2,7 +2,7 @@
 /**
  * Generate MatureEvidenceV1 for SoulForge corpus V2 tri-source.
  * Tools: Yapped Rune Bear v2.14.1, Smithbox 2.2.4, DSAnimStudio 4.9.9 Build 4999
- * Paths fixed per user spec under D:\mystream\Sekiro Shadows Die Twice\tools
+ * Tools under SOULFORGE_SEKIRO_TOOLS_ROOT (default: the game root's sibling `tools` directory)
  * Machine signals only: uia / exported-json / structured-log (no screenshot OCR)
  * State machine: probe -> open -> waitReady -> exportEvidence -> close
  */
@@ -10,11 +10,16 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync, copyFileSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { execSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = 'D:/Repository/SoulForge';
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT_ROOT = join(ROOT, 'output', 'corpus-tri-source', 'mature-raw');
-const TOOLS_ROOT = 'D:/mystream/Sekiro Shadows Die Twice/tools';
-const GAME_ROOT = 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
+const GAME_ROOT = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() || '';
+if (!GAME_ROOT) {
+  console.error(JSON.stringify({ ok: false, code: 'SOULFORGE_SEKIRO_GAME_ROOT_MISSING', message: 'set SOULFORGE_SEKIRO_GAME_ROOT to the Sekiro game root' }));
+  process.exit(2);
+}
+const TOOLS_ROOT = process.env.SOULFORGE_SEKIRO_TOOLS_ROOT?.trim() || join(dirname(resolve(GAME_ROOT)), 'tools');
 
 function sha256File(p) {
   const data = readFileSync(p);

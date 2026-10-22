@@ -12,7 +12,6 @@ import { ActionContinuousSampler, type BoneTransformData, type TaeAnimationClipD
 import { loadTaeAnimationClip, sampleTaeAnimationPose } from '../action/taeAnimationBridge.js';
 import { disposeBridgeDaemonPool, runBridge } from '../bridge/runBridge.js';
 
-const DEFAULT_GAME_ROOT = 'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro';
 const DEFAULT_DIFFERENTIAL_IDS = [10, 11, 12, 13, 100, 101, 200, 300, 400, 500, 600, 1200];
 const MAX_TRANSLATION_SCALE_ERROR = 1e-3;
 const MAX_ROTATION_ERROR = 1e-3;
@@ -33,7 +32,13 @@ interface AnimationEntry {
 }
 
 function gameRoot(): string {
-  return process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() || DEFAULT_GAME_ROOT;
+  const root = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+  // Real game data never ships with the repository; without the game root this smoke skips honestly.
+  if (!root) {
+    console.log(JSON.stringify({ status: 'skipped', skipped: true, reason: 'SOULFORGE_SEKIRO_GAME_ROOT is not set' }));
+    process.exit(0);
+  }
+  return root;
 }
 
 function comparePose(nativePose: BoneTransformData[], tsPose: BoneTransformData[], label: string): {

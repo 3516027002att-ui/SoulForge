@@ -1,0 +1,127 @@
+/* ═══════════════════════════════════════════════════════════
+   SoulForge Renderer — 流光溢彩白 / 五彩斑斓黑（liuguang-banlan-ui）
+   规范：sickn33/agentic-awesome-skills，PR #1743 / 8117e465
+   同一流光渲染器、两份上游参数清单；现有工作台布局保持不变
+   深度策略：borders-only（单一 hairline 体系，浮层才用阴影）
+   ═══════════════════════════════════════════════════════════ */
+
+:root {
+  /* 尺寸（4px 基准） */
+  --titlebar-h: 40px;
+  --statusbar-h: 24px;
+  --activitybar-w: 48px;
+  --sidebar-w: 264px;
+  --agent-w: 440px;
+
+  /* Agent dock 外壳 */
+  --agent-dock-default: 440px;
+  --agent-dock-min: 96px;
+  --agent-dock-max: 620px;
+  --agent-header-height: 48px;
+  --agent-resizer-width: 12px;
+  --agent-side-padding: 16px;
+  --agent-composer-min-height: 168px;
+  --agent-composer-max-height: min(320px, 40vh);
+  --agent-composer-toolbar-height: 44px;
+  --agent-icon-button-size: 28px;
+  --agent-send-button-size: 32px;
+  --agent-welcome-max-width: 360px;
+
+  /* 圆角：Sharp 体系 4 / 6 / 8，模态 12 */
+  --radius-s: 4px;
+  --radius-m: 6px;
+  --radius-l: 8px;
+  --radius-modal: 12px;
+
+  /* 动效：克制、功能性，无弹簧 */
+  --ease-standard: cubic-bezier(.25, 1, .5, 1);
+  --dur-micro: .15s;
+  --dur-trans: .22s;
+
+  /* 字体 */
+  --font-ui: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  --font-mono: "Cascadia Code", "JetBrains Mono", Consolas, "SF Mono", monospace;
+}
+
+/* Both modes map the upstream workbench surfaces onto existing renderer tokens. */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --canvas: oklch(9.8% 0.012 236);
+  --forge-0: oklch(8.5% 0.012 238 / 0.18);
+  --forge-1: oklch(12.8% 0.012 240 / 0.79);
+  --forge-2: oklch(17% 0.014 238 / 0.66);
+  --forge-3: oklch(12.2% 0.017 236 / 0.95);
+  --forge-hover: oklch(84% 0.028 211 / 0.07);
+  --forge-active: oklch(64% 0.07 194 / 0.13);
+  --line: oklch(92% 0.016 218 / 0.075);
+  --line-strong: oklch(92% 0.018 218 / 0.22);
+  --ink-0: oklch(92% 0.012 218);
+  --ink-1: oklch(73% 0.015 221);
+  --ink-2: oklch(66% 0.012 224);
+  --ink-3: oklch(58% 0.014 224);
+  --ember: oklch(69% 0.09 191);
+  --ember-text: oklch(74% 0.11 192);
+  --ember-soft: oklch(56% 0.09 191 / 0.18);
+  --ember-glow: 0 0 0 1px var(--line-strong);
+  --ok: oklch(69% 0.12 163);
+  --ok-soft: oklch(69% 0.12 163 / 0.12);
+  --warn: oklch(78% 0.12 85);
+  --warn-soft: color-mix(in oklch, var(--warn), transparent 88%);
+  --danger: oklch(70% 0.15 25);
+  --danger-text: oklch(75% 0.15 25);
+  --danger-soft: color-mix(in oklch, var(--danger), transparent 88%);
+  --on-ember: oklch(15% 0.02 225);
+  --on-danger: oklch(16% 0.02 25);
+  --diff-add-bg: color-mix(in oklch, var(--ok), transparent 90%);
+  --diff-del-bg: color-mix(in oklch, var(--danger), transparent 90%);
+  --shadow-float: 0 0 0 0.5px oklch(0% 0 0 / 0.2), 0 4px 12px oklch(0% 0 0 / 0.35), 0 12px 32px oklch(0% 0 0 / 0.3);
+  --control-rest-bg: transparent;
+  --control-hover-bg: var(--forge-hover);
+  --control-active-bg: var(--forge-active);
+  --control-hover-shadow: 0 1px 2px rgb(0 0 0 / 0.24), 0 4px 10px rgb(0 0 0 / 0.14);
+  --control-active-shadow: 0 1px 2px rgb(0 0 0 / 0.28), 0 3px 8px rgb(0 0 0 / 0.18);
+  --primary-fill: oklch(72% 0.07 190);
+  --primary-fill-hover: oklch(77% 0.075 190);
+  --on-primary: oklch(15% 0.02 225);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --canvas: oklch(98.2% 0.004 94);
+  --forge-0: oklch(99% 0.003 92 / 0.18);
+  --forge-1: oklch(99.5% 0.003 94 / 0.66);
+  --forge-2: oklch(98.8% 0.007 95 / 0.92);
+  --forge-3: oklch(98.8% 0.007 95 / 0.92);
+  --forge-hover: oklch(100% 0 0 / 0.48);
+  --forge-active: oklch(91% 0.024 222 / 0.48);
+  --line: oklch(30% 0.02 246 / 0.075);
+  --line-strong: oklch(26% 0.025 246 / 0.20);
+  --ink-0: oklch(24% 0.018 248);
+  --ink-1: oklch(40% 0.018 245);
+  --ink-2: oklch(48% 0.012 246);
+  --ink-3: oklch(53% 0.014 246);
+  --ember: oklch(54% 0.08 216);
+  --ember-text: oklch(55% 0.11 222);
+  --ember-soft: oklch(78% 0.06 213 / 0.22);
+  --ember-glow: 0 0 0 1px var(--line-strong);
+  --ok: oklch(52% 0.10 158);
+  --ok-soft: color-mix(in oklch, var(--ok), transparent 92%);
+  --warn: oklch(51% 0.11 80);
+  --warn-soft: color-mix(in oklch, var(--warn), transparent 92%);
+  --danger: oklch(52% 0.15 25);
+  --danger-text: oklch(50% 0.16 25);
+  --danger-soft: color-mix(in oklch, var(--danger), transparent 92%);
+  --on-ember: oklch(100% 0 0);
+  --on-danger: oklch(100% 0 0);
+  --diff-add-bg: color-mix(in oklch, var(--ok), transparent 94%);
+  --diff-del-bg: color-mix(in oklch, var(--danger), transparent 94%);
+  --primary-fill: oklch(32% 0.025 240);
+  --primary-fill-hover: oklch(27% 0.025 240);
+  --on-primary: oklch(98% 0.004 95);
+  --shadow-float: 0 0 0 0.5px oklch(20% 0.01 255 / 0.05), 0 4px 12px oklch(25% 0.01 255 / 0.04), 0 12px 32px oklch(25% 0.01 255 / 0.05);
+  --control-rest-bg: transparent;
+  --control-hover-bg: var(--forge-hover);
+  --control-active-bg: var(--forge-active);
+  --control-hover-shadow: 0 1px 2px rgb(45 38 30 / 0.05), 0 2px 6px rgb(45 38 30 / 0.025);
+  --control-active-shadow: 0 1px 2px rgb(45 38 30 / 0.07), 0 2px 5px rgb(45 38 30 / 0.035);
+}

@@ -1,6 +1,7 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BridgeResult, IndexedFile, MsgExport } from '@soulforge/shared';
@@ -56,10 +57,10 @@ export async function runNativeSemanticRefreshCancellationSmoke(): Promise<void>
   const secondStarted = new Promise<void>((resolve) => { resolveSecondStarted = resolve; });
 
   const bridgeRunner = async <T>(options: RunBridgeOptions): Promise<BridgeResult<T>> => {
-    if (options.command === 'read-dcx-document') {
+    if (options.command === 'list-bnd4-entries') {
       return bridgeOk(sourceUri, {
-        outerFileHash,
-        nested: { entries: [{ index: 0, name: 'a.fmg' }, { index: 1, name: 'b.fmg' }] }
+        sourceHash: outerFileHash, entryCount: 2,
+        entries: [{ index: 0, name: 'a.fmg' }, { index: 1, name: 'b.fmg' }]
       }) as BridgeResult<T>;
     }
     if (options.command === 'extract-bnd4-child') {
@@ -148,13 +149,13 @@ export async function runNativeSemanticRefreshSourceAtomicitySmoke(): Promise<vo
   assert.equal(index.upsertMsgExport(staleProjection), true);
 
   const bridgeRunner = async <T>(options: RunBridgeOptions): Promise<BridgeResult<T>> => {
-    if (options.command === 'read-dcx-document') {
+    if (options.command === 'list-bnd4-entries') {
       return bridgeOk(sourceUri, {
-        outerFileHash,
-        nested: { entries: [
+        sourceHash: outerFileHash, entryCount: 2,
+        entries: [
           { index: 0, name: 'fresh.fmg' },
           { index: 1, name: 'broken.fmg' }
-        ] }
+        ]
       }) as BridgeResult<T>;
     }
     if (options.command === 'extract-bnd4-child') {
@@ -192,10 +193,10 @@ export async function runNativeSemanticRefreshSourceAtomicitySmoke(): Promise<vo
     stagingRoot: root,
     allowedRoots: [root],
     bridgeRunner: async <T>(options: RunBridgeOptions): Promise<BridgeResult<T>> => {
-      if (options.command === 'read-dcx-document') {
+      if (options.command === 'list-bnd4-entries') {
         return bridgeOk(sourceUri, {
-          outerFileHash,
-          nested: { entries: [{ index: 0, name: 'broken-only.fmg' }] }
+          sourceHash: outerFileHash, entryCount: 1,
+          entries: [{ index: 0, name: 'broken-only.fmg' }]
         }) as BridgeResult<T>;
       }
       if (options.command === 'extract-bnd4-child') {
@@ -264,10 +265,10 @@ export async function runNativeSemanticRefreshOwnedIndexSmoke(): Promise<void> {
     stagingRoot: root,
     allowedRoots: [root],
     bridgeRunner: async <T>(request: RunBridgeOptions): Promise<BridgeResult<T>> => {
-      if (request.command === 'read-dcx-document') {
+      if (request.command === 'list-bnd4-entries') {
         return bridgeOk(sourceUri, {
-          outerFileHash,
-          nested: { entries: [{ index: 0, name: 'fresh.fmg' }] }
+          sourceHash: outerFileHash, entryCount: 1,
+          entries: [{ index: 0, name: 'fresh.fmg' }]
         }) as BridgeResult<T>;
       }
       if (request.command === 'extract-bnd4-child') {
@@ -344,9 +345,9 @@ export async function runNativeParamReadConcurrencySmoke(): Promise<void> {
   let readerCalls = 0;
   const progressEvents: Array<{ phase: string; entryName: string; heapUsedMb: number }> = [];
   const bridgeRunner = async <T>(request: RunBridgeOptions): Promise<BridgeResult<T>> => {
-    if (request.command === 'read-dcx-document') {
+    if (request.command === 'list-bnd4-entries') {
       return {
-        ...bridgeOk(sourceUri, { outerFileHash, nested: { entries } }),
+        ...bridgeOk(sourceUri, { sourceHash: outerFileHash, entryCount: entries.length, entries }),
         resourceKind: 'param'
       } as BridgeResult<T>;
     }
@@ -445,9 +446,9 @@ export async function runNativeParamRefreshStreamsTablesSmoke(): Promise<void> {
     stagingRoot: root,
     allowedRoots: [root],
     bridgeRunner: async <T>(request: RunBridgeOptions): Promise<BridgeResult<T>> => {
-      if (request.command === 'read-dcx-document') {
+      if (request.command === 'list-bnd4-entries') {
         return {
-          ...bridgeOk(sourceUri, { outerFileHash, nested: { entries } }),
+          ...bridgeOk(sourceUri, { sourceHash: outerFileHash, entryCount: entries.length, entries }),
           resourceKind: 'param'
         } as BridgeResult<T>;
       }

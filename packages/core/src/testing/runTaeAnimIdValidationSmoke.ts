@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * TAE native animId 边界回归。
  *
@@ -6,8 +7,9 @@
  * 该 smoke 不宣称真实 Sekiro native parser 或 Bridge binary 能力。
  */
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { registerHooks } from 'node:module';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -81,11 +83,14 @@ async function run(): Promise<void> {
   const fixtureRoot = await mkdtemp(join(tmpdir(), 'soulforge-tae-anim-id-validation-'));
   const filePath = join(fixtureRoot, 'chr', 'c0000.anibnd.dcx');
   await mkdir(join(fixtureRoot, 'chr'), { recursive: true });
-  await writeFile(filePath, Buffer.from('controlled-tae-read-fixture'));
+  const sourceBytes = Buffer.from('controlled-tae-read-fixture');
+  await writeFile(filePath, sourceBytes);
+  const outerFileHash = createHash('sha256').update(sourceBytes).digest('hex');
 
   const fixtureGlobals = globalThis as typeof globalThis & { [key: symbol]: unknown };
   const previousCallback = fixtureGlobals[CALLBACK_KEY];
   let currentAnimId: unknown = null;
+  let malformedAnimation = false;
   fixtureGlobals[CALLBACK_KEY] = (async (input: BridgeMockInput) => {
     assert.equal(input.command, 'read-tae-document');
     return {
@@ -96,7 +101,13 @@ async function run(): Promise<void> {
       parseStatus: 'partial',
       diagnostics: [],
       data: {
-        animations: [{
+        outerFileHash,
+        sourceHash: outerFileHash,
+        identityProjectionVersion: 2,
+        animationCount: 1,
+        totalEventCount: 1,
+        animationsTruncated: false,
+        animations: malformedAnimation ? [null] : [{
           animId: currentAnimId,
           events: [{ startTime: 0, endTime: 1, eventTypeId: 1 }]
         }]
@@ -132,6 +143,11 @@ async function run(): Promise<void> {
   try {
     const { readTaeEvents } = await import(taeEditUrl.href) as typeof import('../editing/taeEdit.js');
     const edit = makeEditSession(fixtureRoot);
+    malformedAnimation = true;
+    const malformed = await readTaeEvents({ edit, file: filePath });
+    assert.equal(malformed.ok, false);
+    if (!malformed.ok) assert.equal(malformed.error.code, 'TAE_ANIM_ID_INVALID');
+    malformedAnimation = false;
 
     for (const animId of [null, -1, Number.MAX_SAFE_INTEGER + 1]) {
       currentAnimId = animId;

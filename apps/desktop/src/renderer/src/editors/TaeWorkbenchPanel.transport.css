@@ -1,0 +1,115 @@
+
+/* ══════════ TAE 动作播放控制栏（流光溢彩白 Transport Control） ══════════ */
+.tae-timeline-ctrl {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px 8px;
+  background: var(--forge-1);
+  border-top: 1px solid var(--line);
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.tae-transport-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: 24px;
+  flex-wrap: wrap;
+}
+
+.tae-transport-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+
+.tae-transport-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--ink-1);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-s);
+  cursor: pointer;
+  transition: background var(--dur-micro) var(--ease-standard), color var(--dur-micro) var(--ease-standard);
+}
+
+.tae-transport-btn svg {
+  display: block;
+  flex-shrink: 0;
+}
+
+.tae-transport-btn:hover:not(:disabled) {
+  background: var(--control-hover-bg);
+  color: var(--ink-0);
+}
+
+.tae-transport-btn:active:not(:disabled) {
+  background: var(--control-active-bg);
+  color: var(--ink-0);
+}
+
+.tae-transport-btn.is-active,
+.tae-transport-btn[aria-pressed='true'] {
+  color: var(--ember-text);
+  background: var(--ember-soft);
+}
+
+.tae-transport-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.tae-transport-btn:focus-visible {
+  outline: 2px solid var(--ember);
+  outline-offset: -1px;
+}
+
+.tae-transport-btn--play {
+  font-weight: 600;
+  padding: 0 5px;
+  gap: 3px;
+}
+
+.tae-speed-select {
+  height: 22px;
+  padding: 0 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-1);
+  background: var(--forge-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+  outline: none;
+  transition: border-color var(--dur-micro) var(--ease-standard);
+}
+
+.tae-speed-select:hover {
+  border-color: var(--line-strong);
+  color: var(--ink-0);
+}
+
+.tae-speed-select:focus-visible {
+  outline: 2px solid var(--ember);
+  outline-offset: -1px;
+}
+
+.tae-time-display {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  letter-spacing: -0.02em;
+  user-select: text;
+}

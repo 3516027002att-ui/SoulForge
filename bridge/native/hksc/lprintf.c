@@ -89,13 +89,17 @@ static int putstr (l_PFN pfn, void *ud,
   return nchar;
 }
 
-int luaO_vprintf (l_PFN pfn, void *ud, const char *fmt, va_list ap) {
+int luaO_vprintf (l_PFN pfn, void *ud, const char *fmt, va_list incoming) {
+  va_list ap;
   char buffer [1024];  /* enough space to convert a number */
   int nchar = 0;
   struct {
     char s [128];
     int n;
   } spec;
+  /* va_list is an array on some ABIs; use a local object before taking its
+   * address for width/precision arguments and leave the caller's list alone. */
+  va_copy(ap, incoming);
   for (;;) {
     int n = 0, flags, width = 0, prec = -1;
     char code, qual = 0;
@@ -169,6 +173,7 @@ int luaO_vprintf (l_PFN pfn, void *ud, const char *fmt, va_list ap) {
     advance: fmt = s+1;
     nchar += n;
   }
+  va_end(ap);
   return nchar;
 }
 
@@ -181,5 +186,4 @@ int luaO_printf (l_PFN pfn, void *ud, const char *fmt, ...) {
   va_end(ap);
   return nchar;
 }
-
 

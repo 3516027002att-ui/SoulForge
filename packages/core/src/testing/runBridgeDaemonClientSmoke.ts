@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { BridgeDaemonClient } from '../bridge/bridgeDaemonClient.js';
 import {
@@ -32,8 +33,12 @@ function main(): Promise<void> {
 }
 
 async function mainInWorkspace(root: string): Promise<void> {
+  const hostRid = `${process.platform === 'win32' ? 'win' : process.platform === 'darwin' ? 'osx' : process.platform}-${process.arch}`;
+  const apphost = `SoulForge.Bridge${process.platform === 'win32' ? '.exe' : ''}`;
   const executable = resolve(
-    process.argv[2] ?? '../../bridge/SoulForge.Bridge/bin/Debug/net10.0/win-x64/SoulForge.Bridge.exe'
+    process.argv[2] ?? process.env.SOULFORGE_BRIDGE_EXE ?? fileURLToPath(new URL(
+      `../../../../bridge/SoulForge.Bridge/bin/Release/net10.0/${hostRid}/publish/${apphost}`, import.meta.url
+    ))
   );
   const eventDirectory = join(root, 'event');
   await mkdir(eventDirectory, { recursive: true });

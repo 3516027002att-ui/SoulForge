@@ -19,9 +19,8 @@
  * （恢复进上次打开的工作台，open-workspace 按钮不可达），这里用临时 userDataDir
  * 隔离——与 production-main 互不干扰，也不污染共享数据目录。
  */
-import { test, expect, _electron as electron } from '@playwright/test';
+import { test, expect, electron, testWorkspace } from '../owned-test.mjs';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -37,12 +36,12 @@ test.beforeEach(() => {
 });
 
 async function launchApp() {
-  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-g5-limits-ud-'));
+  const userDataDir = path.join(testWorkspace().root, 'profile');
   const app = await electron.launch({
-    args: [fixtureMain],
-    env: { ...process.env, SF_TEST_LARGE_ESD: '1' },
-    userDataDir
+    args: [fixtureMain, `--user-data-dir=${userDataDir}`],
+    env: { ...process.env, SF_TEST_LARGE_ESD: '1' }
   });
+  await testWorkspace().registerApp(app);
   const window = await app.firstWindow();
   window.on('dialog', (dialog) => {
     dialog.accept().catch(() => undefined);
@@ -82,9 +81,9 @@ test('ESD 长列表：260 个状态组全量渲染，栏可滚到最后一条，
   const { app, window } = await launchApp();
   await openWorkspace(window);
   await openEsdFile(window);
-  await expect(window.getByLabel('Behavior 工作台')).toBeVisible();
+  await expect(window.getByLabel('行为工作台')).toBeVisible();
 
-  const left = window.getByRole('region', { name: 'Files / Machines / States' });
+  const left = window.getByRole('region', { name: '文件 / 状态机 / 状态' });
   const body = left.locator('.workbench__column-body');
 
   // 1) 无截断说明。

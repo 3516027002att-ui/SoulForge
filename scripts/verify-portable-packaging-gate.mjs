@@ -108,7 +108,8 @@ try {
     report.steps.push({ name: `config:${c.name}`, ok: c.ok });
     if (!c.ok) report.ok = false;
   }
-  const sourceChecks = validatePortableBuilderResourceSources(config, dirname(builderConfigPath));
+  // The optional pack below is --win, so preflight that target on any host.
+  const sourceChecks = validatePortableBuilderResourceSources(config, dirname(builderConfigPath), { platform: 'win32' });
   for (const c of sourceChecks) {
     report.steps.push({ name: `resource-source:${c.name}`, ok: c.ok, source: c.source });
     if (!c.ok) report.ok = false;

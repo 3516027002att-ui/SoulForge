@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { app } from 'electron';
@@ -10,6 +10,8 @@ export interface WorkspaceStoragePaths {
   recoveryDir: string;
   stagingRoot: string;
   isCompanion: boolean;
+  /** Selected only; the database utility performs an asynchronous consistent backup. */
+  migrationSourceDatabasePath?: string;
 }
 
 export function localApplicationDataRoot(): string {
@@ -54,9 +56,11 @@ export function resolveWorkspaceStoragePaths(
         stagingRoot: join(root, 'staging'),
         isCompanion: false
       };
-    } catch {
-      // Fall through to the normal companion/fallback policy if the explicit
-      // test root cannot be created.
+    } catch (cause) {
+      throw Object.assign(new Error('显式工作区隔离目录无法创建，已拒绝打开常规用户数据库。', { cause }), {
+        code: 'WORKSPACE_ISOLATION_UNAVAILABLE',
+        details: { isolatedRoot: resolve(isolatedRoot), workspaceId }
+      });
     }
   }
 
@@ -81,31 +85,18 @@ export function resolveWorkspaceStoragePaths(
       writeFileSync(probeFile, 'ok', 'utf8');
       unlinkSync(probeFile);
 
-      // If companion workspace.db doesn't exist yet, migrate from fallback if present
       const companionDb = join(companionRoot, 'workspace.db');
-      const fallback = fallbackWorkspaceStoragePaths(workspaceId);
-      const fallbackDb = join(fallback.root, 'workspace.db');
-      if (!existsSync(companionDb) && existsSync(fallbackDb)) {
-        try {
-          copyFileSync(fallbackDb, companionDb);
-          if (existsSync(`${fallbackDb}-wal`)) copyFileSync(`${fallbackDb}-wal`, `${companionDb}-wal`);
-          if (existsSync(`${fallbackDb}-shm`)) copyFileSync(`${fallbackDb}-shm`, `${companionDb}-shm`);
-          const fallbackFp = join(fallback.root, 'fingerprint-store.json');
-          const companionFp = join(companionRoot, 'fingerprint-store.json');
-          if (!existsSync(companionFp) && existsSync(fallbackFp)) {
-            copyFileSync(fallbackFp, companionFp);
-          }
-        } catch {
-          // Migration copy non-fatal
-        }
-      }
+      const fallbackDb = join(fallbackWorkspaceStoragePaths(workspaceId).root, 'workspace.db');
+      const migrationSourceDatabasePath = !existsSync(companionDb) && existsSync(fallbackDb)
+        ? fallbackDb : undefined;
 
       return {
         root: companionRoot,
         backupBaseDir: join(companionRoot, 'backups'),
         recoveryDir: join(companionRoot, 'recovery'),
         stagingRoot: join(companionRoot, 'staging'),
-        isCompanion: true
+        isCompanion: true,
+        ...(migrationSourceDatabasePath ? { migrationSourceDatabasePath } : {})
       };
     } catch {
       // Permission denied or readonly -> fallback to LocalAppData

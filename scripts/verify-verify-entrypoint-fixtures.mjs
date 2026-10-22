@@ -15,7 +15,6 @@
  * 「注释声称有覆盖、实际没有」，比不写更误导，故改为如实声明缺口。
  */
 import { classifyOutcome, detectSkipSignals, OUTCOME } from './verify/runner.mjs';
-import { EXCLUDED, SILENT_ON_SUCCESS, TIER_BY_SCRIPT, TIER_ORDER } from './verify/tiers.mjs';
 import { parseScriptCommand } from './verify/classify.mjs';
 import { loadWorkspaces } from './verify/scriptGraph.mjs';
 
@@ -322,20 +321,6 @@ expect(
 );
 
 expect(
-  '每条静默豁免都必须写明理由（否则会变成绕过验证的后门）',
-  Object.entries(SILENT_ON_SUCCESS)
-    .filter(([, reason]) => typeof reason !== 'string' || reason.trim().length === 0)
-    .map(([name]) => name),
-  []
-);
-
-expect(
-  '静默豁免不得登记不存在的 script',
-  Object.keys(SILENT_ON_SUCCESS).filter((name) => !TIER_BY_SCRIPT[name]),
-  []
-);
-
-expect(
   '仅 stderr 有跳过信号时也必须判 skipped',
   classifyOutcome(0, '', JSON.stringify({ status: 'skipped' }, null, 2)).outcome,
   OUTCOME.SKIPPED
@@ -360,34 +345,22 @@ expect(
 
 expect(
   '同名 workspace 内转发（无 -w）必须识别为本 workspace',
-  parseScriptCommand('npm run test:governance-data-fixtures', ''),
-  { entries: [], forwards: [{ script: 'test:governance-data-fixtures', workspace: null }] }
+  parseScriptCommand('npm run test:new-fixture', ''),
+  { entries: [], forwards: [{ script: 'test:new-fixture', workspace: null }] }
 );
 
-/* ---- 5. 层级登记表自身的一致性 --------------------------------------- */
+/* ---- 5. 约定式发现覆盖 ----------------------------------------------- */
 
 const workspaces = loadWorkspaces(process.cwd());
 const allScripts = new Set(Object.keys(workspaces.rootScripts));
 
-const unregistered = [...allScripts]
-  .filter((name) => !TIER_BY_SCRIPT[name] && !EXCLUDED[name]);
-expect('不得存在未登记的 npm script', unregistered, []);
-
-const ghostRegistered = Object.keys(TIER_BY_SCRIPT).filter((name) => !allScripts.has(name));
-expect('层级表不得登记不存在的 script', ghostRegistered, []);
-
-const staleExclusions = Object.keys(EXCLUDED).filter((name) => !allScripts.has(name));
-expect('排除表不得残留不存在的 script', staleExclusions, []);
-
-const badTiers = Object.entries(TIER_BY_SCRIPT)
-  .filter(([, tier]) => !TIER_ORDER.includes(tier))
-  .map(([name, tier]) => `${name}=${tier}`);
-expect('层级值必须在 TIER_ORDER 内', badTiers, []);
-
-const emptyReasons = Object.entries(EXCLUDED)
-  .filter(([, reason]) => typeof reason !== 'string' || reason.trim().length === 0)
-  .map(([name]) => name);
-expect('每条排除都必须写明理由（否则排除表会变成绕过验证的后门）', emptyReasons, []);
+// Discovery and parsed execution replace the old handwritten registration
+// invariant. Keep the product outcome and skip-detection negatives above.
+const { discoverChecks, RETIRED_GOVERNANCE_SUITES } = await import('./verify/checkRegistry.mjs');
+const discovered = discoverChecks(process.cwd(),workspaces);
+expect('root test scripts are discoverable without manual tier registration',
+  [...allScripts].filter(name => name.startsWith('test') && !discovered.has(name)
+    && !RETIRED_GOVERNANCE_SUITES.has(name)), []);
 
 /* ---- 输出 ------------------------------------------------------------ */
 
@@ -398,8 +371,7 @@ console.log(JSON.stringify({
     ? '统一验证入口负向 fixture 全部通过'
     : `${failures.length} 条断言失败`,
   checks,
-  registeredScripts: Object.keys(TIER_BY_SCRIPT).length,
-  excludedScripts: Object.keys(EXCLUDED).length,
+  discoveredChecks: discovered.size,
   ...(ok ? {} : { failures })
 }, null, 2));
 process.exit(ok ? 0 : 1);

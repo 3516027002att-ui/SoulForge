@@ -1,0 +1,3851 @@
+{
+  "sourceCommit": "92f2311",
+  "methods": [
+    "setWindowThemeMode",
+    "openEditorDocument",
+    "getEditorDocument",
+    "pageEditorDocument",
+    "readEditorDocumentContent",
+    "applyEditorMutation",
+    "closeEditorDocument",
+    "lastWorkspaceSelection",
+    "openWorkspaceDialog",
+    "openBaseDialog",
+    "scanWorkspace",
+    "remountBase",
+    "detectMe3",
+    "prepareMe3Profile",
+    "launchMe3",
+    "terminateMe3",
+    "analyzeWorkspace",
+    "searchResources",
+    "openResourcePreview",
+    "saveTextResource",
+    "readRawMetadata",
+    "readRawRange",
+    "inspectContainerTree",
+    "listContainerChildren",
+    "listContainerChildrenPage",
+    "readContainerChild",
+    "replaceContainerChild",
+    "roundTripContainer",
+    "validateContainer",
+    "probeContainerCapabilities",
+    "scriptContainerEvidence",
+    "listScriptContainerEntriesPage",
+    "readScriptEntryPlaintext",
+    "readScriptSource",
+    "saveScriptSource",
+    "listOperations",
+    "rollbackOperation",
+    "rollbackFile",
+    "readEmevdDocument",
+    "applyEmevdMutation",
+    "readEmevdFullDocument",
+    "cancelEmevdFullDocument",
+    "readEmevdSourceSlice",
+    "submitEmevdDslPlan",
+    "readEmedfCompletionCatalog",
+    "readFmgDocument",
+    "readFmgPage",
+    "readTextCatalog",
+    "readFmgTablePage",
+    "applyFmgMutation",
+    "readMsbDocument",
+    "readTaeDocument",
+    "readTaeTemplateCatalog",
+    "readTaeEventParams",
+    "readTaeChrbndPreview",
+    "readTaeAnimationClip",
+    "sampleTaeAnimationPose",
+    "readMapPartMesh",
+    "readMapStaticGeometry",
+    "cancelMapStaticGeometry",
+    "readEsdDocument",
+    "readMtdDocument",
+    "readFxrDocument",
+    "listFxrEntries",
+    "readFlverDocument",
+    "readTpfDocument",
+    "readTpfTexturePreview",
+    "saveTpfTextureReplace",
+    "readFlverMesh",
+    "readFlverSkeleton",
+    "readFlverDummies",
+    "readFlverTextureSlots",
+    "resolveChrbndPreview",
+    "applyMsbMutation",
+    "executeMapTransaction",
+    "applyFlverMutation",
+    "readParamDocument",
+    "readGparamDocument",
+    "commitGparamMutations",
+    "commitMtdPropertySet",
+    "commitEsdTransition",
+    "commitTaeEvent",
+    "commitFxrFieldSet",
+    "getParamMetadataTrustState",
+    "setParamMetadataTrust",
+    "readParamPage",
+    "openParamSession",
+    "readParamIndexPage",
+    "readParamRows",
+    "listContainerParams",
+    "readContainerParamPage",
+    "readContainerParamRowIndex",
+    "applyContainerParamFieldMutation",
+    "applyContainerParamRowNameMutation",
+    "applyContainerParamRowMutations",
+    "exportParamRowsCsv",
+    "exportParamNamesCsv",
+    "importParamNamesCsv",
+    "importParamRowsCsv",
+    "applyParamMutation",
+    "applyParamFieldMutation",
+    "listAiTools",
+    "buildAiSidebarDraft",
+    "runAiTool",
+    "getMutterNext",
+    "getMutterStatus",
+    "getFeedbackStatus",
+    "submitSessionFeedback",
+    "submitAllHistory",
+    "listModelServices",
+    "getProviderUsageSummary",
+    "modelServiceEncryptionAvailable",
+    "upsertModelService",
+    "deleteModelService",
+    "embedWorkspaceRag",
+    "getRagLocalModelStatus",
+    "searchWorkspaceEvidence",
+    "listModelModels",
+    "runAiAgent",
+    "requestAiAgentPermission",
+    "getAiAgentEvents",
+    "cancelAiAgent",
+    "respondAiAgentApproval",
+    "listAiAgentSessions",
+    "loadAiAgentSession",
+    "createAgentResourceReference",
+    "createAgentCitation",
+    "createAgentAttachment",
+    "listAiMemories",
+    "saveAiMemory",
+    "deleteAiMemory",
+    "getUpdateState",
+    "setUpdateChannel",
+    "checkForUpdate",
+    "downloadUpdate",
+    "cancelUpdate",
+    "installUpdate",
+    "openUpdateRelease",
+    "onUpdateState",
+    "onAiAgentEvent"
+  ],
+  "invokes": [
+    {
+      "name": "setWindowThemeMode",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "window.setThemeMode",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "window.setThemeMode",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "openEditorDocument",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "document.open",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "document.open",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "getEditorDocument",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "document.get",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "document.get",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "pageEditorDocument",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "document.page",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "document.page",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readEditorDocumentContent",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "document.readContent",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "document.readContent",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "applyEditorMutation",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "document.apply",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "document.apply",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "closeEditorDocument",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "document.close",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "document.close",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "lastWorkspaceSelection",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "workspace.lastSelection",
+        "args": []
+      },
+      "omitted": {
+        "channel": "workspace.lastSelection",
+        "args": []
+      }
+    },
+    {
+      "name": "openWorkspaceDialog",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "workspace.openDialog",
+        "args": []
+      },
+      "omitted": {
+        "channel": "workspace.openDialog",
+        "args": []
+      }
+    },
+    {
+      "name": "openBaseDialog",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "workspace.openBaseDialog",
+        "args": []
+      },
+      "omitted": {
+        "channel": "workspace.openBaseDialog",
+        "args": []
+      }
+    },
+    {
+      "name": "scanWorkspace",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "workspace.scan",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "workspace.scan",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "remountBase",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "workspace.remountBase",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "workspace.remountBase",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "detectMe3",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "runtime.detectMe3",
+        "args": []
+      },
+      "omitted": {
+        "channel": "runtime.detectMe3",
+        "args": []
+      }
+    },
+    {
+      "name": "prepareMe3Profile",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "runtime.prepareMe3Profile",
+        "args": []
+      },
+      "omitted": {
+        "channel": "runtime.prepareMe3Profile",
+        "args": []
+      }
+    },
+    {
+      "name": "launchMe3",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "runtime.launchMe3",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "runtime.launchMe3",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "terminateMe3",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "runtime.terminateMe3",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "runtime.terminateMe3",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "analyzeWorkspace",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "workspace.analyze",
+        "args": []
+      },
+      "omitted": {
+        "channel": "workspace.analyze",
+        "args": []
+      }
+    },
+    {
+      "name": "searchResources",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.search",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.search",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "openResourcePreview",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.preview",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.preview",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "saveTextResource",
+      "parameterCount": 2,
+      "provided": {
+        "channel": "resource.saveText",
+        "args": [
+          "arg-0",
+          "arg-1"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.saveText",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readRawMetadata",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.readRawMetadata",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readRawMetadata",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readRawRange",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.readRawRange",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readRawRange",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "inspectContainerTree",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.inspectContainerTree",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.inspectContainerTree",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "listContainerChildren",
+      "parameterCount": 2,
+      "provided": {
+        "channel": "resource.listContainerChildren",
+        "args": [
+          "arg-0",
+          "arg-1"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.listContainerChildren",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "listContainerChildrenPage",
+      "parameterCount": 4,
+      "provided": {
+        "channel": "resource.listContainerChildrenPage",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2",
+          "arg-3"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.listContainerChildrenPage",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readContainerChild",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.readContainerChild",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readContainerChild",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "replaceContainerChild",
+      "parameterCount": 4,
+      "provided": {
+        "channel": "resource.replaceContainerChild",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2",
+          "arg-3"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.replaceContainerChild",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "roundTripContainer",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.roundTripContainer",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.roundTripContainer",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "validateContainer",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.validateContainer",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.validateContainer",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "probeContainerCapabilities",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.probeContainerCapabilities",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.probeContainerCapabilities",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "scriptContainerEvidence",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.scriptContainerEvidence",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.scriptContainerEvidence",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "listScriptContainerEntriesPage",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.listScriptContainerEntriesPage",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.listScriptContainerEntriesPage",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readScriptEntryPlaintext",
+      "parameterCount": 2,
+      "provided": {
+        "channel": "resource.readScriptEntryPlaintext",
+        "args": [
+          "arg-0",
+          "arg-1"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readScriptEntryPlaintext",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readScriptSource",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.readScriptSource",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readScriptSource",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "saveScriptSource",
+      "parameterCount": 7,
+      "provided": {
+        "channel": "resource.saveScriptSource",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2",
+          "arg-3",
+          "arg-4",
+          "arg-5",
+          "arg-6"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.saveScriptSource",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "listOperations",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "operation.list",
+        "args": []
+      },
+      "omitted": {
+        "channel": "operation.list",
+        "args": []
+      }
+    },
+    {
+      "name": "rollbackOperation",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "operation.rollback",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "operation.rollback",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "rollbackFile",
+      "parameterCount": 2,
+      "provided": {
+        "channel": "operation.rollbackFile",
+        "args": [
+          "arg-0",
+          "arg-1"
+        ]
+      },
+      "omitted": {
+        "channel": "operation.rollbackFile",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readEmevdDocument",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.readEmevdDocument",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readEmevdDocument",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "applyEmevdMutation",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.applyEmevdMutation",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.applyEmevdMutation",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readEmevdFullDocument",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.readEmevdFullDocument",
+        "args": [
+          "arg-0",
+          "arg-1",
+          {
+            "$undefined": true
+          }
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readEmevdFullDocument",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "cancelEmevdFullDocument",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "resource.cancelEmevdFullDocument",
+        "args": []
+      },
+      "omitted": {
+        "channel": "resource.cancelEmevdFullDocument",
+        "args": []
+      }
+    },
+    {
+      "name": "readEmevdSourceSlice",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.readEmevdSourceSlice",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readEmevdSourceSlice",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "submitEmevdDslPlan",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.submitEmevdDslPlan",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.submitEmevdDslPlan",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          "patch"
+        ]
+      }
+    },
+    {
+      "name": "readEmedfCompletionCatalog",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "resource.readEmedfCompletionCatalog",
+        "args": []
+      },
+      "omitted": {
+        "channel": "resource.readEmedfCompletionCatalog",
+        "args": []
+      }
+    },
+    {
+      "name": "readFmgDocument",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.readFmgDocument",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readFmgDocument",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readFmgPage",
+      "parameterCount": 4,
+      "provided": {
+        "channel": "resource.readFmgPage",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2",
+          "arg-3"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readFmgPage",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readTextCatalog",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "resource.readTextCatalog",
+        "args": []
+      },
+      "omitted": {
+        "channel": "resource.readTextCatalog",
+        "args": []
+      }
+    },
+    {
+      "name": "readFmgTablePage",
+      "parameterCount": 4,
+      "provided": {
+        "channel": "resource.readFmgTablePage",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2",
+          "arg-3"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readFmgTablePage",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "applyFmgMutation",
+      "parameterCount": 4,
+      "provided": {
+        "channel": "resource.applyFmgMutation",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2",
+          "arg-3"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.applyFmgMutation",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readMsbDocument",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.readMsbDocument",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readMsbDocument",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readTaeDocument",
+      "parameterCount": 2,
+      "provided": {
+        "channel": "resource.readTaeDocument",
+        "args": [
+          "arg-0",
+          "arg-1"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readTaeDocument",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readTaeTemplateCatalog",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "resource.readTaeTemplateCatalog",
+        "args": []
+      },
+      "omitted": {
+        "channel": "resource.readTaeTemplateCatalog",
+        "args": []
+      }
+    },
+    {
+      "name": "readTaeEventParams",
+      "parameterCount": 7,
+      "provided": {
+        "channel": "resource.readTaeEventParams",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2",
+          "arg-3",
+          "arg-4",
+          "arg-5",
+          "arg-6"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readTaeEventParams",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readTaeChrbndPreview",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.readTaeChrbndPreview",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readTaeChrbndPreview",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readTaeAnimationClip",
+      "parameterCount": 9,
+      "provided": {
+        "channel": "resource.readTaeAnimationClip",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2",
+          "arg-3",
+          "arg-4",
+          "arg-5",
+          "arg-6",
+          "arg-7",
+          "arg-8"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readTaeAnimationClip",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "sampleTaeAnimationPose",
+      "parameterCount": 11,
+      "provided": {
+        "channel": "resource.sampleTaeAnimationPose",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2",
+          "arg-3",
+          "arg-4",
+          "arg-5",
+          "arg-6",
+          "arg-7",
+          "arg-8",
+          "arg-9",
+          "arg-10"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.sampleTaeAnimationPose",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readMapPartMesh",
+      "parameterCount": 2,
+      "provided": {
+        "channel": "resource.readMapPartMesh",
+        "args": [
+          "arg-0",
+          "arg-1"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readMapPartMesh",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readMapStaticGeometry",
+      "parameterCount": 5,
+      "provided": {
+        "channel": "resource.readMapStaticGeometry",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2",
+          "arg-3",
+          "arg-4"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readMapStaticGeometry",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    {
+      "name": "cancelMapStaticGeometry",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.cancelMapStaticGeometry",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.cancelMapStaticGeometry",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readEsdDocument",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.readEsdDocument",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readEsdDocument",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readMtdDocument",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.readMtdDocument",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readMtdDocument",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readFxrDocument",
+      "parameterCount": 2,
+      "provided": {
+        "channel": "resource.readFxrDocument",
+        "args": [
+          "arg-0",
+          "arg-1"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readFxrDocument",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "listFxrEntries",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.listFxrEntries",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.listFxrEntries",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readFlverDocument",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.readFlverDocument",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readFlverDocument",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readTpfDocument",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.readTpfDocument",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readTpfDocument",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readTpfTexturePreview",
+      "parameterCount": 2,
+      "provided": {
+        "channel": "resource.readTpfTexturePreview",
+        "args": [
+          "arg-0",
+          "arg-1"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readTpfTexturePreview",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "saveTpfTextureReplace",
+      "parameterCount": 4,
+      "provided": {
+        "channel": "resource.saveTpfTextureReplace",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2",
+          "arg-3"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.saveTpfTextureReplace",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readFlverMesh",
+      "parameterCount": 2,
+      "provided": {
+        "channel": "resource.readFlverMesh",
+        "args": [
+          "arg-0",
+          "arg-1"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readFlverMesh",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readFlverSkeleton",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.readFlverSkeleton",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readFlverSkeleton",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readFlverDummies",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.readFlverDummies",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readFlverDummies",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readFlverTextureSlots",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.readFlverTextureSlots",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readFlverTextureSlots",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "resolveChrbndPreview",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.resolveChrbndPreview",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.resolveChrbndPreview",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "applyMsbMutation",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.applyMsbMutation",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.applyMsbMutation",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "executeMapTransaction",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.executeMapTransaction",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.executeMapTransaction",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "applyFlverMutation",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.applyFlverMutation",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.applyFlverMutation",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readParamDocument",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.readParamDocument",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readParamDocument",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readGparamDocument",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.readGparamDocument",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readGparamDocument",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "commitGparamMutations",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.commitGparamMutations",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.commitGparamMutations",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "commitMtdPropertySet",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.commitMtdPropertySet",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.commitMtdPropertySet",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "commitEsdTransition",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.commitEsdTransition",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.commitEsdTransition",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "commitTaeEvent",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.commitTaeEvent",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.commitTaeEvent",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "commitFxrFieldSet",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.commitFxrFieldSet",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.commitFxrFieldSet",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "getParamMetadataTrustState",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "param.metadata.trustState",
+        "args": []
+      },
+      "omitted": {
+        "channel": "param.metadata.trustState",
+        "args": []
+      }
+    },
+    {
+      "name": "setParamMetadataTrust",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "param.metadata.setTrust",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "param.metadata.setTrust",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readParamPage",
+      "parameterCount": 5,
+      "provided": {
+        "channel": "resource.readParamPage",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2",
+          "arg-3",
+          "arg-4"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readParamPage",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "openParamSession",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.openParamSession",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.openParamSession",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readParamIndexPage",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.readParamIndexPage",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readParamIndexPage",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readParamRows",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.readParamRows",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readParamRows",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "listContainerParams",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "resource.listContainerParams",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.listContainerParams",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readContainerParamPage",
+      "parameterCount": 7,
+      "provided": {
+        "channel": "resource.readContainerParamPage",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2",
+          "arg-3",
+          "arg-4",
+          "arg-5",
+          "arg-6"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readContainerParamPage",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "readContainerParamRowIndex",
+      "parameterCount": 2,
+      "provided": {
+        "channel": "resource.readContainerParamRowIndex",
+        "args": [
+          "arg-0",
+          "arg-1"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.readContainerParamRowIndex",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "applyContainerParamFieldMutation",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.applyContainerParamFieldMutation",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.applyContainerParamFieldMutation",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "applyContainerParamRowNameMutation",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.applyContainerParamRowNameMutation",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.applyContainerParamRowNameMutation",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "applyContainerParamRowMutations",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.applyContainerParamRowMutations",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.applyContainerParamRowMutations",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "exportParamRowsCsv",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "param.exportRowsCsv",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "param.exportRowsCsv",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "exportParamNamesCsv",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "param.exportNamesCsv",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "param.exportNamesCsv",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "importParamNamesCsv",
+      "parameterCount": 4,
+      "provided": {
+        "channel": "param.importNamesCsv",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2",
+          "arg-3"
+        ]
+      },
+      "omitted": {
+        "channel": "param.importNamesCsv",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "importParamRowsCsv",
+      "parameterCount": 4,
+      "provided": {
+        "channel": "param.importRowsCsv",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2",
+          "arg-3"
+        ]
+      },
+      "omitted": {
+        "channel": "param.importRowsCsv",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "applyParamMutation",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.applyParamMutation",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.applyParamMutation",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "applyParamFieldMutation",
+      "parameterCount": 3,
+      "provided": {
+        "channel": "resource.applyParamFieldMutation",
+        "args": [
+          "arg-0",
+          "arg-1",
+          "arg-2"
+        ]
+      },
+      "omitted": {
+        "channel": "resource.applyParamFieldMutation",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "listAiTools",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "ai.tools",
+        "args": []
+      },
+      "omitted": {
+        "channel": "ai.tools",
+        "args": []
+      }
+    },
+    {
+      "name": "buildAiSidebarDraft",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "ai.sidebarDraft",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "ai.sidebarDraft",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "runAiTool",
+      "parameterCount": 2,
+      "provided": {
+        "channel": "ai.runTool",
+        "args": [
+          "arg-0",
+          "arg-1"
+        ]
+      },
+      "omitted": {
+        "channel": "ai.runTool",
+        "args": [
+          {
+            "$undefined": true
+          },
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "getMutterNext",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "mutter.next",
+        "args": []
+      },
+      "omitted": {
+        "channel": "mutter.next",
+        "args": []
+      }
+    },
+    {
+      "name": "getMutterStatus",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "mutter.status",
+        "args": []
+      },
+      "omitted": {
+        "channel": "mutter.status",
+        "args": []
+      }
+    },
+    {
+      "name": "getFeedbackStatus",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "feedback.status",
+        "args": []
+      },
+      "omitted": {
+        "channel": "feedback.status",
+        "args": []
+      }
+    },
+    {
+      "name": "submitSessionFeedback",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "feedback.submitSession",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "feedback.submitSession",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "submitAllHistory",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "feedback.submitAllHistory",
+        "args": []
+      },
+      "omitted": {
+        "channel": "feedback.submitAllHistory",
+        "args": []
+      }
+    },
+    {
+      "name": "listModelServices",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "modelService.list",
+        "args": []
+      },
+      "omitted": {
+        "channel": "modelService.list",
+        "args": []
+      }
+    },
+    {
+      "name": "getProviderUsageSummary",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "modelService.usageSummary",
+        "args": []
+      },
+      "omitted": {
+        "channel": "modelService.usageSummary",
+        "args": []
+      }
+    },
+    {
+      "name": "modelServiceEncryptionAvailable",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "modelService.encryptionAvailable",
+        "args": []
+      },
+      "omitted": {
+        "channel": "modelService.encryptionAvailable",
+        "args": []
+      }
+    },
+    {
+      "name": "upsertModelService",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "modelService.upsert",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "modelService.upsert",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "deleteModelService",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "modelService.delete",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "modelService.delete",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "embedWorkspaceRag",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "rag.embed",
+        "args": []
+      },
+      "omitted": {
+        "channel": "rag.embed",
+        "args": []
+      }
+    },
+    {
+      "name": "getRagLocalModelStatus",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "rag.localModelStatus",
+        "args": []
+      },
+      "omitted": {
+        "channel": "rag.localModelStatus",
+        "args": []
+      }
+    },
+    {
+      "name": "searchWorkspaceEvidence",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "rag.searchEvidence",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "rag.searchEvidence",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "listModelModels",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "modelService.listModels",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "modelService.listModels",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "runAiAgent",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "ai.agent.run",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "ai.agent.run",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "requestAiAgentPermission",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "ai.agent.permission.request",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "ai.agent.permission.request",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "getAiAgentEvents",
+      "parameterCount": 2,
+      "provided": {
+        "channel": "ai.agent.events",
+        "args": [
+          "arg-0",
+          "arg-1"
+        ]
+      },
+      "omitted": {
+        "channel": "ai.agent.events",
+        "args": [
+          {
+            "$undefined": true
+          },
+          0
+        ]
+      }
+    },
+    {
+      "name": "cancelAiAgent",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "ai.agent.cancel",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "ai.agent.cancel",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "respondAiAgentApproval",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "ai.agent.approval.respond",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "ai.agent.approval.respond",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "listAiAgentSessions",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "ai.agent.sessions",
+        "args": []
+      },
+      "omitted": {
+        "channel": "ai.agent.sessions",
+        "args": []
+      }
+    },
+    {
+      "name": "loadAiAgentSession",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "ai.agent.session.load",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "ai.agent.session.load",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "createAgentResourceReference",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "agent.resourceReference.create",
+        "args": [
+          {
+            "selection": "arg-0"
+          }
+        ]
+      },
+      "omitted": {
+        "channel": "agent.resourceReference.create",
+        "args": [
+          {
+            "selection": {
+              "$undefined": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "createAgentCitation",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "agent.citation.create",
+        "args": [
+          {
+            "hits": "arg-0"
+          }
+        ]
+      },
+      "omitted": {
+        "channel": "agent.citation.create",
+        "args": [
+          {
+            "hits": {
+              "$undefined": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "createAgentAttachment",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "agent.attachment.create",
+        "args": []
+      },
+      "omitted": {
+        "channel": "agent.attachment.create",
+        "args": []
+      }
+    },
+    {
+      "name": "listAiMemories",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "ai.memory.list",
+        "args": []
+      },
+      "omitted": {
+        "channel": "ai.memory.list",
+        "args": []
+      }
+    },
+    {
+      "name": "saveAiMemory",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "ai.memory.save",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "ai.memory.save",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "deleteAiMemory",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "ai.memory.delete",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "ai.memory.delete",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "getUpdateState",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "update.state",
+        "args": []
+      },
+      "omitted": {
+        "channel": "update.state",
+        "args": []
+      }
+    },
+    {
+      "name": "setUpdateChannel",
+      "parameterCount": 1,
+      "provided": {
+        "channel": "update.setChannel",
+        "args": [
+          "arg-0"
+        ]
+      },
+      "omitted": {
+        "channel": "update.setChannel",
+        "args": [
+          {
+            "$undefined": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "checkForUpdate",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "update.check",
+        "args": []
+      },
+      "omitted": {
+        "channel": "update.check",
+        "args": []
+      }
+    },
+    {
+      "name": "downloadUpdate",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "update.download",
+        "args": []
+      },
+      "omitted": {
+        "channel": "update.download",
+        "args": []
+      }
+    },
+    {
+      "name": "cancelUpdate",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "update.cancel",
+        "args": []
+      },
+      "omitted": {
+        "channel": "update.cancel",
+        "args": []
+      }
+    },
+    {
+      "name": "installUpdate",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "update.install",
+        "args": []
+      },
+      "omitted": {
+        "channel": "update.install",
+        "args": []
+      }
+    },
+    {
+      "name": "openUpdateRelease",
+      "parameterCount": 0,
+      "provided": {
+        "channel": "update.openRelease",
+        "args": []
+      },
+      "omitted": {
+        "channel": "update.openRelease",
+        "args": []
+      }
+    }
+  ],
+  "transforms": [
+    "inspectContainerTree",
+    "listContainerChildrenPage",
+    "scriptContainerEvidence",
+    "listScriptContainerEntriesPage"
+  ],
+  "signatures": {
+    "setWindowThemeMode": {
+      "parameters": [
+        "mode: NativeWindowThemeMode"
+      ],
+      "result": "Promise<NativeWindowThemeResult>"
+    },
+    "openEditorDocument": {
+      "parameters": [
+        "request: OpenEditorDocumentRequest"
+      ],
+      "result": "Promise<EditorDocumentResult<OpenEditorDocumentValue>>"
+    },
+    "getEditorDocument": {
+      "parameters": [
+        "documentHandle: string"
+      ],
+      "result": "Promise<EditorDocumentResult<OpenEditorDocumentValue>>"
+    },
+    "pageEditorDocument": {
+      "parameters": [
+        "request: PageEditorDocumentRequest"
+      ],
+      "result": "Promise<EditorDocumentResult<EditorDocumentPageValue>>"
+    },
+    "readEditorDocumentContent": {
+      "parameters": [
+        "request: ReadEditorContentRequest"
+      ],
+      "result": "Promise<EditorDocumentResult<EditorContentValue>>"
+    },
+    "applyEditorMutation": {
+      "parameters": [
+        "request: ApplyEditorMutationRequest"
+      ],
+      "result": "Promise<EditorDocumentResult<ApplyEditorMutationValue>>"
+    },
+    "closeEditorDocument": {
+      "parameters": [
+        "documentHandle: string"
+      ],
+      "result": "Promise<EditorDocumentResult<{\n    closed: true;\n}>>"
+    },
+    "lastWorkspaceSelection": {
+      "parameters": [],
+      "result": "Promise<{\n    overlay: DirectorySelection | null;\n    base: DirectorySelection | null;\n}>"
+    },
+    "openWorkspaceDialog": {
+      "parameters": [],
+      "result": "Promise<DirectorySelection | null>"
+    },
+    "openBaseDialog": {
+      "parameters": [],
+      "result": "Promise<DirectorySelection | null>"
+    },
+    "scanWorkspace": {
+      "parameters": [
+        "options: OpenWorkspaceScanOptions"
+      ],
+      "result": "Promise<RendererWorkspaceScanResult>"
+    },
+    "remountBase": {
+      "parameters": [
+        "baseSelectionId: string | null"
+      ],
+      "result": "Promise<{\n    workspaceSessionId: string;\n    session: RendererWorkspaceSession;\n}>"
+    },
+    "detectMe3": {
+      "parameters": [],
+      "result": "Promise<import('@soulforge/core').RuntimeCapability>"
+    },
+    "prepareMe3Profile": {
+      "parameters": [],
+      "result": "Promise<import('@soulforge/core').RuntimeOperationResult<import('@soulforge/core').RuntimeProfileRef>>"
+    },
+    "launchMe3": {
+      "parameters": [
+        "profileId: string"
+      ],
+      "result": "Promise<import('@soulforge/core').RuntimeOperationResult<import('@soulforge/core').RuntimeLaunchSession>>"
+    },
+    "terminateMe3": {
+      "parameters": [
+        "sessionId: string"
+      ],
+      "result": "Promise<import('@soulforge/core').RuntimeOperationResult<import('@soulforge/core').RuntimeTerminationResult>>"
+    },
+    "analyzeWorkspace": {
+      "parameters": [],
+      "result": "Promise<AnalyzeWorkspaceSummary>"
+    },
+    "searchResources": {
+      "parameters": [
+        "query: string"
+      ],
+      "result": "Promise<RendererIndexedFile[]>"
+    },
+    "openResourcePreview": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<RendererResourcePreview | null>"
+    },
+    "saveTextResource": {
+      "parameters": [
+        "sourceUri: string",
+        "newText: string"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "readRawMetadata": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readRawRange": {
+      "parameters": [
+        "sourceUri: string",
+        "offset: number",
+        "length: number"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "inspectContainerTree": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<RendererContainerTreeSummary>"
+    },
+    "listContainerChildren": {
+      "parameters": [
+        "sourceUri: string",
+        "recursive?: boolean"
+      ],
+      "result": "Promise<RendererContainerChildrenList>"
+    },
+    "listContainerChildrenPage": {
+      "parameters": [
+        "sourceUri: string",
+        "page: number",
+        "pageSize: number",
+        "recursive?: boolean"
+      ],
+      "result": "Promise<RendererContainerChildrenPage>"
+    },
+    "readContainerChild": {
+      "parameters": [
+        "childUri: string"
+      ],
+      "result": "Promise<RendererContainerChildBytes>"
+    },
+    "replaceContainerChild": {
+      "parameters": [
+        "childUri: string",
+        "expectedContainerHash: string",
+        "expectedChildHash: string",
+        "newContentBase64: string"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "roundTripContainer": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "validateContainer": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "probeContainerCapabilities": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<ResourceCapabilityMatrix | null>"
+    },
+    "scriptContainerEvidence": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<ScriptContainerEvidence>"
+    },
+    "listScriptContainerEntriesPage": {
+      "parameters": [
+        "sourceUri: string",
+        "page: number",
+        "pageSize: number"
+      ],
+      "result": "Promise<ScriptContainerEntryPage>"
+    },
+    "readScriptEntryPlaintext": {
+      "parameters": [
+        "sourceUri: string",
+        "entryName: string"
+      ],
+      "result": "Promise<ScriptEntryPlaintextView>"
+    },
+    "readScriptSource": {
+      "parameters": [
+        "sourceUri: string",
+        "entryName?: string",
+        "entryIndex?: number"
+      ],
+      "result": "Promise<import('@soulforge/shared').ScriptSourceView>"
+    },
+    "saveScriptSource": {
+      "parameters": [
+        "sourceUri: string",
+        "entryName: string | undefined",
+        "expectedChildHash: string | undefined",
+        "expectedContainerHash: string | undefined",
+        "sourceText: string",
+        "encoding?: string",
+        "entryIndex?: number"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "listOperations": {
+      "parameters": [],
+      "result": "Promise<RendererPatchHistoryEntry[]>"
+    },
+    "rollbackOperation": {
+      "parameters": [
+        "opId: string"
+      ],
+      "result": "Promise<RollbackOperationIpcResult>"
+    },
+    "rollbackFile": {
+      "parameters": [
+        "opId: string",
+        "targetUri: string"
+      ],
+      "result": "Promise<RollbackOperationIpcResult>"
+    },
+    "readEmevdDocument": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "applyEmevdMutation": {
+      "parameters": [
+        "sourceUri: string",
+        "expectedHash: string",
+        "mutation: Record<string, unknown>"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "readEmevdFullDocument": {
+      "parameters": [
+        "sourceUri: string",
+        "documentInstanceId: string",
+        "loadFullDslTemplate?: boolean"
+      ],
+      "result": "Promise<{\n    ok?: boolean;\n    cancelled?: boolean;\n    documentInstanceId?: string;\n    revision?: number;\n    eventCount?: number;\n    instructionCount?: number;\n    dslTemplate?: string | null;\n    sourcePrefix?: string | null;\n    sourceToken?: string | null;\n    sourceTotalLines?: number;\n    sourceStyle?: 'dark-script' | 'patch-dsl' | 'none';\n    dslTemplateTruncated?: boolean;\n    dslTemplateTotalLines?: number;\n    sourceHash?: string | null;\n    sourceFormat?: string | null;\n    outerFileHash?: string | null;\n    registryOrigin?: 'first-party' | 'imported' | 'fixture';\n    registryPackageId?: string | null;\n    registryPackageVersion?: string | null;\n    registryContentDigest?: string | null;\n    authority?: string | null;\n    outline?: {\n        schemaVersion: 1;\n        resourceUri: string;\n        eventCount: number;\n        instructionTotal: number;\n        truncated: boolean;\n        limit: number;\n        events: Array<{\n            eventUri: string;\n            eventId: number;\n            restBehavior: number;\n            layer: number;\n            instructionCount: number;\n            unknownCount: number;\n        }>;\n    } | null;\n    diagnostics?: Array<{\n        severity: string;\n        code: string;\n        message: string;\n    }>;\n}>"
+    },
+    "cancelEmevdFullDocument": {
+      "parameters": [],
+      "result": "Promise<{\n    ok: boolean;\n    cancelled: boolean;\n}>"
+    },
+    "readEmevdSourceSlice": {
+      "parameters": [
+        "token: string",
+        "fromLine: number",
+        "lineCount: number"
+      ],
+      "result": "Promise<{\n    ok?: boolean;\n    cancelled?: boolean;\n    code?: string;\n    message?: string;\n    fromLine?: number;\n    lineCount?: number;\n    totalLines?: number;\n    eof?: boolean;\n    sliceText?: string;\n}>"
+    },
+    "submitEmevdDslPlan": {
+      "parameters": [
+        "sourceUri: string",
+        "sourceText: string",
+        "mode: 'patch' | 'dark-script' = 'patch'"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "readEmedfCompletionCatalog": {
+      "parameters": [],
+      "result": "Promise<{\n    ok: boolean;\n    origin: 'first-party' | 'imported' | 'fixture';\n    items: EmedfCompletionItem[];\n    enums?: Record<string, import('@soulforge/core').EmedfEnumDef>;\n}>"
+    },
+    "readFmgDocument": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readFmgPage": {
+      "parameters": [
+        "sourceUri: string",
+        "page: number",
+        "pageSize: number",
+        "query?: string"
+      ],
+      "result": "Promise<FmgEntryPage>"
+    },
+    "readTextCatalog": {
+      "parameters": [],
+      "result": "Promise<TextCatalogResponse>"
+    },
+    "readFmgTablePage": {
+      "parameters": [
+        "tableId: string",
+        "page: number",
+        "pageSize: number",
+        "query?: string"
+      ],
+      "result": "Promise<FmgEntryPage>"
+    },
+    "applyFmgMutation": {
+      "parameters": [
+        "sourceUri: string",
+        "expectedHash: string",
+        "mutation: {\n    kind: 'upsert' | 'delete' | 'add';\n    id: number;\n    text?: string;\n}",
+        "tableId?: string"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "readMsbDocument": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readTaeDocument": {
+      "parameters": [
+        "sourceUri: string",
+        "options?: {\n    animationPage?: number;\n    animationPageSize?: number;\n}"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readTaeTemplateCatalog": {
+      "parameters": [],
+      "result": "Promise<unknown>"
+    },
+    "readTaeEventParams": {
+      "parameters": [
+        "sourceUri: string",
+        "animId: number",
+        "eventIndex: number",
+        "taeEntryIndex?: number",
+        "taeEntryId?: number",
+        "taeEntryName?: string",
+        "taeGroup?: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readTaeChrbndPreview": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readTaeAnimationClip": {
+      "parameters": [
+        "sourceUri: string",
+        "animId: number",
+        "flverBoneNames?: string[]",
+        "flverBoneParents?: number[]",
+        "flverReferencePose?: Array<{\n    translation: [\n        number,\n        number,\n        number\n    ];\n    rotation: [\n        number,\n        number,\n        number,\n        number\n    ];\n    scale: [\n        number,\n        number,\n        number\n    ];\n}>",
+        "taeEntryIndex?: number",
+        "taeEntryId?: number",
+        "taeEntryName?: string",
+        "taeGroup?: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "sampleTaeAnimationPose": {
+      "parameters": [
+        "sourceUri: string",
+        "animId: number",
+        "timeSeconds: number",
+        "flverBoneNames?: string[]",
+        "loop?: boolean",
+        "flverBoneParents?: number[]",
+        "flverReferencePose?: Array<{\n    translation: [\n        number,\n        number,\n        number\n    ];\n    rotation: [\n        number,\n        number,\n        number,\n        number\n    ];\n    scale: [\n        number,\n        number,\n        number\n    ];\n}>",
+        "taeEntryIndex?: number",
+        "taeEntryId?: number",
+        "taeEntryName?: string",
+        "taeGroup?: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readMapPartMesh": {
+      "parameters": [
+        "msbSourceUri: string",
+        "modelName: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readMapStaticGeometry": {
+      "parameters": [
+        "msbSourceUri: string",
+        "modelName: string",
+        "cursor?: string | null",
+        "sessionToken?: string | null",
+        "requestId?: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "cancelMapStaticGeometry": {
+      "parameters": [
+        "requestId: string"
+      ],
+      "result": "Promise<MapReadCancellationResult>"
+    },
+    "readEsdDocument": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readMtdDocument": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readFxrDocument": {
+      "parameters": [
+        "sourceUri: string",
+        "entryName?: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "listFxrEntries": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readFlverDocument": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readTpfDocument": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readTpfTexturePreview": {
+      "parameters": [
+        "sourceUri: string",
+        "textureIndex: number"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "saveTpfTextureReplace": {
+      "parameters": [
+        "sourceUri: string",
+        "expectedHash: string",
+        "textureIndex: number",
+        "newTextureBase64: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readFlverMesh": {
+      "parameters": [
+        "sourceUri: string",
+        "meshIndex: number"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readFlverSkeleton": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readFlverDummies": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readFlverTextureSlots": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "resolveChrbndPreview": {
+      "parameters": [
+        "animSourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "applyMsbMutation": {
+      "parameters": [
+        "sourceUri: string",
+        "expectedHash: string",
+        "mutation: {\n    kind: 'set_part_position' | 'set_part_transform' | 'set_region_position' | 'delete_part' | 'delete_region' | 'delete_event';\n    family: 'part' | 'region' | 'event';\n    nativeOffset: number;\n    expectedName?: string;\n    posX?: number;\n    posY?: number;\n    posZ?: number;\n    rotX?: number;\n    scaleX?: number;\n    scaleY?: number;\n    scaleZ?: number;\n}"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "executeMapTransaction": {
+      "parameters": [
+        "sourceUri: string",
+        "expectedHash: string",
+        "transaction: MapEditTransaction"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "applyFlverMutation": {
+      "parameters": [
+        "sourceUri: string",
+        "expectedHash: string",
+        "mutation: {\n    kind: 'material-slot-set';\n    meshStableId: string;\n    slotIndex: number;\n    materialStableId: string;\n}"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "readParamDocument": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "readGparamDocument": {
+      "parameters": [
+        "sourceUri: string"
+      ],
+      "result": "Promise<unknown>"
+    },
+    "commitGparamMutations": {
+      "parameters": [
+        "sourceUri: string",
+        "expectedDocumentHash: string",
+        "mutations: Array<{\n    groupId: number;\n    paramId: number;\n    valueIndex: number;\n    value: number;\n}>"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "commitMtdPropertySet": {
+      "parameters": [
+        "sourceUri: string",
+        "expectedDocumentHash: string",
+        "set: {\n    paramId: string;\n    newValue: string;\n}"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "commitEsdTransition": {
+      "parameters": [
+        "sourceUri: string",
+        "expectedDocumentHash: string",
+        "mutations: Array<{\n    mutation: string;\n    stateRelOffset?: number;\n    conditionRelOffset?: number;\n    targetStateRelOffset?: number;\n}>"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "commitTaeEvent": {
+      "parameters": [
+        "sourceUri: string",
+        "expectedDocumentHash: string",
+        "mutations: Array<{\n    mutation: string;\n    animId?: number;\n    eventIndex?: number;\n    templateEventIndex?: number;\n    eventTypeId?: number;\n    startTime?: number;\n    endTime?: number;\n    fieldIndex?: number;\n    fieldName?: string;\n    value?: string | number | boolean;\n    schemaBankId?: number;\n    taeEntryIndex?: number;\n}>"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "commitFxrFieldSet": {
+      "parameters": [
+        "sourceUri: string",
+        "expectedDocumentHash: string",
+        "mutations: Array<{\n    mutation: string;\n    address: {\n        container: string;\n        hostIndex: number;\n        propertyIndex?: number;\n        section8Index?: number;\n        valueIndex: number;\n    };\n    value: number;\n}>"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "getParamMetadataTrustState": {
+      "parameters": [],
+      "result": "Promise<{\n    ok: boolean;\n    trusted: boolean;\n    packageId: string | null;\n    packageVersion: string | null;\n    sourceIdentity?: string | null;\n    sourceRevision?: string | null;\n    licenseSpdxExpression?: string | null;\n    confirmedAt?: string;\n    diagnostics: Diagnostic[];\n}>"
+    },
+    "setParamMetadataTrust": {
+      "parameters": [
+        "trusted: boolean"
+      ],
+      "result": "Promise<{\n    ok: boolean;\n    trusted?: boolean;\n    diagnostics: Diagnostic[];\n}>"
+    },
+    "readParamPage": {
+      "parameters": [
+        "sourceUri: string",
+        "page: number",
+        "pageSize: number",
+        "query?: string",
+        "loadAll?: boolean"
+      ],
+      "result": "Promise<ParamRowPage>"
+    },
+    "openParamSession": {
+      "parameters": [
+        "request: OpenParamSessionRequest"
+      ],
+      "result": "Promise<OpenParamSessionResult>"
+    },
+    "readParamIndexPage": {
+      "parameters": [
+        "request: ReadParamIndexPageRequest"
+      ],
+      "result": "Promise<ParamIndexPageResult>"
+    },
+    "readParamRows": {
+      "parameters": [
+        "request: ReadParamRowsRequest"
+      ],
+      "result": "Promise<ParamRowPayloadBatchResult>"
+    },
+    "listContainerParams": {
+      "parameters": [
+        "containerUri: string"
+      ],
+      "result": "Promise<{\n    ok: boolean;\n    containerUri: string;\n    containerFormat?: string | null;\n    params: Array<{\n        entryIndex: number;\n        name: string;\n        size: number;\n    }>;\n    diagnostics: Diagnostic[];\n}>"
+    },
+    "readContainerParamPage": {
+      "parameters": [
+        "containerUri: string",
+        "entryIndex: number",
+        "page: number",
+        "pageSize: number",
+        "query?: string",
+        "loadAll?: boolean",
+        "documentSessionToken?: string"
+      ],
+      "result": "Promise<ParamRowPage & {\n    containerUri: string;\n    entryIndex: number;\n    paramName?: string;\n    typeName: string | null;\n    sessionToken?: string;\n    containerHash?: string;\n    childHash?: string;\n    fieldDefs?: ParamFieldDef[] | null;\n    fieldEnums?: Array<{\n        id: string;\n        name?: string;\n        values: Array<{\n            value: number;\n            label: string;\n        }>;\n    }> | null;\n    fieldDefsDiagnostic?: {\n        code: string;\n        message: string;\n    } | null;\n    fieldDefsOrigin?: 'first-party' | 'fixture' | 'imported' | 'user-derived' | null;\n    fieldDefsTrusted?: boolean;\n}>"
+    },
+    "readContainerParamRowIndex": {
+      "parameters": [
+        "containerUri: string",
+        "entryIndex: number"
+      ],
+      "result": "Promise<{\n    ok: boolean;\n    paramName: string | null;\n    typeName: string | null;\n    rowDataSize: number;\n    rowCount: number;\n    rows: Array<{\n        rowIndex: number;\n        id: number;\n        name?: string;\n        dataHash: string;\n    }>;\n    rowsTruncated: boolean;\n    containerHash: string;\n    childHash: string;\n    sessionToken?: string;\n    authority?: string;\n    diagnostics?: Array<{\n        severity: string;\n        code: string;\n        message: string;\n    }>;\n}>"
+    },
+    "applyContainerParamFieldMutation": {
+      "parameters": [
+        "containerUri: string",
+        "expectedContainerHash: string",
+        "mutation: {\n    entryIndex: number;\n    expectedChildHash: string;\n    rowIndex: number;\n    rowId: number;\n    expectedDataHash: string;\n    expectedRowDataSize?: number;\n    fieldId: string;\n    value: number | string | boolean;\n    rowDataBase64: string;\n    definition: unknown;\n}"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "applyContainerParamRowNameMutation": {
+      "parameters": [
+        "containerUri: string",
+        "expectedContainerHash: string",
+        "mutation: {\n    entryIndex: number;\n    expectedChildHash: string;\n    rowIndex: number;\n    rowId: number;\n    expectedDataHash: string;\n    expectedRowDataSize?: number;\n    name: string;\n    rowDataBase64: string;\n}"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "applyContainerParamRowMutations": {
+      "parameters": [
+        "containerUri: string",
+        "expectedContainerHash: string",
+        "mutation: {\n    kind: 'add' | 'copy' | 'delete';\n    entryIndex: number;\n    expectedChildHash: string;\n    rowId: number;\n    rowDataBase64: string;\n}"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "exportParamRowsCsv": {
+      "parameters": [
+        "containerUri: string",
+        "expectedContainerHash: string",
+        "entryIndex: number"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "exportParamNamesCsv": {
+      "parameters": [
+        "containerUri: string",
+        "expectedContainerHash: string",
+        "entryIndex: number"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "importParamNamesCsv": {
+      "parameters": [
+        "containerUri: string",
+        "expectedContainerHash: string",
+        "entryIndex: number",
+        "expectedChildHash: string"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "importParamRowsCsv": {
+      "parameters": [
+        "containerUri: string",
+        "expectedContainerHash: string",
+        "entryIndex: number",
+        "expectedChildHash: string"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "applyParamMutation": {
+      "parameters": [
+        "sourceUri: string",
+        "expectedHash: string",
+        "mutation: {\n    kind: 'upsert' | 'delete';\n    id: number;\n    dataBase64?: string;\n    rowIndex?: number;\n    expectedDataHash?: string;\n}"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "applyParamFieldMutation": {
+      "parameters": [
+        "sourceUri: string",
+        "expectedHash: string",
+        "mutation: {\n    rowId: number;\n    rowIndex?: number;\n    expectedDataHash?: string;\n    fieldId: string;\n    value: number | string | boolean;\n    rowDataBase64: string;\n    definition: unknown;\n}"
+      ],
+      "result": "Promise<RendererSaveResult>"
+    },
+    "listAiTools": {
+      "parameters": [],
+      "result": "Promise<ToolDescriptor[]>"
+    },
+    "buildAiSidebarDraft": {
+      "parameters": [
+        "request: AiSidebarDraftRequest"
+      ],
+      "result": "Promise<AiSidebarDraft>"
+    },
+    "runAiTool": {
+      "parameters": [
+        "name: string",
+        "input: unknown"
+      ],
+      "result": "Promise<ToolResult>"
+    },
+    "getMutterNext": {
+      "parameters": [],
+      "result": "Promise<MutterNextIpcResult>"
+    },
+    "getMutterStatus": {
+      "parameters": [],
+      "result": "Promise<MutterStatusIpcResult>"
+    },
+    "getFeedbackStatus": {
+      "parameters": [],
+      "result": "Promise<FeedbackStatusIpcResult>"
+    },
+    "submitSessionFeedback": {
+      "parameters": [
+        "input: SessionFeedbackIpcRequest"
+      ],
+      "result": "Promise<SessionFeedbackIpcResult>"
+    },
+    "submitAllHistory": {
+      "parameters": [],
+      "result": "Promise<SubmitAllHistoryIpcResult>"
+    },
+    "listModelServices": {
+      "parameters": [],
+      "result": "Promise<Array<{\n    id: string;\n    displayName: string;\n    protocol: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';\n    baseUrl: string;\n    model: string;\n    hasCredential: boolean;\n    createdAt: string;\n    updatedAt: string;\n    temperature?: number;\n    topP?: number;\n    topK?: number;\n    maxTokens?: number;\n    contextWindowTokens?: number;\n    thinkingLevel?: ModelThinkingLevel;\n}>>"
+    },
+    "getProviderUsageSummary": {
+      "parameters": [],
+      "result": "Promise<{\n    calls: number;\n    reportedCalls: number;\n    totalInputTokens: number;\n    totalOutputTokens: number;\n    firstUsedAt: string | null;\n    lastUsedAt: string | null;\n    byService: Array<{\n        serviceId: string;\n        protocol: string;\n        model: string;\n        calls: number;\n        reportedCalls: number;\n        totalInputTokens: number;\n        totalOutputTokens: number;\n        firstUsedAt: string | null;\n        lastUsedAt: string | null;\n    }>;\n    latestSession: null | {\n        sessionId: string;\n        serviceId: string;\n        protocol: string;\n        model: string;\n        calls: number;\n        reportedCalls: number;\n        totalInputTokens: number;\n        totalOutputTokens: number;\n        firstUsedAt: string | null;\n        lastUsedAt: string | null;\n        lastCallIndex: number;\n        currentContextTokens: number;\n        contextSource: 'provider' | 'estimated';\n        active: boolean;\n    };\n}>"
+    },
+    "modelServiceEncryptionAvailable": {
+      "parameters": [],
+      "result": "Promise<boolean>"
+    },
+    "upsertModelService": {
+      "parameters": [
+        "input: {\n    id?: string;\n    displayName: string;\n    protocol: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';\n    baseUrl: string;\n    model: string;\n    apiKey?: string;\n    temperature?: number;\n    topP?: number;\n    topK?: number;\n    maxTokens?: number;\n    contextWindowTokens?: number;\n    thinkingLevel?: ModelThinkingLevel;\n}"
+      ],
+      "result": "Promise<{\n    id: string;\n    displayName: string;\n    protocol: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';\n    baseUrl: string;\n    model: string;\n    hasCredential: boolean;\n    createdAt: string;\n    updatedAt: string;\n    temperature?: number;\n    topP?: number;\n    topK?: number;\n    maxTokens?: number;\n    contextWindowTokens?: number;\n    thinkingLevel?: ModelThinkingLevel;\n}>"
+    },
+    "deleteModelService": {
+      "parameters": [
+        "configId: string"
+      ],
+      "result": "Promise<{\n    ok: true;\n}>"
+    },
+    "embedWorkspaceRag": {
+      "parameters": [],
+      "result": "Promise<{\n    ok: true;\n    embedded: number;\n    reused: number;\n    failed: number;\n    model: string;\n    dim: number;\n} | {\n    ok: false;\n    error: {\n        code: string;\n        message: string;\n    };\n}>"
+    },
+    "getRagLocalModelStatus": {
+      "parameters": [],
+      "result": "Promise<import('@soulforge/shared').RagLocalModelStatus>"
+    },
+    "searchWorkspaceEvidence": {
+      "parameters": [
+        "input: {\n    query: string;\n    limit?: number;\n    families?: string[];\n    expandReferences?: boolean;\n}"
+      ],
+      "result": "Promise<RagRetrieveResult>"
+    },
+    "listModelModels": {
+      "parameters": [
+        "input: {\n    protocol: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';\n    baseUrl: string;\n    apiKey?: string;\n}"
+      ],
+      "result": "Promise<{\n    ok: true;\n    models: Array<{\n        id: string;\n        displayName?: string;\n    }>;\n} | {\n    ok: false;\n    error: {\n        code: string;\n        message: string;\n    };\n}>"
+    },
+    "runAiAgent": {
+      "parameters": [
+        "request: AiAgentRunRequest"
+      ],
+      "result": "Promise<AiAgentRunIpcResult>"
+    },
+    "requestAiAgentPermission": {
+      "parameters": [
+        "mode: 'plan' | 'normal' | 'fullPermission'"
+      ],
+      "result": "Promise<AiAgentPermissionRequestResult>"
+    },
+    "getAiAgentEvents": {
+      "parameters": [
+        "sessionId: string",
+        "afterSeq = 0"
+      ],
+      "result": "Promise<AiAgentEventReplayIpcResult>"
+    },
+    "cancelAiAgent": {
+      "parameters": [
+        "sessionId: string"
+      ],
+      "result": "Promise<AiAgentCancelIpcResult>"
+    },
+    "respondAiAgentApproval": {
+      "parameters": [
+        "request: AiAgentApprovalResponseRequest"
+      ],
+      "result": "Promise<{\n    ok: true;\n    matched: boolean;\n} | {\n    ok: false;\n    error: {\n        code: string;\n        message: string;\n    };\n}>"
+    },
+    "listAiAgentSessions": {
+      "parameters": [],
+      "result": "Promise<AiAgentSessionListIpcResult>"
+    },
+    "loadAiAgentSession": {
+      "parameters": [
+        "sessionPath: string"
+      ],
+      "result": "Promise<AiAgentSessionLoadIpcResult>"
+    },
+    "createAgentResourceReference": {
+      "parameters": [
+        "selection: EditorSelectionContext"
+      ],
+      "result": "Promise<AgentResourceReferenceCreateIpcResult>"
+    },
+    "createAgentCitation": {
+      "parameters": [
+        "hits: readonly CiteHit[]"
+      ],
+      "result": "Promise<AgentResourceReferenceCreateIpcResult>"
+    },
+    "createAgentAttachment": {
+      "parameters": [],
+      "result": "Promise<AgentAttachmentCreateIpcResult>"
+    },
+    "listAiMemories": {
+      "parameters": [],
+      "result": "Promise<{\n    ok: true;\n    entries: MemoryEntry[];\n} | {\n    ok: false;\n    error: {\n        code: string;\n        message: string;\n    };\n}>"
+    },
+    "saveAiMemory": {
+      "parameters": [
+        "entry: {\n    id?: string;\n    topic: string;\n    summary: string;\n    details?: string;\n    tags?: string[];\n}"
+      ],
+      "result": "Promise<{\n    ok: true;\n    entry: MemoryEntry;\n} | {\n    ok: false;\n    error: {\n        code: string;\n        message: string;\n    };\n}>"
+    },
+    "deleteAiMemory": {
+      "parameters": [
+        "idOrTopic: string"
+      ],
+      "result": "Promise<{\n    ok: true;\n    deleted: boolean;\n} | {\n    ok: false;\n    error: {\n        code: string;\n        message: string;\n    };\n}>"
+    },
+    "getUpdateState": {
+      "parameters": [],
+      "result": "Promise<UpdatePublicState>"
+    },
+    "setUpdateChannel": {
+      "parameters": [
+        "request: UpdateSetChannelRequest"
+      ],
+      "result": "Promise<UpdateCommandResult>"
+    },
+    "checkForUpdate": {
+      "parameters": [],
+      "result": "Promise<UpdateCommandResult>"
+    },
+    "downloadUpdate": {
+      "parameters": [],
+      "result": "Promise<UpdateCommandResult>"
+    },
+    "cancelUpdate": {
+      "parameters": [],
+      "result": "Promise<UpdateCommandResult>"
+    },
+    "installUpdate": {
+      "parameters": [],
+      "result": "Promise<UpdateCommandResult>"
+    },
+    "openUpdateRelease": {
+      "parameters": [],
+      "result": "Promise<UpdateCommandResult>"
+    },
+    "onUpdateState": {
+      "parameters": [
+        "callback: (state: UpdatePublicState) => void"
+      ],
+      "result": "(() => void)"
+    },
+    "onAiAgentEvent": {
+      "parameters": [
+        "callback: (envelope: AiAgentEventEnvelope) => void"
+      ],
+      "result": "(() => void)"
+    }
+  }
+}

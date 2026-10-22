@@ -280,6 +280,12 @@ async function handleDaemonLine(
     });
     return;
   }
+  if (tool === '__host_operation_status') {
+    const opId = typeof args.opId === 'string' ? args.opId : '';
+    if (!opId) { write({ id, ok: false, error: sessionError('CLI_OPERATION_ID_REQUIRED', '必须提供 opId。') }); return; }
+    write({ id, ok: true, result: await requestHost.operationStatus(opId) });
+    return;
+  }
   if (tool === '__host_cancel') {
     const targetId = typeof args.requestId === 'string' ? args.requestId : id;
     write({ id, ok: true, result: requestHost.requestCancel(targetId) });
@@ -287,7 +293,7 @@ async function handleDaemonLine(
   }
   if (tool === '__host_request_status') {
     const targetId = typeof args.requestId === 'string' ? args.requestId : id;
-    const status = requestHost.requestStatus(targetId);
+    const status = await requestHost.resolveRequestStatus(targetId);
     write(status
       ? { id, ok: true, result: status }
       : { id, ok: false, error: sessionError('CLI_REQUEST_NOT_FOUND', `没有找到请求 ${targetId}。`, false) });

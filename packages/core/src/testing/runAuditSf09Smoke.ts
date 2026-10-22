@@ -1,10 +1,11 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * SF-09: EMEVD 指令身份、批量 IR 与重定位检验
  * 覆盖: EventHandle, InstructionHandle, ParameterBinding, mutationSimulation,
  * 重命名链与环路拒绝, batch_rename 同时命名, 参数绑定重定位, 不透明节点保护,
  * 字符串表更新, 超安全整数拒绝, 大事件分页与无损恢复, 以及 native Sekiro 验证。
  */
-import { mkdtemp, rm, writeFile, readFile, mkdir } from 'node:fs/promises';
+import { rm, writeFile, readFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -24,7 +25,7 @@ import { commitEmevdBatchViaBridge } from '../editing/emevdBridgeCommit.js';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { encodeInstructionArgs, createSekiroFixtureEmedf } from '../emevd/emedfSchema.js';
 import { buildSyntheticEmevd, sha256Hex } from './syntheticEmevdBytes.js';
-import { resolveNativeFixture } from './nativeFixtureRegistry.js';
+import { nativeOodleRuntimeRoot, resolveNativeFixture } from './nativeFixtureRegistry.js';
 import { readEmevdEvent } from '../editing/emevdEdit.js';
 import { openNativeEditSession } from '../editing/nativeEditSession.js';
 
@@ -489,11 +490,11 @@ async function runNativeLayer(): Promise<void> {
     '../../mods/event/common.emevd.dcx'
   );
 
+  const oodleRuntimeRoot = nativeOodleRuntimeRoot();
   const root = await mkdtemp(join(tmpdir(), 'soulforge-sf09-native-'));
   const staging = join(root, 'staging');
   const backup = join(root, 'backup');
   const recovery = join(root, 'recovery');
-  const oodleRuntimeRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT || 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
 
   try {
     await mkdir(staging, { recursive: true });

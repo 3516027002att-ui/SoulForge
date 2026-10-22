@@ -12,9 +12,9 @@
  * - Extension counting is container-level inventory, not a native document.
  */
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
-import { readFileSync, mkdirSync, rmSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { createSmokeWorkspace } from './harness/smokeWorkspace.js';
 
 function gameRootOrFail(): string {
   const root = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
@@ -23,8 +23,6 @@ function gameRootOrFail(): string {
   }
   return root;
 }
-
-const scratch = join(tmpdir(), 'soulforge-behavior-probe');
 
 interface DcxEnvelope {
   nested?: { entryCount: number; entries?: Array<{ name: string; compressedSize: number; id: number }> };
@@ -85,7 +83,7 @@ async function dumpContainer(rel: string, label: string): Promise<void> {
   return;
 }
 
-async function extractHeader(rel: string, childPath: string, outName: string, label: string): Promise<void> {
+async function extractHeader(scratch: string, rel: string, childPath: string, outName: string, label: string): Promise<void> {
   const file = join(gameRootOrFail(), rel);
   const out = join(scratch, outName);
   const r = await runBridge<ExtractEnvelope>({
@@ -112,7 +110,8 @@ async function extractHeader(rel: string, childPath: string, outName: string, la
 }
 
 async function main(): Promise<void> {
-  mkdirSync(scratch, { recursive: true });
+  const workspace = await createSmokeWorkspace('behavior-probe');
+  const scratch = workspace.root;
   try {
     await dumpContainer('mods/chr/c0000.anibnd.dcx', 'anibnd c0000');
     await dumpContainer('mods/chr/c4510.behbnd.dcx', 'behbnd c4510');
@@ -120,20 +119,20 @@ async function main(): Promise<void> {
     await dumpContainer('mods/script/m11_00_00_00.luabnd.dcx', 'luabnd m11_00');
     await dumpContainer('mods/script/talk/m11_02_00_00.talkesdbnd.dcx', 'talkesdbnd');
 
-    await extractHeader('mods/chr/c0000.anibnd.dcx', 'hkx/skeleton.hkx', 'skeleton.hkx', 'HKX skeleton');
-    await extractHeader('mods/chr/c0000.anibnd.dcx', 'tae/a00.tae', 'a00.tae', 'TAE a00');
-    await extractHeader('mods/chr/c4510.behbnd.dcx', 'Export/Behaviors/c9997.hkx', 'beh_c9997.hkx', 'HKX behavior');
-    await extractHeader('mods/chr/c4510.behbnd.dcx', 'Export/Characters/c4510.hkx', 'beh_char.hkx', 'HKX characters');
-    await extractHeader('mods/script/aicommon.luabnd.dcx', 'goal_list.lua', 'goal_list.lua', 'LUA goal_list');
-    await extractHeader('mods/script/aicommon.luabnd.dcx', 'ai_define.lua', 'ai_define.lua', 'LUA ai_define');
-    await extractHeader('mods/script/m11_00_00_00.luabnd.dcx', '101000_logic.lua', 'm11_logic.lua', 'LUA m11 logic');
-    await extractHeader('mods/script/talk/m11_02_00_00.talkesdbnd.dcx', 't112110.esd', 'talk.esd', 'ESD talk');
-    await extractHeader('mods/script/aicommon.luabnd.dcx', 'aiCommon.luainfo', 'ai.luainfo', 'LUAINFO sample');
-    await extractHeader('mods/script/aicommon.luabnd.dcx', 'aiCommon.luagnl', 'ai.luagnl', 'LUAGNL sample');
-    await extractHeader('mods/chr/c0000.anibnd.dcx', 'c0000_a000_hi.txt', 'anibnd_txt.bin', 'anibnd txt sample');
+    await extractHeader(scratch, 'mods/chr/c0000.anibnd.dcx', 'hkx/skeleton.hkx', 'skeleton.hkx', 'HKX skeleton');
+    await extractHeader(scratch, 'mods/chr/c0000.anibnd.dcx', 'tae/a00.tae', 'a00.tae', 'TAE a00');
+    await extractHeader(scratch, 'mods/chr/c4510.behbnd.dcx', 'Export/Behaviors/c9997.hkx', 'beh_c9997.hkx', 'HKX behavior');
+    await extractHeader(scratch, 'mods/chr/c4510.behbnd.dcx', 'Export/Characters/c4510.hkx', 'beh_char.hkx', 'HKX characters');
+    await extractHeader(scratch, 'mods/script/aicommon.luabnd.dcx', 'goal_list.lua', 'goal_list.lua', 'LUA goal_list');
+    await extractHeader(scratch, 'mods/script/aicommon.luabnd.dcx', 'ai_define.lua', 'ai_define.lua', 'LUA ai_define');
+    await extractHeader(scratch, 'mods/script/m11_00_00_00.luabnd.dcx', '101000_logic.lua', 'm11_logic.lua', 'LUA m11 logic');
+    await extractHeader(scratch, 'mods/script/talk/m11_02_00_00.talkesdbnd.dcx', 't112110.esd', 'talk.esd', 'ESD talk');
+    await extractHeader(scratch, 'mods/script/aicommon.luabnd.dcx', 'aiCommon.luainfo', 'ai.luainfo', 'LUAINFO sample');
+    await extractHeader(scratch, 'mods/script/aicommon.luabnd.dcx', 'aiCommon.luagnl', 'ai.luagnl', 'LUAGNL sample');
+    await extractHeader(scratch, 'mods/chr/c0000.anibnd.dcx', 'c0000_a000_hi.txt', 'anibnd_txt.bin', 'anibnd txt sample');
   } finally {
     await disposeBridgeDaemonPool();
-    rmSync(scratch, { recursive: true, force: true });
+    await workspace.dispose();
   }
 }
 

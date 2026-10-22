@@ -1,9 +1,11 @@
-import { createHash } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdirSync, renameSync, rmSync } from 'node:fs';
+import { link, mkdir, mkdtemp, open, readFile, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import BetterSqlite3 from 'better-sqlite3';
 import type { SqlMigration } from './sqliteSchema.js';
 import { APP_DB_MIGRATIONS, SQLITE_MIGRATIONS } from './sqliteSchema.js';
+import { convertLegacyKnowledge, isLegacyKnowledgeMigration } from './sqliteLegacyKnowledge.js';
 
 export type SqliteDatabase = BetterSqlite3.Database;
 
@@ -59,8 +61,13 @@ export function openMigratedDatabase(
     database.pragma(`busy_timeout = ${Math.max(0, options.busyTimeoutMs ?? 5_000)}`);
     if (!options.readonly) database.pragma('journal_mode = WAL');
     assertDatabaseIntegrity(database);
-    if (!options.readonly) applyMigrations(database, migrations);
-    assertDatabaseIntegrity(database);
+    if (!options.readonly) {
+      applyMigrations(database, migrations);
+      // Only a writer may have changed the schema/data after the first check.
+      // A read-only connection performs no migration; scanning the same large
+      // database a second time merely blocks workspace remount/close again.
+      assertDatabaseIntegrity(database);
+    }
     return database;
   } catch (error) {
     database.close();
@@ -74,6 +81,7 @@ export function applyMigrations(
 ): void {
   validateMigrationSequence(migrations);
   assertSchemaNotNewerThanApplication(database, migrations);
+  const existingDatabase = Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get());
   database.exec(`
 CREATE TABLE IF NOT EXISTS schema_migrations (
   id INTEGER PRIMARY KEY,
@@ -106,6 +114,20 @@ VALUES (@id, @name, @checksum, @appliedAt)
         );
       }
       if (applied.name !== migration.name || applied.checksum !== checksum) {
+        if (isLegacyKnowledgeMigration(migration, applied.name, applied.checksum, checksum)) {
+          preserveBeforeMigration(database, migration.id);
+          try {
+            database.transaction(() => {
+              convertLegacyKnowledge(database, migration);
+              database.prepare('UPDATE schema_migrations SET checksum = ? WHERE id = ?').run(checksum, migration.id);
+            }).immediate();
+          } catch (error) {
+            throw new SqliteMigrationError('SQLITE_LEGACY_KNOWLEDGE_MIGRATION_FAILED',
+              'Historical knowledge conversion failed; original schema and journal are preserved.',
+              { cause: error instanceof Error ? error.message : String(error) });
+          }
+          continue;
+        }
         // 一次性重锚:只对显式登记的 (id, name, 旧 checksum, 新 checksum) 四元组
         // 生效。命中时把账本里的 checksum 更新为代码值并继续,不重跑 SQL。
         const reanchor = findChecksumReanchor(migration, applied.name, applied.checksum, checksum);
@@ -129,6 +151,7 @@ VALUES (@id, @name, @checksum, @appliedAt)
       continue;
     }
 
+    if (migration.requiresBackup && existingDatabase) preserveBeforeMigration(database, migration.id);
     const applyOne = database.transaction(() => {
       if (migration.sql.trim() !== '') database.exec(migration.sql);
       // 按「列不存在才加」处理:SQLite 无 ADD COLUMN IF NOT EXISTS，而迁移可能
@@ -235,6 +258,14 @@ export const CHECKSUM_REANCHORS: readonly ChecksumReanchor[] = Object.freeze([
     toChecksum: '95cfb57f0dc5b9ae94511ef4ce4c5056b5724ded369880a1ebe3670c8f6d4d42',
     reason: '该迁移曾在开发中途被整条删除，补回时 SQL 由既有库的真实 DDL 重建，'
       + '故 checksum 与历史值不同。表结构本身未变（已用结构比对确认）。'
+  },
+  {
+    id: 13,
+    name: 'v0_5_rag_outer_file_identity',
+    fromChecksum: '2a0980183e0f68f6e8b3c95ce0f21990a4617466e076245eb79dd43d523bf55a',
+    toChecksum: '4d10b4936808de58df3d2226479029105a85645e7b9b9aedafbee7ad330f7c07',
+    reason: 'e32edad11a4d7cd493312bf49543d0241b667a42 的 sqlAfterColumns 结尾多四个空格；'
+      + '与当前迁移的 SQL、列和索引逐项相同，仅移除尾随空白。只重锚这一对已复算哈希，不重跑 SQL。'
   }
 ]);
 
@@ -265,7 +296,8 @@ export function migrationChecksum(migration: SqlMigration): string {
       name: migration.name,
       sql: migration.sql,
       ...(migration.addColumns ? { addColumns: migration.addColumns } : {}),
-      ...(migration.sqlAfterColumns ? { sqlAfterColumns: migration.sqlAfterColumns } : {})
+      ...(migration.sqlAfterColumns ? { sqlAfterColumns: migration.sqlAfterColumns } : {}),
+      ...(migration.requiresBackup ? { requiresBackup: true } : {})
     }))
     .digest('hex');
 }
@@ -278,6 +310,28 @@ export function assertDatabaseIntegrity(database: SqliteDatabase): void {
       'SQLite quick_check failed.',
       { result }
     );
+  }
+}
+
+function preserveBeforeMigration(database: SqliteDatabase, migrationId: number): void {
+  if (!database.name || database.name === ':memory:') {
+    throw new SqliteMigrationError('SQLITE_PRE_MIGRATION_BACKUP_REQUIRED', 'Destructive migration requires a persistent recoverable database.');
+  }
+  const snapshotPath = `${database.name}.pre-schema-${migrationId}-${randomUUID()}.db`;
+  const temporaryPath = `${snapshotPath}.pending`;
+  try {
+    // SQLite creates one committed, consistent image; never copy DB/WAL files.
+    // This runs on the database utility's writer, before the migration transaction.
+    database.prepare('VACUUM INTO ?').run(temporaryPath);
+    database.prepare('ATTACH DATABASE ? AS pre_migration_backup').run(temporaryPath);
+    try {
+      const result = database.pragma('pre_migration_backup.quick_check', { simple: true });
+      if (result !== 'ok') throw new Error('Upgrade snapshot failed SQLite quick_check.');
+    } finally { database.exec('DETACH DATABASE pre_migration_backup'); }
+    renameSync(temporaryPath, snapshotPath);
+  } catch (error) {
+    rmSync(temporaryPath, { force: true });
+    throw new SqliteMigrationError('SQLITE_PRE_MIGRATION_BACKUP_FAILED', 'Upgrade backup failed; destructive migration was not executed.', { cause: error instanceof Error ? error.message : String(error) });
   }
 }
 
@@ -299,5 +353,100 @@ function validateMigrationSequence(migrations: readonly SqlMigration[]): void {
       );
     }
     seen.add(migration.id);
+  }
+}
+
+
+export interface WorkspaceDatabaseBackupOptions {
+  nativeBinding?: string;
+  signal?: AbortSignal;
+  /** SQLite page progress, also usable to yield a bounded backup page count. */
+  progress?: (progress: { totalPages: number; remainingPages: number }) => number | undefined;
+}
+
+/** Publish a SQLite-consistent snapshot without ever replacing an established destination. */
+export async function backupWorkspaceDatabase(
+  sourcePath: string,
+  destinationPath: string,
+  options: WorkspaceDatabaseBackupOptions = {}
+): Promise<{ status: 'migrated' | 'existing' }> {
+  const binding = options.nativeBinding ? { nativeBinding: options.nativeBinding } : {};
+  const validate = (file: string): void => {
+    const database = new BetterSqlite3(file, { readonly: true, fileMustExist: true, ...binding });
+    try {
+      assertDatabaseIntegrity(database);
+      const foreignKeys = database.pragma('foreign_key_check');
+      if (Array.isArray(foreignKeys) && foreignKeys.length) {
+        throw new SqliteMigrationError('SQLITE_BACKUP_FOREIGN_KEY_FAILED', 'Backup foreign key validation failed.', { foreignKeys });
+      }
+    } finally { database.close(); }
+  };
+  const exists = async (file: string): Promise<boolean> => {
+    try { const handle = await open(file, 'r'); await handle.close(); return true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+  };
+  const abort = (): void => {
+    if (options.signal?.aborted) throw new SqliteMigrationError('SQLITE_BACKUP_CANCELLED', 'Workspace database backup cancelled.');
+  };
+  abort();
+  await mkdir(dirname(destinationPath), { recursive: true });
+  const lockPath = `${destinationPath}.migration-lock`;
+  const ownerPath = `${lockPath}.owner-${process.pid}-${randomUUID()}`;
+  const lock = await open(ownerPath, 'wx');
+  try {
+    // Publish an already populated ownership record. A crash between open and
+    // writing the PID cannot leave an empty authoritative migration lock.
+    await lock.writeFile(String(process.pid));
+    await lock.sync();
+    try { await link(ownerPath, lockPath); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      // Recover only a lock whose recorded process is demonstrably gone.
+      const owner = Number((await readFile(lockPath, 'utf8')).trim());
+      let dead = false;
+      if (Number.isSafeInteger(owner) && owner > 0) {
+        try { process.kill(owner, 0); }
+        catch (probe) { dead = (probe as NodeJS.ErrnoException).code === 'ESRCH'; }
+      }
+      if (!dead) throw new SqliteMigrationError('SQLITE_BACKUP_BUSY', 'Another process owns workspace database migration.');
+      await rm(lockPath);
+      try { await link(ownerPath, lockPath); }
+      catch (cause) { throw new SqliteMigrationError('SQLITE_BACKUP_BUSY', 'Workspace database migration lock changed.', { cause }); }
+    }
+  } catch (error) {
+    await lock.close();
+    throw error;
+  } finally { await rm(ownerPath, { force: true }); }
+  let temporaryDirectory: string | undefined;
+  let source: SqliteDatabase | undefined;
+  try {
+    if (await exists(destinationPath)) { validate(destinationPath); return { status: 'existing' }; }
+    abort();
+    temporaryDirectory = await mkdtemp(`${destinationPath}.migration-`);
+    const temporary = `${temporaryDirectory}/workspace.db`;
+    source = new BetterSqlite3(sourcePath, { readonly: true, fileMustExist: true, ...binding });
+    assertDatabaseIntegrity(source);
+    await source.backup(temporary, { progress: (progress) => { abort(); return options.progress?.(progress) ?? 100; } });
+    abort();
+    validate(temporary);
+    // A hard link is an atomic no-clobber publish on the same filesystem.
+    // Unlike rename, a destination created by another actor cannot be replaced.
+    try { await link(temporary, destinationPath); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      validate(destinationPath);
+      return { status: 'existing' };
+    }
+    return { status: 'migrated' };
+  } catch (error) {
+    if (error instanceof SqliteMigrationError) throw error;
+    throw new SqliteMigrationError('SQLITE_BACKUP_FAILED', 'Workspace database migration failed; source preserved and no partial database published.', {
+      cause: error instanceof Error ? error.message : String(error)
+    });
+  } finally {
+    source?.close();
+    if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
+    await lock.close();
+    await rm(lockPath, { force: true });
   }
 }

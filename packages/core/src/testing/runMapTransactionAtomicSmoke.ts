@@ -1,23 +1,48 @@
 import assert from 'node:assert/strict';
-import { dirname, join, basename } from 'node:path';
-import { mkdir, copyFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { mkdir, copyFile, realpath, stat } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import {
-  type MapEditTransaction,
-  type IndexedFile
-} from '@soulforge/shared';
+import { type MapEditTransaction } from '@soulforge/shared';
 import { executeMapTransaction, loadMapDocument } from '../editing/mapService.js';
 import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
-import { type NativeEditSession, mintNativeEditReceipt } from '../editing/nativeEditSession.js';
+import { nativeEditSessionFromContext } from '../editing/nativeEditSession.js';
 import { MemoryOperationLogStore } from '../patch/operationLog.js';
+import { openWorkspaceSession } from '../workspace/workspaceSession.js';
+import { resolveNativeFixture } from './nativeFixtureRegistry.js';
 
 export async function runMapTransactionAtomicSmoke(): Promise<void> {
+  const explicitSource = process.argv[2]?.trim();
+  const gameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+  const registry = process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY?.trim();
+  const fixtureRoot = process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim();
+  const unavailable = (code: string) => console.log(JSON.stringify({
+    ok: false, status: 'skipped', executed: false, authority: 'unverified', code,
+    scope: 'native MAP atomic transactions',
+    message: 'Native checks were not executed. Configure an explicit MSB path, SOULFORGE_SEKIRO_GAME_ROOT, or SOULFORGE_NATIVE_FIXTURE_REGISTRY with SOULFORGE_NATIVE_FIXTURE_ROOT.'
+  }));
+  if (!explicitSource && !gameRoot && !registry && !fixtureRoot) {
+    unavailable('NATIVE_MAP_INPUT_REQUIRED');
+    return;
+  }
+  if (!explicitSource && Boolean(registry) !== Boolean(fixtureRoot)) throw new Error('NATIVE_FIXTURE_CONFIG_INCOMPLETE');
+  let sourceOriginal: string;
+  try {
+    sourceOriginal = await realpath(await resolveNativeFixture(
+      explicitSource ?? (!registry && gameRoot ? join(gameRoot, 'mods/map/mapstudio/m10_00_00_00.msb.dcx') : undefined),
+      'msb-primary', '../../mods/map/mapstudio/m10_00_00_00.msb.dcx'
+    ));
+    if (!(await stat(sourceOriginal)).isFile()) throw new Error('NATIVE_MAP_SOURCE_NOT_FILE');
+  } catch (error) {
+    if (['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+      unavailable('NATIVE_MAP_SOURCE_UNAVAILABLE');
+      return;
+    }
+    throw error;
+  }
+  const oodleRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT?.trim() || gameRoot;
   console.log('[Smoke] Testing Atomic MapEditTransaction Invariants...');
 
   await withSmokeWorkspace('map-atomic-tx', async (workspace) => {
-    const oodleRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT || 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
-    const sourceOriginal = process.argv[2] || 'D:/mystream/Sekiro Shadows Die Twice/Sekiro/map/mapstudio/m10_00_00_00.msb.dcx';
-
     const stagingRoot = join(workspace.root, 'staging');
     await mkdir(stagingRoot, { recursive: true });
 
@@ -26,83 +51,36 @@ export async function runMapTransactionAtomicSmoke(): Promise<void> {
     await copyFile(sourceOriginal, mapFile);
 
     let commitCount = 0;
-    const editSession: NativeEditSession = {
-      session: {
-        workspaceId: 'smoke-ws',
-        root: workspace.root,
-        name: 'Smoke Workspace',
-        layers: {
-          overlayRoot: workspace.root,
-          baseRoot: oodleRoot
-        }
-      } as any,
+    const session = await openWorkspaceSession({
+      overlayRoot: workspace.root, ...(oodleRoot ? { baseRoot: oodleRoot } : {}), game: 'sekiro'
+    });
+    const editSession = nativeEditSessionFromContext({
+      session,
       operationLog: new MemoryOperationLogStore(),
       stagingRoot,
       backupBaseDir: join(workspace.root, 'backups'),
-      recoveryDir: join(workspace.root, 'recovery'),
-      oodleRuntimeRoot: oodleRoot,
-      allowedRoots: () => [workspace.root, dirname(sourceOriginal), oodleRoot],
-      mintReceipt: (uri, title) => mintNativeEditReceipt(uri, title),
-      commitPort: {
-        commit: async (req) => {
-          commitCount++;
-          // Real commit: write staging payload to target
-          const buf = Buffer.from(req.newContentBase64, 'base64');
-          const { writeFile } = await import('node:fs/promises');
-          await writeFile(mapFile, buf);
-          return {
-            ok: true,
-            receipt: mintNativeEditReceipt(req.file.sourceUri, req.title),
-            writtenBytes: buf.length,
-            file: req.file,
-            changedFiles: [req.file.sourceUri],
-            diagnostics: []
-          };
-        }
-      },
-      indexFile: async (path, kind): Promise<IndexedFile> => {
-        const { readFile } = await import('node:fs/promises');
-        const { createHash } = await import('node:crypto');
-        const buf = await readFile(path);
-        const hash = createHash('sha256').update(buf).digest('hex');
-        return {
-          id: 'file-1',
-          workspaceId: 'smoke-ws',
-          sourceUri: pathToFileURL(path).toString(),
-          sourcePath: path,
-          relativePath: basename(path),
-          absolutePath: path,
-          mtimeMs: Date.now(),
-          resourceKind: kind ?? 'map',
-          formatKind: 'native-msb' as any,
-          formatLabel: 'MSB',
-          extension: '.msb.dcx',
-          compoundExtension: '.msb.dcx',
-          parseStatus: 'parsed',
-          size: buf.length,
-          sha256: hash,
-          game: 'sekiro',
-          diagnostics: []
-        };
-      },
-      registerReadHandle: () => {},
-      resolveReadHandle: () => undefined,
-      verifyReadCoverage: () => ({ ok: true })
+      recoveryDir: join(workspace.root, 'recovery')
+    });
+    const patchCommit = editSession.commitPort.commit.bind(editSession.commitPort);
+    editSession.commitPort = {
+      commit: async (request) => { commitCount++; return patchCommit(request); }
     };
 
     const loaded = await loadMapDocument(editSession, mapFile);
     assert.equal(loaded.ok, true, 'Must load map document');
     if (!loaded.ok) return;
+    assert.ok(loaded.doc.parts.length >= 2, 'The explicit MSB must contain two parts for the atomic delete regression');
+    const targetKey = loaded.doc.parts[0]!.stableKey;
 
     console.log('[Smoke] Case 1: Stale baseRevision rejected before commit...');
     const staleTx: MapEditTransaction = {
       id: 'tx-stale',
-      mapId: 'm10_00_00_00',
+      mapId: loaded.doc.mapId,
       baseRevision: 'stale_hash_123',
       description: 'Stale revision test',
       author: 'agent',
       operations: [
-        { kind: 'set_transform', target: 'm000010_1077', position: [0, 0, 0] }
+        { kind: 'set_transform', target: targetKey, position: [0, 0, 0] }
       ],
       timestamp: Date.now()
     };
@@ -115,12 +93,12 @@ export async function runMapTransactionAtomicSmoke(): Promise<void> {
     console.log('[Smoke] Case 2: Unknown model rejected in preflight...');
     const invalidModelTx: MapEditTransaction = {
       id: 'tx-invalid-model',
-      mapId: 'm10_00_00_00',
+      mapId: loaded.doc.mapId,
       baseRevision: loaded.doc.revision,
       description: 'Invalid model test',
       author: 'human',
       operations: [
-        { kind: 'change_model', target: 'm000010_1077', newModelName: 'm_nonexistent_999999' }
+        { kind: 'change_model', target: targetKey, newModelName: 'm_nonexistent_999999' }
       ],
       timestamp: Date.now()
     };
@@ -131,12 +109,12 @@ export async function runMapTransactionAtomicSmoke(): Promise<void> {
     console.log('[Smoke] Case 3: Unsupported property rejected in preflight...');
     const unsupportedPropTx: MapEditTransaction = {
       id: 'tx-unsupported-prop',
-      mapId: 'm10_00_00_00',
+      mapId: loaded.doc.mapId,
       baseRevision: loaded.doc.revision,
       description: 'Unsupported property test',
       author: 'human',
       operations: [
-        { kind: 'set_property', target: 'm000010_1077', property: 'unsupportedField', value: 123 }
+        { kind: 'set_property', target: targetKey, property: 'unsupportedField', value: 123 }
       ],
       timestamp: Date.now()
     };
@@ -147,13 +125,13 @@ export async function runMapTransactionAtomicSmoke(): Promise<void> {
     console.log('[Smoke] Case 4: Sequential composition (delete target then use in subsequent op) fails preflight...');
     const invalidSeqTx: MapEditTransaction = {
       id: 'tx-invalid-seq',
-      mapId: 'm10_00_00_00',
+      mapId: loaded.doc.mapId,
       baseRevision: loaded.doc.revision,
       description: 'Delete then transform',
       author: 'agent',
       operations: [
-        { kind: 'delete', target: 'm000010_1077' },
-        { kind: 'set_transform', target: 'm000010_1077', position: [10, 20, 30] }
+        { kind: 'delete', target: targetKey },
+        { kind: 'set_transform', target: targetKey, position: [10, 20, 30] }
       ],
       timestamp: Date.now()
     };
@@ -215,7 +193,7 @@ export async function runMapTransactionAtomicSmoke(): Promise<void> {
 
     const deleteBatchTx: MapEditTransaction = {
       id: 'tx-delete-batch',
-      mapId: 'm10_00_00_00',
+      mapId: reread1.doc.mapId,
       baseRevision: reread1.doc.revision,
       description: 'Delete 2 parts in one transaction',
       author: 'human',
@@ -250,11 +228,12 @@ export async function runMapTransactionAtomicSmoke(): Promise<void> {
     assert.equal(deleteResult.ok, true, 'Batch delete must succeed and rebuild param tables without corruption');
     assert.equal(commitCount, 3, 'Exact 3 commits after 3 successful transactions');
 
-    console.log('[Smoke] All Atomic MapEditTransaction Invariants PASSED.');
+    console.log(JSON.stringify({ ok: true, status: 'passed', executed: true,
+      scope: 'native MAP atomic transactions on the explicit owned-copy MSB', cases: 7, patchCommits: commitCount }));
   });
 }
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith('runMapTransactionAtomicSmoke.js')) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   runMapTransactionAtomicSmoke().catch((err) => {
     console.error(err);
     process.exit(1);

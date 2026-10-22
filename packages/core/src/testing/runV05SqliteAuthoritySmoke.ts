@@ -9,6 +9,7 @@ import {
   applyMigrations,
   CHECKSUM_REANCHORS,
   migrationChecksum,
+  openMigratedDatabase,
   openAppDatabase,
   openWorkspaceDatabase,
   SqliteMigrationError
@@ -36,8 +37,8 @@ async function mainInWorkspace(root: string): Promise<void> {
   const workspaceId = 'workspace-sqlite-smoke';
 
   const appDb = openAppDatabase(appDbPath);
-  assert(tableExists(appDb, 'model_services'), 'app.db model_services table');
-  assert(tableExists(appDb, 'adaptation_packages'), 'app.db adaptation_packages table');
+  assert(!tableExists(appDb, 'model_services'), 'unused app model_services retired');
+  assert(!tableExists(appDb, 'adaptation_packages'), 'unused app adaptation_packages retired');
   assert(appDb.pragma('journal_mode', { simple: true }) === 'wal', 'app.db WAL');
   appDb.close();
 
@@ -265,15 +266,13 @@ async function verifySemanticSnapshotImport(
   await writeFile(sourcePath, `${JSON.stringify(document)}\n`, 'utf8');
   const options = { sourcePath, backupDirectory: join(root, 'semantic-backups'), database, workspaceId };
   const first = await importLegacySemanticSnapshot(options);
-  assert(first.status === 'imported' && first.nodeCount === 2 && first.edgeCount === 1, 'semantic snapshot imported');
+  assert(first.status === 'archived' && first.nodeCount === 2 && first.edgeCount === 1, 'semantic snapshot archived');
   assert(Boolean(first.backupPath), 'semantic snapshot read-only backup');
   const second = await importLegacySemanticSnapshot(options);
   assert(second.status === 'already_imported', 'semantic snapshot import idempotent');
-  const counts = database.prepare(`
-SELECT (SELECT COUNT(*) FROM resource_nodes WHERE workspace_id = ?) AS nodes,
-       (SELECT COUNT(*) FROM resource_edges WHERE workspace_id = ?) AS edges
-`).get(workspaceId, workspaceId) as { nodes: number; edges: number };
-  assert(counts.nodes === 2 && counts.edges === 1, 'semantic graph persisted');
+  const archived = JSON.parse(await readFile(first.backupPath!, 'utf8')) as typeof document;
+  assert(archived.graph.nodes.length === 2 && archived.graph.edges.length === 1, 'legacy graph remains recoverable');
+  assert(!tableExists(database, 'resource_nodes'), 'write-only graph table retired');
 
   const corruptPath = join(root, 'semantic-corrupt.json');
   await writeFile(corruptPath, '{ invalid', 'utf8');
@@ -285,9 +284,7 @@ SELECT (SELECT COUNT(*) FROM resource_nodes WHERE workspace_id = ?) AS nodes,
       && error.code === 'LEGACY_SEMANTIC_SNAPSHOT_CORRUPT';
   }
   assert(corruptRejected, 'corrupt semantic snapshot rejected');
-  const nodesAfterFailure = database.prepare('SELECT COUNT(*) AS count FROM resource_nodes WHERE workspace_id = ?')
-    .get(workspaceId) as { count: number };
-  assert(nodesAfterFailure.count === 2, 'corrupt semantic snapshot preserves existing graph');
+  assert(await readFile(first.backupPath!, 'utf8') === await readFile(sourcePath, 'utf8'), 'corrupt semantic snapshot preserves source archive');
 }
 
 function verifyDurableRepositories(
@@ -436,44 +433,34 @@ function verifyChecksumReanchorScope(scratchDir: string): void {
 
   // 重锚只改账本、不重跑 SQL：数据必须留存。
   const dataKept = join(scratchDir, 'reanchor-data.db');
-  const seeded = openAppDatabase(dataKept);
+  const historicalAppSchema = APP_DB_MIGRATIONS.filter(migration => migration.id <= 3);
+  const seeded = openMigratedDatabase(dataKept, historicalAppSchema);
   seeded.prepare(
     "INSERT INTO app_settings (setting_key, value_json, updated_at) VALUES ('k','1','t')"
   ).run();
   seeded.close();
   setChecksum(dataKept, entry.id, entry.fromChecksum);
-  const reopened = openAppDatabase(dataKept);
+  const reopened = openMigratedDatabase(dataKept, historicalAppSchema);
   const kept = reopened.prepare('SELECT COUNT(*) AS count FROM app_settings').get() as { count: number };
   reopened.close();
   assert(kept.count === 1, 'reanchor keeps existing rows (SQL not re-run)');
 }
 
 /**
- * 全新 app 库必须拿到 id 2 建的全部对象。
- *
- * 这一条守的是一个具体的踩坑:补回 id 2 时本打算写空占位（只为抬版本），
- * 那会让既有库正常而**全新库缺 5 张表** —— 症状是新用户一用 AI 就崩，
- * 老用户毫无察觉。
+ * Current app schema retains production provider usage and retires dead AI tables.
  */
 function verifyFreshAppSchemaComplete(path: string): void {
   const db = openAppDatabase(path);
   try {
-    for (const table of ['app_settings', 'app_agent_runs', 'agent_steps', 'tool_calls',
-      'outbound_context_items', 'provider_usage_events']) {
-      assert(tableExists(db, table), `fresh app.db has ${table}`);
+    for (const table of ['app_settings', 'app_agent_runs', 'agent_steps', 'tool_calls', 'outbound_context_items']) {
+      assert(!tableExists(db, table), `fresh app.db retired ${table}`);
     }
-    const columns = (db.pragma('table_info(ai_messages)') as Array<{ name?: unknown }>)
-      .map((column) => column.name);
-    for (const column of ['expires_at', 'redaction_summary', 'provider_response_id']) {
-      assert(columns.includes(column), `fresh app.db ai_messages.${column}`);
-    }
+    assert(tableExists(db, 'provider_usage_events'), 'fresh app.db provider usage');
     const indexes = db.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'"
     ).all() as Array<{ name: string }>;
     const names = indexes.map((row) => row.name);
-    for (const index of ['idx_ai_messages_expires', 'idx_app_agent_runs_conversation_created',
-      'idx_tool_calls_run_created', 'idx_provider_usage_service_created',
-      'idx_provider_usage_session_call']) {
+    for (const index of ['idx_provider_usage_service_created', 'idx_provider_usage_session_call']) {
       assert(names.includes(index), `fresh app.db index ${index}`);
     }
     const version = Number(db.pragma('user_version', { simple: true }));

@@ -277,17 +277,6 @@ function firstVersion(record: Record<string, unknown>, parent: EvidenceVersion |
   };
 }
 
-function domainFromTool(toolName: string | undefined): string {
-  if (!toolName) return 'evidence';
-  if (/param/i.test(toolName)) return 'param';
-  if (/fmg|text/i.test(toolName)) return 'fmg';
-  if (/emevd|event/i.test(toolName)) return 'emevd';
-  if (/tae|animation/i.test(toolName)) return 'tae';
-  if (/map|msb/i.test(toolName)) return 'map';
-  if (/lua|script/i.test(toolName)) return 'script';
-  return 'evidence';
-}
-
 function collectionItems(record: Record<string, unknown>): unknown[] {
   for (const key of ['claims', 'fields', 'entries', 'rows', 'events', 'parts', 'entities', 'items', 'hits', 'matches']) {
     if (Array.isArray(record[key])) return record[key];
@@ -412,7 +401,11 @@ export function projectEvidenceClaims(
     if (!item) continue;
     const itemIdentity = asRecord(item.identity);
     const record = itemIdentity ? { ...item, ...itemIdentity } : item;
-    const objectHandle = firstString(record, [
+    const objectHandle = firstString(record, ['objectHandle', 'objectKey', 'snapshotObjectHandle'])
+      // TAE animation IDs repeat across sections and across sibling events.
+      // Its canonical event URI carries both dimensions; a bare animId does not.
+      ?? (domain === 'tae' ? firstString(record, ['uri', 'address']) : undefined)
+      ?? firstString(record, [
       'objectHandle', 'objectKey', 'snapshotObjectHandle', 'rowId', 'eventId',
       'textId', 'entityId', 'animId', 'id', 'uri', 'address'
     ]) ?? rootHandle;

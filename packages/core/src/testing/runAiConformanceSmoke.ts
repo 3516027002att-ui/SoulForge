@@ -1,3 +1,4 @@
+import { createSmokeTemporaryDirectory as mkdtemp } from './harness/smokeWorkspace.js';
 /**
  * Smoke: AI dual-protocol error/cancel/timeout/limit conformance matrix
  * + W-AI-CONFORMANCE-03 real-workspace typed mutation write matrix.
@@ -23,7 +24,7 @@
  * - cancellation on the write path never commits
  * - output token budget stops the write path before commit
  * - timeout on the write path never executes tools
- * - full permission still passes the evidence gate and surfaces
+ * - full permission still crosses explicit approval and surfaces
  *   PATCH_ENGINE_REQUIRED refusals instead of bypassing executeTool
  * - policy gate unit matrix (deny / require_confirmation / receipt / full)
  *
@@ -56,7 +57,7 @@
  *   rejected by assertNoSecretLeak via the shared patterns
  *
  * Codex-derived kernel additions (42-53), design reference openai/codex
- * (Apache-2.0, see licenses/openai-codex.txt):
+ * (Apache-2.0 upstream; https://github.com/openai/codex; attribution in NOTICE):
  * - retry policy: exponential backoff math, jitter bounds, Retry-After
  *   precedence, delay cap, attempt cap, retryable whitelist, decideRetry
  * - loop retry: two 500s then success (3 hits, 2 audit retries, retry
@@ -95,12 +96,12 @@
  * service availability or native mutation authority.
  */
 
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { IndexedFile, TypedToolResult } from '@soulforge/shared';
+import { createOpaqueCursor, type IndexedFile, type TypedToolResult } from '@soulforge/shared';
 import {
   ScaffoldToolRegistry,
   createScaffoldToolRegistry,
@@ -144,7 +145,7 @@ import {
   validateToolInput,
   type ToolContext
 } from '../ai/toolRegistry.js';
-import { createAgentToolBridge, MAX_BOUNDED_TOOL_RESULT_CHARS } from '../ai/agentToolBridge.js';
+import { createAgentToolBridge, MAX_BOUNDED_TOOL_RESULT_BYTES, MAX_BOUNDED_TOOL_RESULT_CHARS } from '../ai/agentToolBridge.js';
 import { searchEventReference } from '../ai/eventReference.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import {
@@ -161,6 +162,7 @@ import type {
   AgentRunResult,
   ContextEvidenceSource,
   ModelCompleteRequest,
+  ModelCompleteResult,
   ModelServiceConfig,
   ProviderUsageSample,
   ToolCall,
@@ -170,6 +172,15 @@ import type {
 
 /** 模型列表与 loop 无关：本套件的 mock adapter 统一用空列表 stub。 */
 const fakeListModels: ModelServiceAdapter['listModels'] = async () => ({ ok: true, models: [] });
+
+/** Deterministic fixtures declare conservative output accounting; absent
+ * provider usage must not silently become a free multi-round request. */
+function fixtureCompletion(result: ModelCompleteResult): ModelCompleteResult {
+  return {
+    ...result,
+    usage: { inputTokens: 10, outputTokens: Math.max(1, Buffer.byteLength(JSON.stringify(result.message), 'utf8')) }
+  };
+}
 
 function listen(server: Server): Promise<number> {
   return new Promise((resolve) => {
@@ -340,7 +351,7 @@ function createMatrixExecutor(
     try {
       args = JSON.parse(call.argumentsJson);
     } catch {
-      // leave empty args — the evidence gate applies upstream
+      // The registry owns shape/state diagnostics for the parsed request.
     }
     const result = await registry.executeToolThroughPolicy(call.name, args, ctx);
     if (onResult) await onResult(call.name, result);
@@ -487,6 +498,7 @@ async function runScriptedMatrix(
     maxTotalOutputTokens?: number;
     contextBroker?: import('../model-services/types.js').ContextBroker;
     contextBrokerOptions?: import('../model-services/types.js').ContextBrokerOptions;
+    requestApproval?: import('../model-services/types.js').AgentRunRequest['requestApproval'];
   }
 ): Promise<{ run: AgentRunResult; requestCount: number; history: Array<{ messages: unknown[] }> }> {
   const server = await startScriptedServer(script);
@@ -512,6 +524,9 @@ async function runScriptedMatrix(
       messages: [{ role: 'user', content: 'execute the scripted task' }],
       tools: options.tools,
       permissionMode: options.mode,
+      // These deterministic write scenarios model a host that approves the
+      // concrete stage/commit requests. Full mode still crosses this boundary.
+      requestApproval: options.requestApproval ?? (async () => ({ decision: 'once' })),
       executeTool: options.executeTool,
       ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
@@ -530,6 +545,7 @@ async function runScriptedMatrix(
 async function main(): Promise<void> {
   let passed = 0;
   const total = 70;
+  const taskVerdicts: Array<{ case: string; engineFinish: string; task: 'verified' | 'blocked' | 'unverified'; basis: string }> = [];
   let targetInstructionTrace: {
     steps: number;
     finishReason: string;
@@ -714,6 +730,7 @@ async function main(): Promise<void> {
   // --- Case 8: Output token budget exceeded in agent loop ---
   {
     let callCount = 0;
+    let executedReads = 0;
     const server = createServer((_req, res) => {
       callCount++;
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -751,13 +768,18 @@ async function main(): Promise<void> {
         config,
         apiKey: 'sk-test',
         messages: [{ role: 'user', content: 'search' }],
-        tools: [{ name: 'search_workspace', description: 'search', parametersJsonSchema: {} }],
+        tools: [{ name: 'search_workspace', description: 'search', permissionLevel: 'read', parametersJsonSchema: {} }],
         permissionMode: 'normal',
-        executeTool: async (call: ToolCall) => ({ ok: true, content: `result for ${call.name}` }),
+        executeTool: async (call: ToolCall) => {
+          executedReads += 1;
+          return { ok: true, content: `result for ${call.name}` };
+        },
         maxTotalOutputTokens: 800
       });
-      if (!result.diagnostics.some((d) => d.code === 'MODEL_SERVICE_OUTPUT_BUDGET_EXCEEDED')) {
-        throw new Error('expected OUTPUT_BUDGET_EXCEEDED diagnostic');
+      if (result.finishReason !== 'error' || callCount !== 2 || executedReads !== 1
+        || result.audit.toolCalls.length !== 1
+        || !result.diagnostics.some((d) => d.code === 'AGENT_PROVIDER_OUTPUT_BUDGET_EXCEEDED')) {
+        throw new Error('Case 8: provider overrun must stop within two requests and preserve only the completed read.');
       }
       passed++;
     } finally {
@@ -843,6 +865,10 @@ async function main(): Promise<void> {
       }
       if (run.finishReason !== 'stop') throw new Error(`Case 11: expected stop, got ${run.finishReason}`);
       if (run.audit.toolCalls.length !== 6) throw new Error('Case 11: audit toolCalls mismatch');
+      if (run.audit.approvals?.map((approval) => `${approval.name}:${approval.decision}`).join(',')
+        !== 'patch.stage:once,patch.commit:once') {
+        throw new Error('Case 11: full mode must retain concrete stage/commit approvals.');
+      }
       // Re-read after commit must observe the committed content.
       const toolContents = run.messages.filter((m) => m.role === 'tool').map((m) => m.content);
       if (!toolContents[toolContents.length - 1]!.includes('ai-committed')) {
@@ -862,6 +888,7 @@ async function main(): Promise<void> {
       ]) {
         if (!kinds.includes(expected)) throw new Error(`Case 11: missing audit event ${expected}`);
       }
+      taskVerdicts.push({ case: '11', engineFinish: run.finishReason, task: 'verified', basis: 'Committed bytes, post-commit reread and transaction audit all agree.' });
       assertNoSecretLeak({ messages: run.messages, audit: run.audit, log: ctx.auditLog!.list() }, 'sk-test');
       passed++;
     } finally {
@@ -884,17 +911,7 @@ async function main(): Promise<void> {
         } catch {
           // leave empty
         }
-        let result = await registry.executeToolThroughPolicy(call.name, args, ctx);
-        // Simulate the user confirmation flow: the refused commit is retried
-        // after the session escalates; both decisions stay in the audit log.
-        if (call.name === 'patch.commit'
-          && !result.ok
-          && (result.policyDecision.kind === 'deny' || result.policyDecision.kind === 'require_confirmation')
-          && ctx.mode === 'normal') {
-          commitFirstDenied = true;
-          ctx.mode = 'fullPermission';
-          result = await registry.executeToolThroughPolicy(call.name, args, ctx);
-        }
+        const result = await registry.executeToolThroughPolicy(call.name, args, ctx);
         const errorDiagnostic = result.diagnostics.find((item) => item.severity === 'error');
         const code = result.ok
           ? undefined
@@ -913,7 +930,22 @@ async function main(): Promise<void> {
       const { run } = await runScriptedMatrix(script, {
         mode: 'normal',
         tools: listMatrixTools(registry),
-        executeTool
+        executeTool,
+        requestApproval: async (approval) => {
+          if (approval.toolName === 'patch.commit') {
+            // A host confirmation establishes the receipt before dispatch.
+            // The prior registry refusal and later allowance remain auditable.
+            const refused = await registry.executeToolThroughPolicy(
+              approval.toolName, JSON.parse(approval.argumentsJson), ctx
+            );
+            commitFirstDenied = !refused.ok && refused.policyDecision.kind === 'require_confirmation';
+            if (!commitFirstDenied || (await readFile(notePath, 'utf8')) !== 'original\n') {
+              throw new Error('Case 12: commit must remain unexecuted before confirmation.');
+            }
+            ctx.confirmationReceiptIds = ['case12-host-confirmation'];
+          }
+          return { decision: 'once' };
+        }
       });
       if (!commitFirstDenied) throw new Error('Case 12: normal-mode commit must be refused first.');
       if ((await readFile(notePath, 'utf8')) !== 'confirmed-commit\n') {
@@ -930,8 +962,11 @@ async function main(): Promise<void> {
       if (!commitDecisions.includes('POLICY_DENIED') && !commitDecisions.includes('POLICY_CONFIRMATION_REQUIRED')) {
         throw new Error('Case 12: missing POLICY_DENIED or POLICY_CONFIRMATION_REQUIRED decision.');
       }
-      if (!commitDecisions.includes('POLICY_ALLOW_FULL_PERMISSION')) {
+      if (!commitDecisions.includes('POLICY_ALLOW') || ctx.mode !== 'normal') {
         throw new Error('Case 12: missing confirmation-granted decision.');
+      }
+      if (run.audit.approvals?.find((approval) => approval.name === 'patch.commit')?.decision !== 'once') {
+        throw new Error('Case 12: host commit confirmation missing from the run audit.');
       }
       if (executed.length !== 4 || !executed[3]!.ok) {
         throw new Error(`Case 12: expected 4 ok tool calls, got ${JSON.stringify(executed)}`);
@@ -1093,9 +1128,6 @@ async function main(): Promise<void> {
         signal: controller.signal
       });
       if (run.finishReason !== 'cancelled') throw new Error(`Case 16: expected cancelled, got ${run.finishReason}`);
-      if (!run.diagnostics.some((d) => d.code === 'AGENT_CANCELLED')) {
-        throw new Error('Case 16: missing AGENT_CANCELLED diagnostic.');
-      }
       if ((await readFile(notePath, 'utf8')) !== 'original\n') {
         throw new Error('Case 16: cancelled run must not commit.');
       }
@@ -1104,6 +1136,10 @@ async function main(): Promise<void> {
       }
       if (run.audit.toolCalls.some((call) => call.name === 'patch.commit')) {
         throw new Error('Case 16: commit must not appear in the audit.');
+      }
+      const transactionFacts = ctx.auditLog!.list().map((entry) => entry.eventKind as string);
+      if (!transactionFacts.includes('staging_created') || transactionFacts.includes('commit')) {
+        throw new Error('Case 16: cancellation must preserve completed staging and absence of commit.');
       }
       passed++;
     } finally {
@@ -1128,9 +1164,9 @@ async function main(): Promise<void> {
         executeTool,
         maxTotalOutputTokens: 700
       });
-      if (run.finishReason !== 'length') throw new Error(`Case 17: expected length, got ${run.finishReason}`);
-      if (!run.diagnostics.some((d) => d.code === 'MODEL_SERVICE_OUTPUT_BUDGET_EXCEEDED')) {
-        throw new Error('Case 17: missing OUTPUT_BUDGET_EXCEEDED diagnostic.');
+      if (run.finishReason !== 'error') throw new Error(`Case 17: expected provider budget error, got ${run.finishReason}`);
+      if (!run.diagnostics.some((d) => d.code === 'AGENT_PROVIDER_OUTPUT_BUDGET_EXCEEDED')) {
+        throw new Error('Case 17: missing provider output budget diagnostic.');
       }
       if (executed.length !== 1 || executed[0]!.name !== 'patch.proposeTextEdit') {
         throw new Error(`Case 17: budget must stop before stage, got ${JSON.stringify(executed)}`);
@@ -1175,9 +1211,11 @@ async function main(): Promise<void> {
         executeTool,
         timeoutMs: 100
       });
-      if (run.finishReason !== 'error') throw new Error(`Case 18: expected error, got ${run.finishReason}`);
-      if (!run.diagnostics.some((d) => d.code === 'MODEL_SERVICE_TIMEOUT')) {
-        throw new Error('Case 18: missing TIMEOUT diagnostic.');
+      if (!['cancelled', 'error'].includes(run.finishReason)) {
+        throw new Error(`Case 18: expected terminal timeout, got ${run.finishReason}`);
+      }
+      if (!run.diagnostics.some((d) => d.code === 'MODEL_SERVICE_TIMEOUT' || d.code === 'AGENT_CANCELLED')) {
+        throw new Error('Case 18: expected provider timeout or finite run deadline diagnostic.');
       }
       if (executed.length !== 0) throw new Error('Case 18: no tool may execute on timeout.');
       if ((await readFile(notePath, 'utf8')) !== 'original\n') {
@@ -2204,6 +2242,7 @@ async function main(): Promise<void> {
         tools: [],
         permissionMode: 'normal',
         executeTool: async () => ({ ok: false, content: 'unused' }),
+        sampling: { maxTokens: 4096 },
         retryPolicy: { baseDelayMs: 1, maxAttempts: 4 },
         onEvent: (event) => {
           events.push(event);
@@ -2277,7 +2316,7 @@ async function main(): Promise<void> {
         seenRequests.push({ ...request, messages: [...request.messages] });
         turn += 1;
         if (turn === 1) {
-          return {
+          return fixtureCompletion({
             message: {
               role: 'assistant',
               content: '',
@@ -2288,10 +2327,10 @@ async function main(): Promise<void> {
             },
             finishReason: 'tool_use',
             diagnostics: []
-          };
+          });
         }
         if (turn === 2) {
-          return {
+          return fixtureCompletion({
             message: {
               role: 'assistant',
               content: '',
@@ -2299,9 +2338,9 @@ async function main(): Promise<void> {
             },
             finishReason: 'tool_use',
             diagnostics: []
-          };
+          });
         }
-        return { message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] };
+        return fixtureCompletion({ message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] });
       },
       async *stream() {
         throw new Error('unused');
@@ -2316,9 +2355,9 @@ async function main(): Promise<void> {
     const executed: string[] = [];
     const events: AgentEvent[] = [];
     const tools: ToolDefinition[] = [
-      { name: 'read_a', description: 'r', parametersJsonSchema: { type: 'object' }, supportsParallel: true },
-      { name: 'read_b', description: 'r', parametersJsonSchema: { type: 'object' }, supportsParallel: true },
-      { name: 'write_c', description: 'w', parametersJsonSchema: { type: 'object' } }
+      { name: 'read_a', description: 'r', permissionLevel: 'read', parametersJsonSchema: { type: 'object' }, supportsParallel: true },
+      { name: 'read_b', description: 'r', permissionLevel: 'read', parametersJsonSchema: { type: 'object' }, supportsParallel: true },
+      { name: 'write_c', description: 'w', permissionLevel: 'commit', parametersJsonSchema: { type: 'object' } }
     ];
     const result = await runAgentToolLoop(fakeAdapter, {
       config: makeConfig(9, 'openai-compatible'),
@@ -2326,6 +2365,7 @@ async function main(): Promise<void> {
       messages: [{ role: 'user', content: 'go' }],
       tools,
       permissionMode: 'normal',
+      requestApproval: async () => ({ decision: 'once' }),
       executeTool: async (call) => {
         executed.push(call.name);
         active += 1;
@@ -2366,12 +2406,12 @@ async function main(): Promise<void> {
       .filter((message) => message.role === 'tool');
     if (secondRequestTools.length !== 2
       || !secondRequestTools[0]?.content.includes('read_a-result')
-      || !secondRequestTools[1]?.content.includes('TOOL_EXECUTION_THROWN')
+      || !secondRequestTools[1]?.content.includes('TOOL_EXECUTION_FAILED')
       || secondRequestTools[1]?.content.includes('sk-should-be-redacted')) {
       throw new Error(`Case 46: rejected sibling was not normalized/redacted in order: ${JSON.stringify(secondRequestTools)}`);
     }
     const failedAudit = result.audit.toolCalls.find((entry) => entry.name === 'read_b');
-    if (failedAudit?.ok !== false || failedAudit.code !== 'TOOL_EXECUTION_THROWN') {
+    if (failedAudit?.ok !== false || failedAudit.code !== 'TOOL_EXECUTION_FAILED') {
       throw new Error(`Case 46: rejected sibling audit missing: ${JSON.stringify(failedAudit)}`);
     }
     const begins = events.flatMap((event) => (event.type === 'tool-call-begin' ? [event.callId] : []));
@@ -2380,7 +2420,7 @@ async function main(): Promise<void> {
       throw new Error(`Case 46: tool span events wrong: begins=${begins.join(',')} ends=${ends.join(',')}`);
     }
     const rejectedEnd = events.find((event) => event.type === 'tool-call-end' && event.callId === 'call-b');
-    if (rejectedEnd?.type !== 'tool-call-end' || rejectedEnd.code !== 'TOOL_EXECUTION_THROWN') {
+    if (rejectedEnd?.type !== 'tool-call-end' || rejectedEnd.code !== 'TOOL_EXECUTION_FAILED') {
       throw new Error(`Case 46: rejected sibling end event missing: ${JSON.stringify(rejectedEnd)}`);
     }
     passed++;
@@ -2413,6 +2453,7 @@ async function main(): Promise<void> {
         permissionMode: 'normal',
         executeTool: async () => ({ ok: false, content: 'unused' }),
         streaming: true,
+        sampling: { maxTokens: 4096 },
         onEvent: (event) => {
           events.push(event);
         }
@@ -2463,7 +2504,7 @@ async function main(): Promise<void> {
       const seenCalls: ToolCall[] = [];
       const events: AgentEvent[] = [];
       const tools: ToolDefinition[] = [
-        { name: 'read_s', description: 'r', parametersJsonSchema: { type: 'object' } }
+        { name: 'read_s', description: 'r', permissionLevel: 'read', parametersJsonSchema: { type: 'object' } }
       ];
       const result = await runAgentToolLoop(adapter, {
         config: makeConfig(port, 'openai-compatible'),
@@ -2476,6 +2517,7 @@ async function main(): Promise<void> {
           return { ok: true, content: 's-result' };
         },
         streaming: true,
+        sampling: { maxTokens: 4096 },
         onEvent: (event) => {
           events.push(event);
         }
@@ -2526,6 +2568,7 @@ async function main(): Promise<void> {
         permissionMode: 'normal',
         executeTool: async () => ({ ok: false, content: 'unused' }),
         streaming: true,
+        sampling: { maxTokens: 4096 },
         retryPolicy: { baseDelayMs: 1 }
       });
       if (result.finishReason !== 'stop') throw new Error(`Case 49: expected stop, got ${result.finishReason}`);
@@ -2550,7 +2593,7 @@ async function main(): Promise<void> {
       async complete() {
         turn += 1;
         if (turn === 1) {
-          return {
+          return fixtureCompletion({
             message: {
               role: 'assistant',
               content: `leak ${secret} here`,
@@ -2558,9 +2601,9 @@ async function main(): Promise<void> {
             },
             finishReason: 'tool_use',
             diagnostics: []
-          };
+          });
         }
-        return { message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] };
+        return fixtureCompletion({ message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] });
       },
       async *stream() {
         throw new Error('unused');
@@ -2575,7 +2618,7 @@ async function main(): Promise<void> {
       permissionMode: 'normal'
     });
     const tools: ToolDefinition[] = [
-      { name: 'read_r', description: 'r', parametersJsonSchema: { type: 'object' } }
+      { name: 'read_r', description: 'r', permissionLevel: 'read', parametersJsonSchema: { type: 'object' } }
     ];
     const result = await runAgentToolLoop(fakeAdapter, {
       config: makeConfig(9, 'openai-compatible'),
@@ -2696,13 +2739,13 @@ async function main(): Promise<void> {
         requests.push({ ...request, messages: [...request.messages] });
         const last = request.messages[request.messages.length - 1];
         if (callNo === 1 && last?.content === DEFAULT_SUMMARIZATION_PROMPT) {
-          return {
+          return fixtureCompletion({
             message: { role: 'assistant', content: '摘要：任务X 已完成。' },
             finishReason: 'stop',
             diagnostics: []
-          };
+          });
         }
-        return { message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] };
+        return fixtureCompletion({ message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] });
       },
       async *stream() {
         throw new Error('unused');
@@ -2799,13 +2842,13 @@ async function main(): Promise<void> {
       async complete(request) {
         const last = request.messages[request.messages.length - 1];
         if (last?.content === DEFAULT_SUMMARIZATION_PROMPT) {
-          return {
+          return fixtureCompletion({
             message: { role: 'assistant', content: '' },
             finishReason: 'error',
             diagnostics: [{ severity: 'error', code: 'MODEL_SERVICE_SERVER_ERROR', message: 'summary unavailable' }]
-          };
+          });
         }
-        return { message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] };
+        return fixtureCompletion({ message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] });
       },
       async *stream() {
         throw new Error('unused');
@@ -2849,7 +2892,7 @@ async function main(): Promise<void> {
         overflowRequests.push({ ...request, messages: [...request.messages] });
         const last = request.messages[request.messages.length - 1];
         if (callNo === 1) {
-          return {
+          return fixtureCompletion({
             message: { role: 'assistant', content: '' },
             finishReason: 'error',
             diagnostics: [{
@@ -2857,16 +2900,16 @@ async function main(): Promise<void> {
               code: 'MODEL_SERVICE_HTTP_ERROR',
               message: "This model's maximum context length is 128000 tokens. However, your messages resulted in 132000 tokens."
             }]
-          };
+          });
         }
         if (last?.content === DEFAULT_SUMMARIZATION_PROMPT) {
-          return {
+          return fixtureCompletion({
             message: { role: 'assistant', content: '摘要：溢出恢复。' },
             finishReason: 'stop',
             diagnostics: []
-          };
+          });
         }
-        return { message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] };
+        return fixtureCompletion({ message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] });
       },
       async *stream() {
         throw new Error('unused');
@@ -2920,13 +2963,13 @@ async function main(): Promise<void> {
         requests.push({ ...request, messages: [...request.messages] });
         const last = request.messages[request.messages.length - 1];
         if (last?.content === DEFAULT_SUMMARIZATION_PROMPT) {
-          return {
+          return fixtureCompletion({
             message: { role: 'assistant', content: '摘要' },
             finishReason: 'stop',
             diagnostics: []
-          };
+          });
         }
-        return { message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] };
+        return fixtureCompletion({ message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] });
       },
       async *stream() {
         throw new Error('unused');
@@ -3094,7 +3137,7 @@ async function main(): Promise<void> {
       run: () => ({
         ok: true,
         data: {
-          hits: Array.from({ length: 240 }, (_item, index) => ({
+          hits: Array.from({ length: 120 }, (_item, index) => ({
             chunk: {
               chunkId: `text-chunk-${index}`,
               sourceUri: `file://synthetic/menu-${index}.fmg`,
@@ -3109,13 +3152,17 @@ async function main(): Promise<void> {
             reasons: ['phrase:鬼刑部']
           })),
           totalHits: 240,
+          offset: 0,
+          limit: 120,
+          returned: 120,
+          truncated: true,
           nextCursor: 'text-page-2'
         }
       })
     });
     const boundedBridge = createAgentToolBridge({
       registry: boundedRegistry,
-      context: { workspaceIndex: {} as never, mode: 'normal' }
+      context: { workspaceIndex: new WorkspaceIndex('ws-bounded-envelope'), mode: 'normal' }
     });
     const bounded = await boundedBridge.executeTool({
       id: 'bounded-search',
@@ -3123,37 +3170,137 @@ async function main(): Promise<void> {
       argumentsJson: '{"query":"npc"}'
     });
     if (!bounded.ok || bounded.content.length > MAX_BOUNDED_TOOL_RESULT_CHARS
-      || !bounded.content.includes('"truncated":true')
+      || Buffer.byteLength(bounded.content, 'utf8') > MAX_BOUNDED_TOOL_RESULT_BYTES
       || !bounded.content.includes('page-2')
       || !bounded.content.includes('resource-0')) {
       throw new Error(`Case 54: discovery result must be bounded with IDs/cursor: ${bounded.content.length}`);
     }
-    assertStableToolEnvelope(bounded.content, 'Case 54 large discovery result', true);
+    const boundedEnvelope = assertStableToolEnvelope(bounded.content, 'Case 54 complete discovery page', false);
+    const boundedRecord = (boundedEnvelope.data as { record: Record<string, unknown> }).record;
+    const boundedItems = boundedRecord.items as Array<{ sourceUri: string }>;
+    const boundedPagination = boundedEnvelope.pagination as Record<string, unknown>;
+    if (boundedEnvelope.completeness !== 'complete'
+      || boundedItems.length !== 400
+      || boundedItems.some((item, index) => item.sourceUri !== `file://resource-${index}.param`)
+      || boundedPagination.returnedCount !== 400
+      || boundedPagination.deliveryTruncated !== false) {
+      throw new Error('Case 54: the fitting logical discovery page must preserve all 400 candidates.');
+    }
+    if ((boundedPagination.cursors as Record<string, unknown>).nextCursor !== 'page-2') {
+      throw new Error('Case 54: complete discovery page lost its independent next cursor.');
+    }
+
+    // An actual oversized logical page must fail before any candidate prefix
+    // is advertised as the full page. Retry the current cursor with a smaller
+    // limit; the producer's next-page cursor is a separate continuation.
+    const oversizedCursor = createOpaqueCursor({ sessionId: 'case54-page', offset: 2000, sourceHash: 'fixture-hash', domain: 'param', scope: 'fixture-case54-page' });
+    const oversizedNextCursor = createOpaqueCursor({ sessionId: 'case54-page', offset: 4000, sourceHash: 'fixture-hash', domain: 'param', scope: 'fixture-case54-page' });
+    const oversizedRegistry = new ToolRegistry();
+    oversizedRegistry.register({
+      name: 'search_resources', description: 'oversized logical discovery page',
+      permission: 'read', permissionLevel: 'read',
+      inputSchema: { query: 'string', cursor: 'string?', limit: 'number?' },
+      run: (input) => {
+        const limit = (input as { limit: number }).limit;
+        return { ok: true, data: {
+          items: Array.from({ length: limit }, (_item, index) => ({
+            sourceUri: `file://synthetic/large-resource-${2000 + index}.param`
+          })),
+          offset: 2000, limit, returned: limit, total: 6000, truncated: true,
+          nextCursor: createOpaqueCursor({ sessionId: 'case54-page', offset: 2000 + limit, sourceHash: 'fixture-hash', domain: 'param', scope: 'fixture-case54-page' })
+        } };
+      }
+    });
+    const oversizedBridge = createAgentToolBridge({
+      registry: oversizedRegistry,
+      context: { workspaceIndex: new WorkspaceIndex('ws-oversized-envelope'), mode: 'normal' }
+    });
+    const oversizedPage = await oversizedBridge.executeTool({
+      id: 'oversized-page', name: 'search_resources',
+      argumentsJson: JSON.stringify({ query: 'npc', cursor: oversizedCursor, limit: 2000 })
+    });
+    const oversizedEnvelope = JSON.parse(oversizedPage.content) as {
+      error?: { code?: string; details?: { retry?: Record<string, unknown>; currentPage?: { cursor?: string }; nextPageCursor?: string } };
+    };
+    const retry = oversizedEnvelope.error?.details?.retry;
+    if (oversizedPage.ok || oversizedPage.code !== 'RESULT_DISCOVERY_WINDOW_TOO_LARGE'
+      || oversizedEnvelope.error?.code !== 'RESULT_DISCOVERY_WINDOW_TOO_LARGE'
+      || oversizedPage.content.length > MAX_BOUNDED_TOOL_RESULT_CHARS
+      || Buffer.byteLength(oversizedPage.content, 'utf8') > MAX_BOUNDED_TOOL_RESULT_BYTES
+      || retry?.query !== 'npc' || retry.cursor !== oversizedCursor || retry.limit !== 1000
+      || oversizedEnvelope.error?.details?.currentPage?.cursor !== oversizedCursor) {
+      throw new Error(`Case 54: oversized logical page must retry its current cursor: ${oversizedPage.content}`);
+    }
+    if (oversizedEnvelope.error?.details?.nextPageCursor !== oversizedNextCursor) {
+      throw new Error('Case 54: oversized page must preserve the next-page cursor independently of retry.');
+    }
+    const retryPage = await oversizedBridge.executeTool({
+      id: 'oversized-page-retry', name: 'search_resources', argumentsJson: JSON.stringify(retry)
+    });
+    if (!retryPage.ok || retryPage.content.length > MAX_BOUNDED_TOOL_RESULT_CHARS
+      || Buffer.byteLength(retryPage.content, 'utf8') > MAX_BOUNDED_TOOL_RESULT_BYTES) {
+      throw new Error(`Case 54: smaller current-page retry must fit the envelope budget: ${retryPage.content.length}`);
+    }
+    const retryEnvelope = assertStableToolEnvelope(retryPage.content, 'Case 54 smaller current-page retry', true);
+    const retryItems = (retryEnvelope.data as { record: { items: Array<{ sourceUri: string }> } }).record.items;
+    const retryPagination = retryEnvelope.pagination as Record<string, unknown>;
+    if (retryItems.length !== 1000
+      || retryItems.some((item, index) => item.sourceUri !== `file://synthetic/large-resource-${2000 + index}.param`)
+      || retryPagination.offset !== 2000 || retryPagination.limit !== 1000
+      || retryPagination.returnedCount !== 1000 || retryPagination.totalCount !== 6000
+      || retryPagination.truncated !== true || retryPagination.deliveryTruncated !== false
+      || retryEnvelope.completeness !== 'windowed') {
+      throw new Error('Case 54: retry must deliver its whole logical page with honest window metadata.');
+    }
+    const retryNextCursor = createOpaqueCursor({ sessionId: 'case54-page', offset: 3000, sourceHash: 'fixture-hash', domain: 'param', scope: 'fixture-case54-page' });
+    if ((retryPagination.cursors as Record<string, unknown>).nextCursor !== retryNextCursor) {
+      throw new Error('Case 54: retry continuation must start after the whole smaller delivered page.');
+    }
     const boundedText = await boundedBridge.executeTool({
       id: 'bounded-text',
       name: 'search_text_entries',
       argumentsJson: '{"query":"鬼刑部"}'
     });
     if (!boundedText.ok || boundedText.content.length > MAX_BOUNDED_TOOL_RESULT_CHARS
+      || Buffer.byteLength(boundedText.content, 'utf8') > MAX_BOUNDED_TOOL_RESULT_BYTES
       || !boundedText.content.includes('text-page-2')
       || !boundedText.content.includes('sourceUri')
       || !boundedText.content.includes('textId')
       || !boundedText.content.includes('鬼刑部')) {
       throw new Error(`Case 54: bounded text discovery must preserve native-read candidates: ${boundedText.content.length}`);
     }
-    assertStableToolEnvelope(boundedText.content, 'Case 54 bounded text candidate', true);
+    const textPageEnvelope = assertStableToolEnvelope(boundedText.content, 'Case 54 bounded text candidate', true);
+    const textPageHits = (textPageEnvelope.data as { record: { hits: Array<{ chunk: { textId: number; sourceUri: string } }> } }).record.hits;
+    const textPagePagination = textPageEnvelope.pagination as Record<string, unknown>;
+    if (textPageHits.length !== 120
+      || textPageHits.some((hit, index) => hit.chunk.textId !== 900000 + index || hit.chunk.sourceUri !== `file://synthetic/menu-${index}.fmg`)
+      || textPagePagination.returnedCount !== 120 || textPagePagination.totalCount !== 240
+      || textPagePagination.deliveryTruncated !== false) {
+      throw new Error('Case 54: text logical page must preserve every native-read candidate.');
+    }
+    if ((textPagePagination.cursors as Record<string, unknown>).nextCursor !== 'text-page-2') {
+      throw new Error('Case 54: text page lost its independent continuation cursor.');
+    }
     const boundedEmevd = await boundedBridge.executeTool({
       id: 'bounded-emevd',
       name: 'read_emevd_outline',
       argumentsJson: '{"file":"m10_00_00_00.emevd.dcx"}'
     });
     if (!boundedEmevd.ok || boundedEmevd.content.length > MAX_BOUNDED_TOOL_RESULT_CHARS
-      || !boundedEmevd.content.includes('"truncated":true')
+      || Buffer.byteLength(boundedEmevd.content, 'utf8') > MAX_BOUNDED_TOOL_RESULT_BYTES
       || !boundedEmevd.content.includes('event-page-2')
       || !boundedEmevd.content.includes('eventId')) {
       throw new Error(`Case 54: EMEVD outline must be bounded with event IDs/cursor: ${boundedEmevd.content.length}`);
     }
-    assertStableToolEnvelope(boundedEmevd.content, 'Case 54 large EMEVD result', true);
+    const outlineEnvelope = assertStableToolEnvelope(boundedEmevd.content, 'Case 54 complete EMEVD outline', false);
+    const outlineEvents = (outlineEnvelope.data as { record: { events: Array<{ eventId: number }> } }).record.events;
+    if (outlineEnvelope.completeness !== 'complete' || outlineEvents.length !== 300
+      || outlineEvents.some((event, index) => event.eventId !== 1000 + index)) {
+      throw new Error('Case 54: fitting EMEVD outline must preserve all 300 event IDs.');
+    }
+    if (((outlineEnvelope.pagination as Record<string, unknown>).cursors as Record<string, unknown>).nextCursor !== 'event-page-2') {
+      throw new Error('Case 54: EMEVD outline lost its independent continuation cursor.');
+    }
 
     // Exact and fuzzy event queries both return candidates; neither is blocked
     // by a previous text query.
@@ -3206,8 +3353,8 @@ async function main(): Promise<void> {
       || eventSchema.required?.includes('query')) {
       throw new Error(`Case 54: search_events exact schema is wrong: ${JSON.stringify(eventSchema)}`);
     }
-    if (!eventDescriptor?.description.includes('固定结果 envelope')) {
-      throw new Error('Case 54: bounded tool description must document the stable result envelope.');
+    if (eventDescriptor?.description.includes('固定结果 envelope')) {
+      throw new Error('Case 54: common result instructions must be sent once by the host, not repeated in domain descriptions.');
     }
     const exactEvent = await eventBridge.executeTool({
       id: 'exact-event',
@@ -3216,9 +3363,11 @@ async function main(): Promise<void> {
     });
     if (!exactEvent.ok) throw new Error(`Case 54: exact event lookup must remain available: ${exactEvent.content}`);
     const exactEnvelope = assertStableToolEnvelope(exactEvent.content, 'Case 54 exact event result', false);
-    const exactItems = (exactEnvelope.data as { items?: unknown[] }).items ?? [];
-    if (!exactItems.some((item) => (item as { eventId?: number }).eventId === 1000)) {
-      throw new Error(`Case 54: exact event lookup returned no event 1000: ${exactEvent.content}`);
+    const exactItems = (exactEnvelope.data as { items?: Array<{ eventId?: number; sourceUri?: string; uri?: string }> }).items ?? [];
+    if (exactItems.length !== 1 || exactItems[0]?.eventId !== 1000
+      || exactItems[0]?.sourceUri !== eventSourceUri || exactItems[0]?.uri !== 'event://m10_00_00_00/1000'
+      || (exactEnvelope.evidence as { status?: string }).status !== 'candidate') {
+      throw new Error(`Case 54: exact lookup lost event identity/source/candidate status: ${exactEvent.content}`);
     }
     const fuzzyEvent = await eventBridge.executeTool({
       id: 'fuzzy-event',
@@ -3229,13 +3378,14 @@ async function main(): Promise<void> {
       throw new Error(`Case 54: fuzzy event discovery must return candidates without a text gate: ${fuzzyEvent.content}`);
     }
     const fuzzyEnvelope = assertStableToolEnvelope(fuzzyEvent.content, 'Case 54 fuzzy event result', false);
-    const fuzzyItems = (fuzzyEnvelope.data as { items?: unknown[] }).items ?? [];
-    if (!fuzzyItems.some((item) => {
-      const record = item as { eventId?: number; item?: { eventId?: number } };
-      return record.eventId === 1000 || record.item?.eventId === 1000;
-    })
+    const fuzzyMatches = (fuzzyEnvelope.data as {
+      record?: { matches?: Array<{ item?: { eventId?: number; sourceUri?: string; uri?: string } }> }
+    }).record?.matches ?? [];
+    if (fuzzyMatches.length !== 1 || fuzzyMatches[0]?.item?.eventId !== 1000
+      || fuzzyMatches[0]?.item?.sourceUri !== eventSourceUri
+      || fuzzyMatches[0]?.item?.uri !== 'event://m10_00_00_00/1000'
       || (fuzzyEnvelope.evidence as { status?: string }).status !== 'candidate') {
-      throw new Error(`Case 54: fuzzy event result must be a candidate with event 1000: ${fuzzyEvent.content}`);
+      throw new Error(`Case 54: fuzzy lookup lost event identity/source/candidate status: ${fuzzyEvent.content}`);
     }
     // 声明的字段名与类型必须到达模型。此前投影是不带 properties 的空壳,
     // 模型只能猜字段名,猜错拿到的 INVALID_INPUT 又不含正确名字。
@@ -3445,18 +3595,35 @@ async function main(): Promise<void> {
     });
     if (!paramSearch.ok) throw new Error(`Case 54c: PARAM semantic search failed: ${paramSearch.content}`);
     const paramEnvelope = assertStableToolEnvelope(paramSearch.content, 'Case 54c PARAM search', false);
-    const paramData = paramEnvelope.data as { items?: unknown[] };
-    const paramItems = paramData.items as Array<{ item?: {
-      paramName?: string;
-      rowName?: string;
-      fields?: Array<{ fieldId?: string; description?: string }>;
-    } }>;
-    const paramRow = paramItems[0]?.item;
-    if (paramRow?.paramName !== 'NpcParam'
+    const paramMatches = (paramEnvelope.data as { record?: { matches?: Array<{
+      score?: number;
+      highlights?: string[];
+      item?: {
+        uri?: string;
+        sourceUri?: string;
+        paramName?: string;
+        rowId?: number;
+        rowName?: string;
+        fieldPreview?: Array<{ fieldId?: string; name?: string; value?: number }>;
+        readAction?: { tool?: string; args?: { table?: string; rowIds?: number[]; fieldIds?: string[]; containerPath?: string } };
+      };
+    }> } }).record?.matches ?? [];
+    const paramRow = paramMatches[0]?.item;
+    const paramSourceUri = 'file://synthetic/param/NpcParam.param';
+    if (paramMatches.length !== 1 || !(Number(paramMatches[0]?.score) > 0)
+      || !paramMatches[0]?.highlights?.includes('生命值')
+      || paramRow?.paramName !== 'NpcParam' || paramRow.rowId !== 50800000
+      || paramRow.uri !== 'param://NpcParam/50800000' || paramRow.sourceUri !== paramSourceUri
       || paramRow.rowName !== '鬼庭形部雅孝'
-      || paramRow.fields?.[0]?.fieldId !== 'hp'
-      || paramRow.fields?.[0]?.description !== '生命值') {
-      throw new Error(`Case 54c: PARAM row semantic fields were not searchable/projected: ${paramSearch.content}`);
+      || paramRow.fieldPreview?.length !== 1 || paramRow.fieldPreview[0]?.fieldId !== 'hp'
+      || paramRow.fieldPreview[0]?.name !== 'HP' || paramRow.fieldPreview[0]?.value !== 100
+      || paramRow.readAction?.tool !== 'read_param_fields' || paramRow.readAction.args?.table !== 'NpcParam'
+      || JSON.stringify(paramRow.readAction.args?.rowIds) !== '[50800000]'
+      || JSON.stringify(paramRow.readAction.args?.fieldIds) !== '["hp"]'
+      || paramRow.readAction.args?.containerPath !== paramSourceUri
+      || (paramEnvelope.evidence as { status?: string }).status !== 'candidate'
+      || !(paramEnvelope.evidence as { sourceUris?: string[] }).sourceUris?.includes(paramSourceUri)) {
+      throw new Error(`Case 54c: PARAM candidate lost semantic match, row/field/source identity or native read action: ${paramSearch.content}`);
     }
     const filteredOut = await paramBridge.executeTool({
       id: 'param-table-scope',
@@ -3465,8 +3632,12 @@ async function main(): Promise<void> {
     });
     if (!filteredOut.ok) throw new Error(`Case 54c: PARAM table scope query failed: ${filteredOut.content}`);
     const filteredEnvelope = assertStableToolEnvelope(filteredOut.content, 'Case 54c PARAM table scope', false);
-    const filteredData = filteredEnvelope.data as { items?: unknown[] };
-    if ((filteredData.items ?? []).length !== 0) {
+    const filteredRecord = (filteredEnvelope.data as { record?: { source?: string; hits?: unknown[]; totalHits?: number } }).record;
+    if (filteredRecord?.source !== 'rag-fallback' || !Array.isArray(filteredRecord.hits)
+      || filteredRecord.hits.length !== 0 || filteredRecord.totalHits !== 0
+      || (filteredEnvelope.pagination as { totalCount?: number }).totalCount !== 0
+      || (filteredEnvelope.identifiers as unknown[]).length !== 0
+      || (filteredEnvelope.evidence as { status?: string }).status !== 'insufficient_evidence') {
       throw new Error(`Case 54c: paramNames must exclude rows from other tables: ${filteredOut.content}`);
     }
     passed++;
@@ -3647,16 +3818,16 @@ async function main(): Promise<void> {
         }
         modelRounds.push({ round, requestedTools: toolCalls.map((item) => item.name), priorToolResults });
         if (round === 5) {
-          return {
+          return fixtureCompletion({
             message: {
               role: 'assistant',
               content: '已完成定位：MSG 正式名称为“鬼庭形部雅孝”，对应 NpcParam 行 50800000；物品为 EquipParamGoods 行 3080，掉落组为 ItemLotParam 行 200300。原生事件 900210 已读到 DisplayBossHealthBar、SetCharacterHPBarDisplay、SpawnMapSFX、SetCharacterTeamType、ForceCharacterTarget、IfCharacterDamagedBy、HandleBossDefeat、AwardItemLot。方案是：精英血条等级 2，出场地面随机落雷持续 5 秒，过滤狼为攻击目标，击杀后发放义父的铃铛；提交修改前还需走 Patch Engine 和用户确认。'
             },
             finishReason: 'stop',
             diagnostics: []
-          };
+          });
         }
-        return {
+        return fixtureCompletion({
           message: {
             role: 'assistant',
             content: `第 ${round} 轮继续收集结构化证据。`,
@@ -3664,7 +3835,7 @@ async function main(): Promise<void> {
           },
           finishReason: 'tool_use',
           diagnostics: []
-        };
+        });
       },
       async *stream() {
         throw new Error('Case 54d uses complete() to preserve the round trace.');
@@ -3712,6 +3883,7 @@ async function main(): Promise<void> {
       executedTools,
       finalAnswer
     };
+    taskVerdicts.push({ case: '54d', engineFinish: scenarioResult.finishReason, task: 'unverified', basis: 'Synthetic read evidence supports the plan; the requested game mutation was not committed.' });
     passed++;
   }
 
@@ -3793,7 +3965,7 @@ async function main(): Promise<void> {
         apiKey: 'sk-test',
         prompt: 'first question',
         permissionMode: 'normal',
-        tools: [{ name: 'read_h', description: 'r', parametersJsonSchema: { type: 'object' } }],
+        tools: [{ name: 'read_h', description: 'r', permissionLevel: 'read', parametersJsonSchema: { type: 'object' } }],
         executeTool: async () => ({ ok: true, content: 'h-result' }),
         recordProviderUsage: async (sample) => { providerUsage.push(sample); },
         onEvent: (event) => {
@@ -3863,7 +4035,7 @@ async function main(): Promise<void> {
       async complete() {
         calls += 1;
         if (calls <= 240) {
-          return {
+          return fixtureCompletion({
             message: {
               role: 'assistant',
               content: '',
@@ -3871,9 +4043,9 @@ async function main(): Promise<void> {
             },
             finishReason: 'tool_use',
             diagnostics: []
-          };
+          });
         }
-        return { message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] };
+        return fixtureCompletion({ message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] });
       },
       async *stream() { throw new Error('unused'); }
     };
@@ -3881,24 +4053,24 @@ async function main(): Promise<void> {
       config: makeConfig(9, 'openai-compatible'),
       apiKey: 'sk-test',
       messages: [{ role: 'user', content: 'long task' }],
-      tools: [{ name: 'read_long', description: 'r', parametersJsonSchema: { type: 'object' } }],
+      tools: [{ name: 'read_long', description: 'r', permissionLevel: 'read', parametersJsonSchema: { type: 'object' } }],
       permissionMode: 'normal',
       executeTool: async () => ({ ok: true, content: 'ok' })
     });
     if (result.finishReason !== 'partial' || result.steps !== 200 || calls !== 200
-      || !result.diagnostics.some((diagnostic) => diagnostic.code === 'AGENT_MAX_STEPS_REACHED')) {
+      || result.audit.toolCalls.length !== 200 || result.audit.toolCalls.some((call) => !call.ok)) {
       throw new Error(`Case 60: default step ceiling failed: ${JSON.stringify({ calls, steps: result.steps, finish: result.finishReason })}`);
     }
 
-    // 同一 Param 表不断换 rowId 仍是同一个语义失败：不能靠改行号绕过
-    // 死循环预算。该序列在 6 次失败后应以结构化诊断停止。
+    // Domain failures stay in the transcript. Their content does not create
+    // a second semantic control budget; the explicit run step limit applies.
     let semanticCalls = 0;
     const semanticAdapter: ModelServiceAdapter = {
       protocol: 'openai-compatible',
       listModels: fakeListModels,
       async complete() {
         semanticCalls += 1;
-        return {
+        return fixtureCompletion({
           message: {
             role: 'assistant',
             content: '',
@@ -3914,7 +4086,7 @@ async function main(): Promise<void> {
           },
           finishReason: 'tool_use' as const,
           diagnostics: []
-        };
+        });
       },
       async *stream() { throw new Error('unused'); }
     };
@@ -3934,12 +4106,16 @@ async function main(): Promise<void> {
         ok: false,
         code: 'PARAM_ROW_NOT_FOUND',
         content: JSON.stringify({ ok: false, error: { code: 'PARAM_ROW_NOT_FOUND', message: 'row missing' } })
-      })
+      }),
+      maxSteps: 4
     });
-    if (semanticResult.finishReason !== 'error' || semanticCalls !== 6
-      || !semanticResult.diagnostics.some((diagnostic) => diagnostic.code === 'AGENT_SEMANTIC_TOOL_FAILURES_EXCEEDED')) {
-      throw new Error(`Case 60: semantic Param failure budget missing: ${JSON.stringify({ semanticCalls, finish: semanticResult.finishReason, diagnostics: semanticResult.diagnostics })}`);
+    if (semanticResult.finishReason !== 'partial' || semanticResult.steps !== 4 || semanticCalls !== 4
+      || semanticResult.audit.toolCalls.length !== 4
+      || semanticResult.audit.toolCalls.some((call) => call.ok || call.code !== 'PARAM_ROW_NOT_FOUND')
+      || semanticResult.messages.filter((message) => message.role === 'tool').length !== 4) {
+      throw new Error(`Case 60: explicit step budget or domain failure facts missing: ${JSON.stringify({ semanticCalls, finish: semanticResult.finishReason, audit: semanticResult.audit })}`);
     }
+    taskVerdicts.push({ case: '60', engineFinish: semanticResult.finishReason, task: 'blocked', basis: 'Every attempted native row lookup returned PARAM_ROW_NOT_FOUND.' });
     passed++;
   }
 
@@ -3953,7 +4129,7 @@ async function main(): Promise<void> {
       async complete() {
         conclusionCalls += 1;
         if (conclusionCalls === 1) {
-          return {
+          return fixtureCompletion({
             message: {
               role: 'assistant',
               content: '',
@@ -3965,16 +4141,16 @@ async function main(): Promise<void> {
             },
             finishReason: 'tool_use' as const,
             diagnostics: []
-          };
+          });
         }
-        return {
+        return fixtureCompletion({
           message: {
             role: 'assistant',
             content: '当前工作区的参数证据不足，任务处于 blocked 状态，无法继续写入。下一步需要重新扫描并验证目标。'
           },
           finishReason: 'stop' as const,
           diagnostics: []
-        };
+        });
       },
       async *stream() { throw new Error('unused'); }
     };
@@ -4003,31 +4179,26 @@ async function main(): Promise<void> {
         finish: conclusionResult.finishReason
       })}`);
     }
+    if (conclusionResult.audit.toolCalls.length !== 1
+      || conclusionResult.audit.toolCalls[0]?.ok !== false
+      || conclusionResult.audit.toolCalls[0]?.code !== 'RAG_UNAVAILABLE') {
+      throw new Error('Case 61: engine stop must preserve the unavailable-source task evidence.');
+    }
+    taskVerdicts.push({ case: '61', engineFinish: conclusionResult.finishReason, task: 'blocked', basis: 'The only source query failed with RAG_UNAVAILABLE; model stop does not verify the task.' });
     passed++;
   }
 
-  // --- Case 62: discovery-only progress is a bounded failure mode. A model
-  // --- that keeps returning candidate searches without consuming a native
-  // --- read must stop before the 200-step ceiling. Once the research budget
-  // --- is exhausted, the loop gives one tool-free partial-summary turn.
+  // --- Case 62: discovery-only calls obey the configured finite step budget.
+  // --- Candidate evidence remains visible without a forced-summary request.
   {
     let discoveryCalls = 0;
     const discoveryAdapter: ModelServiceAdapter = {
       protocol: 'openai-compatible',
       listModels: fakeListModels,
       async complete(request) {
-        if ((request.tools?.length ?? 0) === 0) {
-          return {
-            message: {
-              role: 'assistant',
-              content: '检索预算已耗尽，当前仅确认了候选文本，未完成原生读取。'
-            },
-            finishReason: 'stop' as const,
-            diagnostics: []
-          };
-        }
+        if (request.tools?.length !== 1) throw new Error('Case 62: finite budget must not create a summary request.');
         discoveryCalls += 1;
-        return {
+        return fixtureCompletion({
           message: {
             role: 'assistant',
             content: '',
@@ -4039,7 +4210,7 @@ async function main(): Promise<void> {
           },
           finishReason: 'tool_use' as const,
           diagnostics: []
-        };
+        });
       },
       async *stream() { throw new Error('unused'); }
     };
@@ -4072,18 +4243,22 @@ async function main(): Promise<void> {
           identifiers: ['textId=91'],
           evidence: { status: 'candidate' }
         })
-      })
+      }),
+      maxSteps: 4
     });
-    if (discoveryResult.finishReason !== 'partial' || discoveryResult.steps !== 7
-      || discoveryCalls !== 6
-      || !discoveryResult.diagnostics.some((diagnostic) => diagnostic.code === 'AGENT_RESEARCH_BUDGET_EXHAUSTED')) {
-      throw new Error(`Case 62: discovery-only guard failed: ${JSON.stringify({
+    const discoveryEvidence = discoveryResult.messages.filter((message) => message.role === 'tool');
+    if (discoveryResult.finishReason !== 'partial' || discoveryResult.steps !== 4
+      || discoveryCalls !== 4 || discoveryResult.audit.toolCalls.length !== 4
+      || discoveryEvidence.length !== 4
+      || discoveryEvidence.some((message) => JSON.parse(message.content).evidence?.status !== 'candidate')) {
+      throw new Error(`Case 62: finite discovery budget or candidate evidence failed: ${JSON.stringify({
         discoveryCalls,
         steps: discoveryResult.steps,
         finish: discoveryResult.finishReason,
         diagnostics: discoveryResult.diagnostics
       })}`);
     }
+    taskVerdicts.push({ case: '62', engineFinish: discoveryResult.finishReason, task: 'unverified', basis: 'Only candidate search evidence was obtained; no native read or mutation occurred.' });
     passed++;
   }
 
@@ -4097,11 +4272,11 @@ async function main(): Promise<void> {
       listModels: fakeListModels,
       async complete() {
         lengthCalls += 1;
-        return {
+        return fixtureCompletion({
           message: { role: 'assistant', content: '' },
           finishReason: 'length' as const,
           diagnostics: []
-        };
+        });
       },
       async *stream() { throw new Error('unused'); }
     };
@@ -4113,7 +4288,7 @@ async function main(): Promise<void> {
       permissionMode: 'normal',
       executeTool: async () => ({ ok: true, content: 'unused' })
     });
-    if (lengthResult.finishReason !== 'length' || lengthResult.steps !== 1 || lengthCalls !== 1) {
+    if (lengthResult.finishReason !== 'partial' || lengthResult.steps !== 1 || lengthCalls !== 1) {
       throw new Error(`Case 63: length response was retried: ${JSON.stringify({
         lengthCalls,
         steps: lengthResult.steps,
@@ -4126,11 +4301,11 @@ async function main(): Promise<void> {
       listModels: fakeListModels,
       async complete() {
         malformedToolUseCalls += 1;
-        return {
+        return fixtureCompletion({
           message: { role: 'assistant', content: '工具响应不完整' },
           finishReason: 'tool_use' as const,
           diagnostics: []
-        };
+        });
       },
       async *stream() { throw new Error('unused'); }
     };
@@ -4153,17 +4328,17 @@ async function main(): Promise<void> {
     passed++;
   }
 
-  // --- Case 64: a tool-producing turn truncated by the provider receives one
-  // --- bounded tool-free conclusion instead of ending with an empty report.
+  // --- Case 64: provider length after a tool round is a terminal partial stop.
+  // --- The completed tool fact survives without another provider request.
   {
     let lengthConclusionCalls = 0;
     const lengthConclusionAdapter: ModelServiceAdapter = {
       protocol: 'openai-compatible',
       listModels: fakeListModels,
-      async complete(request) {
+      async complete() {
         lengthConclusionCalls += 1;
         if (lengthConclusionCalls === 1) {
-          return {
+          return fixtureCompletion({
             message: {
               role: 'assistant',
               content: '',
@@ -4175,23 +4350,16 @@ async function main(): Promise<void> {
             },
             finishReason: 'tool_use' as const,
             diagnostics: []
-          };
+          });
         }
         if (lengthConclusionCalls === 2) {
-          return {
+          return fixtureCompletion({
             message: { role: 'assistant', content: '' },
             finishReason: 'length' as const,
             diagnostics: []
-          };
+          });
         }
-        if ((request.tools?.length ?? 0) !== 0) {
-          throw new Error('Case 64: conclusion retry must disable tools');
-        }
-        return {
-          message: { role: 'assistant', content: '已完成有限检索汇报：当前只有候选文本，未完成原生写入。' },
-          finishReason: 'stop' as const,
-          diagnostics: []
-        };
+        throw new Error('Case 64: provider length must not trigger a conclusion retry');
       },
       async *stream() { throw new Error('unused'); }
     };
@@ -4220,16 +4388,19 @@ async function main(): Promise<void> {
       })
     });
     if (lengthConclusionResult.finishReason !== 'partial'
-      || lengthConclusionCalls !== 3
-      || !lengthConclusionResult.messages.some((message) => message.content.includes('有限检索汇报'))
-      || !lengthConclusionResult.diagnostics.some((diagnostic) => diagnostic.code === 'MODEL_SERVICE_LENGTH_FORCED_CONCLUSION')) {
-      throw new Error(`Case 64: truncated tool run did not produce bounded conclusion: ${JSON.stringify({
+      || lengthConclusionCalls !== 2 || lengthConclusionResult.steps !== 2
+      || lengthConclusionResult.audit.toolCalls.length !== 1
+      || lengthConclusionResult.audit.toolCalls[0]?.ok !== true
+      || !lengthConclusionResult.messages.some((message) => message.role === 'tool'
+        && JSON.parse(message.content).evidence?.status === 'insufficient_evidence')) {
+      throw new Error(`Case 64: provider length lost completed tool facts or retried: ${JSON.stringify({
         calls: lengthConclusionCalls,
         finish: lengthConclusionResult.finishReason,
         diagnostics: lengthConclusionResult.diagnostics,
         messages: lengthConclusionResult.messages
       })}`);
     }
+    taskVerdicts.push({ case: '64', engineFinish: lengthConclusionResult.finishReason, task: 'unverified', basis: 'Search completed with insufficient evidence before provider truncation; no native write was verified.' });
     passed++;
   }
 
@@ -4241,13 +4412,16 @@ async function main(): Promise<void> {
       const controller = new AbortController();
       controller.abort();
       const config = makeConfig(9, 'openai-compatible');
+      let providerCalls = 0;
+      let toolCalls = 0;
       const result = await runAgentSession({
         sessionsDir: base,
         adapter: {
           protocol: 'openai-compatible',
           listModels: fakeListModels,
           async complete() {
-            return { message: { role: 'assistant', content: 'never' }, finishReason: 'stop', diagnostics: [] };
+            providerCalls += 1;
+            return fixtureCompletion({ message: { role: 'assistant', content: 'never' }, finishReason: 'stop', diagnostics: [] });
           },
           async *stream() {
             throw new Error('unused');
@@ -4258,16 +4432,21 @@ async function main(): Promise<void> {
         prompt: 'cancelled question',
         permissionMode: 'normal',
         tools: [],
-        executeTool: async () => ({ ok: false, content: 'unused' }),
+        executeTool: async () => {
+          toolCalls += 1;
+          return { ok: false, content: 'unused' };
+        },
         signal: controller.signal
       });
       if (result.run.finishReason !== 'cancelled') throw new Error(`Case 58: ${result.run.finishReason}`);
-      if (!result.run.messages.some((message) => message.role === 'assistant'
-        && message.content.includes('系统收口摘要-cancelled'))) {
-        throw new Error('Case 58: cancelled run must expose an honest terminal report.');
+      if (providerCalls !== 0 || toolCalls !== 0 || result.run.steps !== 0 || result.run.audit.toolCalls.length !== 0) {
+        throw new Error('Case 58: pre-aborted session must not dispatch provider or domain calls.');
       }
       const loaded = await loadRolloutSession(result.rolloutPath);
       if (!loaded.ok || !loaded.interrupted) throw new Error('Case 58: interrupted marker missing.');
+      if (loaded.terminal?.finishReason !== 'cancelled' || loaded.terminal?.taskStatus !== 'cancelled') {
+        throw new Error('Case 58: durable terminal facts must agree with cancellation.');
+      }
       passed++;
     } finally {
       await rm(base, { recursive: true, force: true });
@@ -4346,7 +4525,7 @@ async function main(): Promise<void> {
           listModels: fakeListModels,
           async complete(request) {
             seen.push({ ...request, messages: [...request.messages] });
-            return { message: { role: 'assistant', content: 'sys-injected' }, finishReason: 'stop', diagnostics: [] };
+            return fixtureCompletion({ message: { role: 'assistant', content: 'sys-injected' }, finishReason: 'stop', diagnostics: [] });
           },
           async *stream() {
             throw new Error('unused');
@@ -4389,7 +4568,7 @@ async function main(): Promise<void> {
           listModels: fakeListModels,
           async complete(request) {
             seen2.push({ ...request, messages: [...request.messages] });
-            return { message: { role: 'assistant', content: 'resumed' }, finishReason: 'stop', diagnostics: [] };
+            return fixtureCompletion({ message: { role: 'assistant', content: 'resumed' }, finishReason: 'stop', diagnostics: [] });
           },
           async *stream() {
             throw new Error('unused');
@@ -4484,6 +4663,7 @@ async function main(): Promise<void> {
     passed,
     total,
     targetInstructionTrace,
+    taskVerdicts,
     nonClaims: [
       '离线 conformance 不证明任何第三方真实服务可用。',
       'Anthropic 真实 SSE 只在本机确定性 contract server 上验证事件解析/取消/超时/错误分类；第三方流式事件形状差异不在本次离线验收范围。',
@@ -4491,7 +4671,8 @@ async function main(): Promise<void> {
       '写矩阵只覆盖实际接线的安全写路径（scaffold text_edit + WorkspaceTransaction），不提升 native writer authority 或 Patch Engine authority。',
       'plan 的权威判据是 ai/toolPermissions 的等级阶梯；ToolRegistry 与 agent loop 消费同一 predicate，'
         + 'plan 允许 read/analyze/propose，stage/validate/commit/rollback 均被拒绝。',
-      'normal 模式的确认语义为：commit 被结构化拒绝，经用户确认升级后才经 Patch Engine 提交。',
+      'normal 模式的确认语义为：host 确认建立 receipt，commit 仍经 Patch Engine 提交并记录此前拒绝与之后允许。',
+      'engine finish 表示控制循环终止；taskVerdicts 使用工具证据、实际文件内容与 transaction audit 独立判断任务结果。',
       'Context Broker 是离线可测的 evidence 装配层；其真实 provider 侧接入（第三方模型上下文窗口、真实工作区索引来源）不在本次离线验收范围。',
       'Codex 派生内核（重试退避、并行工具、流式事件、rollout、compaction）参考 openai/codex（Apache-2.0）设计重写；离线矩阵不证明与 Codex 行为逐位一致，也不提升 provider 或 native authority。',
       'production 接线（agentToolBridge、文件 rollout、session host、desktop IPC/preload 契约）由 typecheck/build + 本 smoke 的 fake adapter/registry 验证；未经真实 provider 端到端运行，renderer agent 任务面板归前端 Agent。',

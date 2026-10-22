@@ -6,7 +6,7 @@ SoulForge 是给魂游（FromSoftware 的《只狼》《黑暗之魂》《艾尔
 
 像写代码时用 Cursor 一样，你用自然语言告诉它想怎么改游戏，它在独立的工作区里帮你改好、验证、提交，还能随时一键回滚
 
-> 当前状态：工作区内所有文件均可读取、索引和诊断；文件能否编辑、写入方式和安全等级以当前治理登记、原生 authority、验证结果和工作区诊断为准。安装包未做代码签名，暂不适合作为稳定工具分发。
+> 当前状态：工作区内所有文件均可读取、索引和诊断；文件能否编辑、写入方式和安全等级以当前原生能力、验证结果和工作区诊断为准。安装包未做代码签名，暂不适合作为稳定工具分发。
 
 ## 当前可用能力
 
@@ -34,31 +34,15 @@ SoulForge 是给魂游（FromSoftware 的《只狼》《黑暗之魂》《艾尔
 
 ## 开发文档
 
-开发与架构设计规范请参阅[实施交接书](docs/V0_5_IMPLEMENTATION_HANDOFF.md)。文档内容以当前治理登记与验证结果为准。
+工程入口只有 [AGENTS.md](AGENTS.md)（写给 AI agent），模块归属见 [ARCHITECTURE.md](ARCHITECTURE.md)，owner 裁定见 [DECISIONS.md](docs/DECISIONS.md)。合并前运行 `npm run gate`，它和 CI 跑的完全一样；读取是否正确用 `node compare/run.mjs` 和成熟参考工具对比。产品能力以当前源码、对比结果和工作区诊断为准。
+
+Linux x64 上执行依赖 owned-process 的测试前，先显式运行一次 `npm run prepare:owned-process-guardian`；更新 helper 源码/协议或编译器后也需重新 prepare。该步骤只适用于 Linux x64 与 GCC/Clang 兼容 C11 编译器及 Linux 5.3+（或兼容回移内核），不在 `prebuild`/`pretest` 中隐式编译；helper 缺失或不匹配会在目标命令启动前失败，按诊断显式重建。失败的 `.local-validation/owned-process-guardian/attempts/` 目录保留供检查，不要在相关进程未确认停止前删除。
 
 ### CLI 与真实 Agent 验证
 
 工具开发、问题复现和后续 Agent 请先看[执行手册：CLI 与真实 Agent 验证](docs/AGENT_EXECUTION_PLAYBOOK.md#agent-tool-validation)：包括生产工具直接调用、搜索与跨进程分页、unpacked Agent 模拟、已安装 EXE 验证，以及配置、报告和缓存排障。
 
 按目标选入口：**测工具用 CLI，测模型任务链路用 Agent 模拟，测安装版用 installed 模式**。仓库根 `SoulForge.exe` 是开发启动器，不是 installed smoke 的安装版应用。只查用法时直接运行 `node tools/soulforge-cli/sfcli.mjs --help` 或 `node scripts/run-real-agent-gyoubu.mjs --help`，不要无参数启动真实模型任务。
-
-本文和执行手册由 Git 跟踪，可随克隆/工作树获取；仅存在于本机的代理规则文件被 Git 忽略，不作为这些操作说明的唯一来源。
-
-### 按改动选择验证
-
-优先使用统一入口组合本次所需验证；层级是选择工具，不表示每次修改都需要全跑。先用 `--list` 查看具体操作和环境需求：
-
-```powershell
-node scripts/verify.mjs --tier governance --list
-node scripts/verify.mjs --suite typecheck,test:agent-tool-envelope
-node scripts/verify.mjs --slice W-REL-V09-PUBLIC-PREVIEW-01 --list
-```
-
-`--suite` 保留给定顺序；`--slice` 只执行结构化 `requiredValidation` 的自动步骤，人工检查单独显示为 `manual-pending`，历史自由文本不能自动执行。单项调试仍可直接用 `npm run <名称>`。
-
-同一计划按工作目录、命令参数和显式环境复用已通过的操作，共享重复的 TypeScript 编译；JSON 报告的 `steps.execution` 区分执行与复用。构建、npm 生命周期和无法安全展开的 shell 命令会清除复用结果。复用不跨运行保存，也不用于把 skip/partial 改成 passed。需要全部实际通过时用 `--require-executed`；混合层级可用 `--require-tier governance,unit` 或 `--require-suite test:renderer-e2e` 指定严格范围。
-
-Windows CI 对文档和治理数据变更只跑治理检查；代码变更共用一次公开验证计划，renderer e2e 只执行一次。打包输入变化或手动选择安装验收时，独立运行 NSIS、内容完整性和安装生命周期。真实游戏语料、签名和跨机验收仍按各自前置执行。Agent 模拟和数据库 smoke 在源文件与产物 SHA-256 都匹配时复用生产构建；缺少所需 smoke 入口或指纹变化时重建。
 
 ## 快速开始
 
@@ -267,4 +251,3 @@ This is not just wishful thinking. In fact, you can already see from the source 
 To help improve the project, I will provide generous usage credits to active users. If you are willing to share your experience with me, please star the repository and then get in touch — you know how to reach me.
 
 会话记录：(https://github.com/3516027002att-ui/soulforge-output)
-

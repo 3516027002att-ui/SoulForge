@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { createPatchIr } from '../patch-engine/patchIr.js';
 import { executePatchIrThroughTransaction } from '../patch/durablePatchCommit.js';
@@ -44,6 +44,7 @@ async function mainInWorkspace(root: string): Promise<void> {
     targetUri: 'file://first.txt',
     store,
     session,
+    backupBaseDir: join(root,'backups'),
     confirmation: createConfirmationReceipt({
       subjects: [`ROLLBACK_FILE:${committed.opId}:file://first.txt`],
       riskLevel: 'high',
@@ -53,6 +54,9 @@ async function mainInWorkspace(root: string): Promise<void> {
   if (!rolled.ok || rolled.restoredFiles.length !== 1) {
     throw new Error(`File rollback failed: ${JSON.stringify(rolled.diagnostics)}`);
   }
+  const rollbackBackupPath=rolled.record?.backupRoot;
+  const rollbackBackupRelative=rollbackBackupPath?relative(join(root,'backups'),rollbackBackupPath):'..';
+  if(rollbackBackupRelative.startsWith('..')||isAbsolute(rollbackBackupRelative))throw new Error('Rollback backup escaped the test-owned temporary workspace.');
   if (await readFile(firstPath, 'utf8') !== 'first-before\n') throw new Error('Selected file was not restored.');
   if (await readFile(secondPath, 'utf8') !== 'second-after\n') throw new Error('Unselected file was mutated.');
   if (rolled.record?.rollbackScope !== 'file' || rolled.record.files[0]?.targetUri !== 'file://first.txt') {

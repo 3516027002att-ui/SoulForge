@@ -49,6 +49,12 @@ export type TaeEventUpsertMutation =
       animId: number;
       /** 模板事件下标：新事件的参数体逐字节拷贝自该事件（类型必须一致）。 */
       templateEventIndex: number;
+      /** Same-document action or a hash-bound native document supplied by the host. */
+      templateAnimId?: number;
+      templateDocumentBase64?: string;
+      expectedTemplateDocumentHash?: string;
+      schemaBankId?: number;
+      fieldOverrides?: Array<{ fieldIndex?: number; fieldName?: string; value: string | number | boolean }>;
       /** 新事件类型；缺省用模板事件类型。若提供且与模板不一致 → C# 侧 fail-closed。 */
       eventTypeId?: number;
       startTime: number;
@@ -84,7 +90,7 @@ export interface TaeBridgeCommitResult {
   outputHash?: string;
   outputSize?: number;
   mutationCount?: number;
-  diagnostics: Array<{ severity: string; code: string; message: string }>;
+  diagnostics: Array<{ severity: string; code: string; message: string; details?: unknown }>;
 }
 
 export async function commitTaeEventViaBridge(
@@ -117,7 +123,7 @@ export async function commitTaeEventViaBridge(
     diagnostics: result.diagnostics.map((d) => ({
       severity: d.severity,
       code: d.code,
-      message: d.message
+      message: d.message, ...(d.details === undefined ? {} : { details: d.details })
     }))
   };
 }
@@ -132,7 +138,7 @@ export async function commitTaeEventViaBridge(
 export async function commitTaeEventContainerViaBridge(
   request: TaeBridgeCommitRequest & { taeEntryIndex?: number }
 ): Promise<TaeBridgeCommitResult> {
-  const diagnostics: Array<{ severity: string; code: string; message: string }> = [];
+  const diagnostics: Array<{ severity: string; code: string; message: string; details?: unknown }> = [];
   const stageDirectory = dirname(request.outputPath);
   const selectedEntryIndexes = new Set<number>();
   if (request.taeEntryIndex !== undefined) selectedEntryIndexes.add(request.taeEntryIndex);
@@ -252,6 +258,6 @@ export async function commitTaeEventContainerViaBridge(
   };
 }
 
-function toTaeCommitDiagnostics(items: Array<{ severity: string; code: string; message: string }>) {
-  return items.map((item) => ({ severity: item.severity, code: item.code, message: item.message }));
+function toTaeCommitDiagnostics(items: Array<{ severity: string; code: string; message: string; details?: unknown }>) {
+  return items.map((item) => ({ ...item }));
 }

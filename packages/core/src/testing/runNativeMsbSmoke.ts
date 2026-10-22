@@ -134,7 +134,7 @@ async function mainInWorkspace(root: string): Promise<void> {
   // TS 不再先 decompressDfltDcx 再喂裸 .msb。这条链必须能开 mods 里的 DFLT 图。
   const msbPath = sourceDcx;
   const fixtureDir = dirname(sourceDcx);
-  const oodleRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT || (sourceDcx.includes('Sekiro') ? 'D:/mystream/Sekiro Shadows Die Twice/Sekiro' : undefined);
+  const oodleRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT || (sourceDcx.includes('Sekiro') ? process.env.SOULFORGE_SEKIRO_GAME_ROOT : undefined);
 
   const read = await runBridge<MsbEnvelope>({
     command: 'read-msb-document',

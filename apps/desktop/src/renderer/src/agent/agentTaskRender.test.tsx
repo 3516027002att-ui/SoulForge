@@ -21,6 +21,7 @@ import {
   INITIAL_AGENT_TASK_STATE,
   reduceAgentTaskEvent,
   startAgentTask,
+  type AgentApprovalDiffView,
   type AgentTaskEventEnvelope,
   type AgentTaskState
 } from './agentTaskState.js';
@@ -356,6 +357,29 @@ describe('审批卡片真的渲染出来', () => {
     assert.ok(removeMatch, '必须有删除行数元素');
     assert.equal(addMatch[1], '+1', `新增统计应为 +1，实际 ${addMatch[1]}`);
     assert.equal(removeMatch[1], '-1', `删除统计应为 -1，实际 ${removeMatch[1]}`);
+  });
+
+  it('多文件预览在敏感 targetPath 被主进程脱敏后仍显示全部安全目标标签', () => {
+    const task = feed(
+      startAgentTask(SESSION),
+      { type: 'turn-started', step: 1 },
+      {
+        type: 'approval-requested', step: 1, callId: 'call-multi-diff', toolName: 'commit_patch',
+        permissionLevel: 'commit',
+        argumentsJson: JSON.stringify({ changes: [
+          { targetPath: 'mods/first.txt', structuredEdit: { newText: 'first' } },
+          { targetPath: 'mods/second.txt', structuredEdit: { newText: 'second' } }
+        ] }),
+        diff: {
+          unifiedDiff: 'diff --git a/mods/first.txt b/mods/first.txt\n--- mods/first.txt\n+++ mods/first.txt\n'
+            + 'diff --git a/mods/second.txt b/mods/second.txt\n--- mods/second.txt\n+++ mods/second.txt',
+          addedLines: 2, removedLines: 0, newFile: false
+        } as unknown as AgentApprovalDiffView
+      }
+    );
+    const html = render({ task });
+    const header = /<div class="agent-approval__diff-head"><code>(.*?)<\/code>/.exec(html);
+    assert.equal(header?.[1], 'mods/first.txt；mods/second.txt');
   });
 
   it('无 diff 时明说主进程未能生成，而不是留空', () => {

@@ -1,0 +1,9 @@
+
+/* ── ESD / TAE partial 缺口区段（BEHAVIOR-55B / ANIMATION-56B）──
+   authority=partial 时 coverageShortfalls / unparsedGaps / diagnostics /
+   跳转图未闭合必须对用户可见，不能伪装成完整解析。 */
+.esd-partial, .tae-partial {
+  margin: 8px 10px; font-size: 12px;
+}
+.esd-partial summary, .tae-partial summary { cursor: pointer; color: var(--ink-2); font-weight: 600; }
+.esd-partial ul, .tae-partial ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }

@@ -55,8 +55,9 @@ internal sealed class TpfNativeDocument
         var dataLength = ReadUInt32(source, 4);
         var textureCount = ReadUInt32(source, 8);
         var platform = source[0x0C];
-        var encoding = source[0x0D];
-        var flags = source[0x0E];
+        // TPF stores Flag2 at 0x0D, followed by name Encoding at 0x0E.
+        var flags = source[0x0D];
+        var encoding = source[0x0E];
         var pad = source[0x0F];
 
         if (textureCount > MaxTextureCount)
@@ -233,8 +234,8 @@ internal sealed class TpfNativeDocument
         WriteUInt32(rebuilt, 4, DataLength);
         WriteUInt32(rebuilt, 8, (uint)Textures.Count);
         rebuilt[0x0C] = Platform;
-        rebuilt[0x0D] = EncodingByte;
-        rebuilt[0x0E] = Flags;
+        rebuilt[0x0D] = Flags;
+        rebuilt[0x0E] = EncodingByte;
         rebuilt[0x0F] = Pad;
 
         // Entry table

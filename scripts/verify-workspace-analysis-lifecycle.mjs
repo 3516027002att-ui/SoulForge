@@ -21,8 +21,8 @@ function productionFunctions(path, names) {
   return ts.transpileModule(selected.map(node => node.getText(file).replace(/^export\s+/, '')).join('\n'),
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
 }
-const source = productionFunctions('../apps/desktop/src/main/ipc/workspace.ts',
-  ['awaitWorkspaceReadiness', 'waitForWorkspaceIndexing', 'persistActiveRag', 'refreshRagAfterAnalyze', 'clearWorkspaceIpcCaches', 'ragRefreshQueueKey']);
+const source = productionFunctions('../apps/desktop/src/main/services/workspaceService.ts',
+  ['awaitWorkspaceReadiness', 'waitForWorkspaceIndexing', 'persistActiveRag', 'refreshRagAfterAnalyze', 'clearWorkspaceServiceCaches', 'ragRefreshQueueKey']);
 const ragPersistenceSource = `const RAG_PERSIST_BATCH_SIZE = 512;\n${productionFunctions('../apps/desktop/src/main/ragPersistence.ts', [
   'persistRagCorpusBySourceDelta',
   'throwIfAborted'
@@ -32,9 +32,11 @@ const state = {
   activeSession: {}, activeWorkspaceSessionId: 'session-a', activeWorkspaceSessionGeneration: 1,
   activeIndex: { workspaceId: 'workspace-a' }, activeRag: null,
   workspaceAnalysisRequestedGeneration: -1, workspaceSemanticIndexingTask: null,
-  workspaceIndexingTask: null, workspaceAnalyzeAbort: null,
+  workspaceIndexingTask: null, workspaceAnalyzeAbort: null, workspaceIndexingAbort: null,
+  workspaceMountEpoch: 0, activeFingerprintStore: null, indexedFiles: [],
   directorySelections: new Map(), actionMembershipForegroundTasks: new Map(),
   scheduleRagEmbedding: null,
+  replaceWorkspaceIndexedFiles(files) { state.indexedFiles = [...files]; },
   throwIfRagRefreshAborted(signal) { if (signal?.aborted) throw Object.assign(new Error('cancelled'), { name: 'AbortError' }); },
   resolveWorkspaceSemanticIndexingTask() { state.workspaceSemanticIndexingTask?.resolve(); state.workspaceSemanticIndexingTask = null; },
   async persistRagCorpusBySourceDelta() {},
@@ -311,9 +313,18 @@ for (const change of ['session', 'generation', 'workspace', 'cancel']) {
   assert.equal(state.activeRag, null, `${change} during persistence must reject stale publication`);
 }
 const controller = new AbortController();
+const indexingController = new AbortController();
 state.workspaceAnalyzeAbort = controller;
-state.clearWorkspaceIpcCaches();
+state.workspaceIndexingAbort = indexingController;
+state.indexedFiles = [{ sourceUri: 'file://old-owned-catalog' }];
+state.clearWorkspaceServiceCaches();
 assert.equal(controller.signal.aborted, true, 'cache teardown cancels native analysis');
+assert.equal(indexingController.signal.aborted, true, 'cache teardown cancels background indexing');
+assert.equal(state.workspaceMountEpoch, 1, 'cache teardown revokes admitted mount capabilities');
+assert.equal(state.activeWorkspaceSessionId, null);
+assert.equal(state.activeSession, null);
+assert.equal(state.activeIndex, null);
+assert.deepEqual(state.indexedFiles, []);
 assert.equal(state.workspaceAnalysisRequestedGeneration, -1);
 assert.equal(state.workspaceAnalysisStarter, null);
 console.log('[workspace-analysis-lifecycle] PASS: generation, readiness, durable publication, switch and abort races');

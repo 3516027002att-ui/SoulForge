@@ -20,7 +20,7 @@ import type {
   KnowledgeStoreSnapshot
 } from '@soulforge/core';
 
-export const OPERATION_LOG_UTILITY_PROTOCOL = '1.4.3' as const;
+export const OPERATION_LOG_UTILITY_PROTOCOL = '1.6.0' as const;
 
 export interface ProviderUsageEventPayload {
   eventId: string;
@@ -68,6 +68,7 @@ export interface ProviderUsageSummary {
 }
 
 export interface OpenWorkspaceDatabasePayload {
+  migrationSourceDatabasePath?: string;
   appDatabasePath: string;
   databasePath: string;
   workspaceId: string;
@@ -102,6 +103,8 @@ export interface OperationLogUtilityPayloadMap {
     updatedAt?: string;
   };
   listIncompleteTransactions: Record<string, never>;
+  getTransactionForOperation: { opId: string };
+  findTransactionsForRequest: { sessionName: string; requestId: string };
   recordRecoveryPoint: { record: Omit<RecoveryPointRecord, 'workspaceId' | 'recoveryId'> & { recoveryId?: string } };
   listRecoveryPoints: Record<string, never>;
   planRecoveryCleanup: { now?: string; maxAgeDays?: number; maxBytes?: number };
@@ -184,7 +187,7 @@ export interface OperationLogUtilityResultMap {
       backupPath?: string;
     };
     semanticImport: {
-      status: 'imported' | 'already_imported' | 'source_missing';
+      status: 'archived' | 'already_imported' | 'source_missing';
       nodeCount: number;
       edgeCount: number;
       backupPath?: string;
@@ -200,6 +203,8 @@ export interface OperationLogUtilityResultMap {
   createTransaction: null;
   transitionTransaction: TransactionJournalRecord;
   listIncompleteTransactions: TransactionJournalRecord[];
+  getTransactionForOperation: TransactionJournalRecord | undefined;
+  findTransactionsForRequest: TransactionJournalRecord[];
   recordRecoveryPoint: RecoveryPointRecord;
   listRecoveryPoints: RecoveryPointRecord[];
   planRecoveryCleanup: RecoveryCleanupPlan;
@@ -258,7 +263,21 @@ type request<Method extends string, Payload> = {
   requestId: string;
   method: Method;
   payload: Payload;
+  /** A queued request must not begin after its caller's deadline. */
+  deadlineAt?: number;
 };
+
+/** Only these RPCs may execute on the independent, read-only connection. */
+export function isDatabaseReadMethod(method: string): boolean {
+  return [
+    'get', 'list', 'history', 'getTransactionForOperation', 'findTransactionsForRequest', 'listIncompleteTransactions',
+    'listRecoveryPoints', 'planRecoveryCleanup', 'listAuditEvents', 'listResourceEntryChanges',
+    'searchFiles', 'loadRagChunks', 'searchRagChunks', 'loadRagEmbeddings',
+    'loadRagEmbeddingRecords', 'ragEmbeddingModel', 'loadReferences', 'listDiagnostics',
+    'listJobs', 'getSemanticFileCache', 'getAllSemanticFileCache', 'loadKnowledgeSnapshot',
+    'providerUsageSummary', 'health'
+  ].includes(method);
+}
 
 export function isOperationLogUtilityResponse(value: unknown): value is OperationLogUtilityResponse {
   if (!value || typeof value !== 'object') return false;

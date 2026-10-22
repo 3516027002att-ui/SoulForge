@@ -110,6 +110,13 @@ export class InternalRagEmbeddingService {
   private scheduleTimer: NodeJS.Timeout | null = null;
   private unavailableUntil = 0;
   private completed: { workspaceId: string; fingerprint: string; vectors: Map<string, Float32Array> } | null = null;
+  private generation = 0;
+  private closing: Promise<void> | null = null;
+  private disposal: Promise<void> | null = null;
+  private disposed = false;
+  private readonly ownedJobs = new Map<Promise<InternalEmbeddingResult>, AbortController>();
+  private readonly queryJobs = new Set<Promise<Float32Array | null>>();
+  private readonly workerTerminations = new Set<Promise<number>>();
 
   private localModel: RagLocalModelResolution | null = null;
 
@@ -136,6 +143,7 @@ export class InternalRagEmbeddingService {
   }
 
   schedule(corpus: RagCorpus, store: EmbeddingStore): void {
+    if (this.disposed || this.closing) return;
     if (corpus.availability !== 'available' || corpus.chunks.length === 0) return;
     const model = this.getLocalModelStatus();
     if (model.state !== 'local-ready') {
@@ -161,6 +169,9 @@ export class InternalRagEmbeddingService {
   }
 
   async ensure(corpus: RagCorpus, store: EmbeddingStore, signal?: AbortSignal): Promise<InternalEmbeddingResult> {
+    if (this.disposed || this.closing || signal?.aborted) {
+      return { ok: false, code: 'RAG_EMBEDDING_CANCELLED', message: 'embedding 服务已关闭或正在重置。', fingerprint: internalRagCorpusFingerprint(corpus) };
+    }
     if (corpus.availability !== 'available' || corpus.chunks.length === 0) {
       return { ok: false, code: 'RAG_UNAVAILABLE', message: 'RAG 语义语料为空。', fingerprint: internalRagCorpusFingerprint(corpus) };
     }
@@ -186,7 +197,7 @@ export class InternalRagEmbeddingService {
     this.activeAbort = new AbortController();
     this.activeFingerprint = fingerprint;
     this.completed = null;
-    const job = this.startCorpusJob(corpus, store, this.activeAbort.signal, fingerprint);
+    const job = this.startCorpusJob(corpus, store, this.activeAbort, fingerprint);
     this.activeJob = job;
     if (!signal) return job;
     if (signal.aborted) return { ok: false, code: 'RAG_EMBEDDING_CANCELLED', message: 'embedding 更新已取消。', fingerprint };
@@ -201,13 +212,22 @@ export class InternalRagEmbeddingService {
     ]);
   }
 
-  async embedQuery(query: string, signal?: AbortSignal): Promise<Float32Array | null> {
+  embedQuery(query: string, signal?: AbortSignal): Promise<Float32Array | null> {
+    if (this.disposed || this.closing) return Promise.resolve(null);
+    const job = this.runQuery(query, signal, this.generation);
+    this.queryJobs.add(job);
+    void job.then(() => this.queryJobs.delete(job), () => this.queryJobs.delete(job));
+    return job;
+  }
+
+  private async runQuery(query: string, signal: AbortSignal | undefined, generation: number): Promise<Float32Array | null> {
     if (!query.trim()) return null;
     const model = this.getLocalModelStatus();
     if (model.state !== 'local-ready') return null;
     if (Date.now() < this.unavailableUntil) return null;
     try {
       const result = await this.request([query], signal);
+      if (generation !== this.generation || this.disposed || this.closing) return null;
       if (!result.ok || !result.vectors?.[0] || result.dim !== INTERNAL_RAG_EMBEDDING.dim) {
         this.unavailableUntil = Date.now() + EMBEDDING_RETRY_COOLDOWN_MS;
         void this.resetWorker();
@@ -215,6 +235,7 @@ export class InternalRagEmbeddingService {
       }
       return new Float32Array(result.vectors[0]);
     } catch (error) {
+      if (generation !== this.generation || this.disposed || this.closing) return null;
       if (signal?.aborted || (error instanceof Error && error.message === 'RAG_EMBEDDING_CANCELLED')) throw error;
       this.unavailableUntil = Date.now() + EMBEDDING_RETRY_COOLDOWN_MS;
       void this.resetWorker();
@@ -222,32 +243,60 @@ export class InternalRagEmbeddingService {
     }
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closing) return this.closing;
+    this.generation += 1;
     this.scheduled = null;
     if (this.scheduleTimer) {
       clearTimeout(this.scheduleTimer);
       this.scheduleTimer = null;
     }
-    this.activeAbort?.abort();
-    this.activeAbort = null;
-    this.activeJob = null;
+    for (const controller of this.ownedJobs.values()) controller.abort();
     this.unavailableUntil = 0;
     this.completed = null;
     for (const pending of this.pending.values()) pending.reject(new Error('RAG_EMBEDDING_CLOSED'));
     this.pending.clear();
-    const worker = this.worker;
-    this.worker = null;
-    if (worker) await worker.terminate();
+    const termination = this.resetWorker();
+    this.closing = (async () => {
+      // Superseding ensure() and cancelled callers do not release their real
+      // database owners. Keep every tail, not just the latest active pointer.
+      while (this.ownedJobs.size > 0 || this.queryJobs.size > 0 || this.workerTerminations.size > 0) {
+        await Promise.allSettled([...this.ownedJobs.keys(), ...this.queryJobs, ...this.workerTerminations]);
+      }
+      await termination;
+    })().finally(() => {
+      this.activeAbort = null;
+      this.activeJob = null;
+      this.activeFingerprint = null;
+      this.closing = null;
+    });
+    return this.closing;
+  }
+
+  /** Permanent application shutdown; close() alone remains a reusable reset. */
+  dispose(): Promise<void> {
+    if (this.disposal) return this.disposal;
+    this.disposed = true;
+    this.disposal = this.close();
+    return this.disposal;
   }
 
   private async embedCorpus(
     corpus: RagCorpus,
     store: EmbeddingStore,
     signal: AbortSignal,
-    fingerprint: string
+    fingerprint: string,
+    generation: number
   ): Promise<InternalEmbeddingResult> {
+    const assertCurrent = () => {
+      if (signal.aborted || generation !== this.generation || this.disposed || this.closing) {
+        throw new Error('RAG_EMBEDDING_CANCELLED');
+      }
+    };
     try {
+      assertCurrent();
       await mkdir(this.cacheDir, { recursive: true });
+      assertCurrent();
       const targetChunks = internalRagEmbeddableChunks(corpus);
       if (targetChunks.length > INTERNAL_RAG_MAX_EMBEDDABLE_CHUNKS) {
         return {
@@ -258,6 +307,7 @@ export class InternalRagEmbeddingService {
         };
       }
       const records = await store.loadRagEmbeddingRecords();
+      assertCurrent();
       const desired = new Map(targetChunks.map((chunk) => [chunk.chunkId, chunk] as const));
       const reusable = new Map<string, RagEmbeddingRecord>();
       const completeVectors = new Map<string, Float32Array>();
@@ -277,9 +327,10 @@ export class InternalRagEmbeddingService {
       const missing = targetChunks.filter((chunk) => !reusable.has(chunk.chunkId));
       let embedded = 0;
       for (let start = 0; start < missing.length; start += EMBED_BATCH_SIZE) {
-        if (signal.aborted) throw new Error('RAG_EMBEDDING_CANCELLED');
+        assertCurrent();
         const batch = missing.slice(start, start + EMBED_BATCH_SIZE);
         const response = await this.request(batch.map(chunkText), signal);
+        assertCurrent();
         if (!response.ok || !response.vectors || response.vectors.length !== batch.length || response.dim !== INTERNAL_RAG_EMBEDDING.dim) {
           return {
             ok: false,
@@ -294,12 +345,13 @@ export class InternalRagEmbeddingService {
           vector: new Float32Array(response.vectors![index]!)
         }));
         for (let entryStart = 0; entryStart < entries.length; entryStart += PERSIST_BATCH_SIZE) {
-          if (signal.aborted) throw new Error('RAG_EMBEDDING_CANCELLED');
+          assertCurrent();
           await store.mergeRagEmbeddings({
             model: INTERNAL_RAG_EMBEDDING.id,
             entries: entries.slice(entryStart, entryStart + PERSIST_BATCH_SIZE),
             deletedChunkIds: entryStart === 0 ? [...staleIds] : []
           });
+          assertCurrent();
         }
         for (const entry of entries) completeVectors.set(entry.chunkId, entry.vector);
         embedded += entries.length;
@@ -308,8 +360,10 @@ export class InternalRagEmbeddingService {
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
       if (missing.length === 0 && staleIds.size > 0) {
+        assertCurrent();
         await store.mergeRagEmbeddings({ model: INTERNAL_RAG_EMBEDDING.id, entries: [], deletedChunkIds: [...staleIds] });
       }
+      assertCurrent();
       this.completed = { workspaceId: corpus.workspaceId, fingerprint, vectors: completeVectors };
       return {
         ok: true,
@@ -342,22 +396,26 @@ export class InternalRagEmbeddingService {
   private startCorpusJob(
     corpus: RagCorpus,
     store: EmbeddingStore,
-    signal: AbortSignal,
+    controller: AbortController,
     fingerprint: string
   ): Promise<InternalEmbeddingResult> {
-    const job = this.embedCorpus(corpus, store, signal, fingerprint);
+    const generation = this.generation;
+    const job = this.embedCorpus(corpus, store, controller.signal, fingerprint, generation);
+    this.ownedJobs.set(job, controller);
     void job.then((result) => {
-      if (!result.ok && result.code !== 'RAG_EMBEDDING_CANCELLED' && this.activeJob === job) {
+      if (!result.ok && result.code !== 'RAG_EMBEDDING_CANCELLED' && this.activeJob === job
+        && generation === this.generation && !this.disposed && !this.closing) {
         this.unavailableUntil = Date.now() + EMBEDDING_RETRY_COOLDOWN_MS;
         void this.resetWorker();
       }
     }).catch(() => {
-      if (this.activeJob === job) {
+      if (this.activeJob === job && generation === this.generation && !this.disposed && !this.closing) {
         this.unavailableUntil = Date.now() + EMBEDDING_RETRY_COOLDOWN_MS;
         void this.resetWorker();
       }
     });
     void job.finally(() => {
+      this.ownedJobs.delete(job);
       if (this.activeJob === job) {
         this.activeJob = null;
         this.activeFingerprint = null;
@@ -369,13 +427,14 @@ export class InternalRagEmbeddingService {
   }
 
   private startScheduledJob(): void {
+    if (this.disposed || this.closing) return;
     const next = this.scheduled;
     if (!next || this.activeJob || Date.now() < this.unavailableUntil) return;
     this.scheduled = null;
     this.activeAbort = new AbortController();
     this.activeFingerprint = next.fingerprint;
     this.completed = null;
-    this.activeJob = this.startCorpusJob(next.corpus, next.store, this.activeAbort.signal, next.fingerprint);
+    this.activeJob = this.startCorpusJob(next.corpus, next.store, this.activeAbort, next.fingerprint);
   }
 
   private async resetWorker(): Promise<void> {
@@ -386,7 +445,10 @@ export class InternalRagEmbeddingService {
     // 否则取消/失败后的下一次索引会永久等待一个永远不会回来的响应。
     for (const pending of this.pending.values()) pending.reject(new Error('RAG_EMBEDDING_WORKER_RESET'));
     this.pending.clear();
-    await worker.terminate();
+    const termination = worker.terminate();
+    this.workerTerminations.add(termination);
+    try { await termination; }
+    finally { this.workerTerminations.delete(termination); }
   }
 
   private async request(texts: string[], signal?: AbortSignal): Promise<WorkerResponse> {
@@ -416,6 +478,7 @@ export class InternalRagEmbeddingService {
   }
 
   private ensureWorker(): Worker {
+    if (this.disposed || this.closing) throw new Error('RAG_EMBEDDING_CLOSED');
     if (this.worker) return this.worker;
     const script = workerFilePath();
     if (!existsSync(script)) throw new Error('RAG_EMBEDDING_WORKER_UNAVAILABLE');
@@ -431,6 +494,7 @@ export class InternalRagEmbeddingService {
       pending.resolve(message);
     });
     worker.on('error', (error) => {
+      if (this.worker !== worker) return;
       this.worker = null;
       for (const pending of this.pending.values()) pending.reject(error instanceof Error ? error : new Error(String(error)));
       this.pending.clear();

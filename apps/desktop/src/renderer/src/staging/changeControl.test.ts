@@ -359,3 +359,37 @@ describe('validateChange', () => {
     );
   });
 });
+
+it('same-target edits during a write keep the writer isolated and replace only the pending draft', async () => {
+  const store = new ChangeControlStore(), original = store.propose(proposeInput());
+  store.approve(original.id);
+  let resolve!: (result: { ok: boolean; diagnostics: Array<{ code: string; message: string }> }) => void;
+  const pending = new Promise<{ ok: boolean; diagnostics: Array<{ code: string; message: string }> }>(yes => { resolve = yes; });
+  const committing = store.commitAll(async () => pending);
+  const newer = store.propose(proposeInput({ newValue: 'newer' }));
+  assert.notEqual(newer.id, original.id);
+  const latest = store.propose(proposeInput({ newValue: 'latest' }));
+  assert.equal(latest.id, newer.id);
+  assert.equal(store.getState().items.length, 2);
+  resolve({ ok: true, diagnostics: [{ code: 'ORIGINAL_RECEIPT', message: 'saved original' }] });
+  await committing;
+  assert.equal(statusOf(store, original.id), 'written');
+  assert.equal(statusOf(store, newer.id), 'draft');
+  assert.deepEqual(store.getState().items.find(i => i.id === original.id)?.diagnostics, [{ code: 'ORIGINAL_RECEIPT', message: 'saved original' }]);
+  assert.equal(store.approve(newer.id), true);
+  const applied: string[] = [];
+  await store.commitAll(async change => { applied.push(change.newValue); return { ok: true }; });
+  assert.deepEqual(applied, ['latest']);
+});
+
+it('same-target edits after a written revision are separately approvable and do not replace its receipt', async () => {
+  const store = new ChangeControlStore(), original = store.propose(proposeInput());
+  store.approve(original.id); await store.commitAll(async () => ({ ok: true }));
+  const newer = store.propose(proposeInput({ newValue: 'after committed' }));
+  assert.notEqual(newer.id, original.id);
+  assert.equal(store.approve(newer.id), true);
+  assert.equal(statusOf(store, original.id), 'written');
+  let calls = 0; await store.commitAll(async change => { calls++; assert.equal(change.id, newer.id); return { ok: true }; });
+  assert.equal(calls, 1);
+  assert.deepEqual(store.getState().items.map(item => item.status), ['written', 'written']);
+});

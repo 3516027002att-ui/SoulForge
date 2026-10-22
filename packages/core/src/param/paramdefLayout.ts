@@ -777,6 +777,19 @@ function decodeField(rowData: Buffer, field: ParamFieldDef): ParamFieldValue {
 }
 
 function writeField(buf: Buffer, field: ParamFieldDef, value: number | string | boolean): void {
+  if (NUMERIC_TYPES.has(field.type)) {
+    const text = typeof value === 'string' ? value.trim() : null;
+    const numeric = Number(value);
+    // Buffer integer writers silently coerce NaN to zero and truncate fractions.
+    // Preserve explicit IEEE NaN for floats, but never interpret blank or
+    // unrelated text as a numeric edit.
+    if (text !== null && (text.length === 0 || (Number.isNaN(numeric) && text !== 'NaN'))) {
+      throw new Error(`数值字段需要有效数值，得到 ${value}`);
+    }
+    if (INTEGER_TYPES.has(field.type) && !Number.isSafeInteger(numeric)) {
+      throw new Error(`整数字段需要安全整数，得到 ${value}`);
+    }
+  }
   switch (field.type) {
     case 'u8':
       buf.writeUInt8(Number(value), field.offset);

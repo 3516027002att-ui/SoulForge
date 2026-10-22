@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
+import {searchTaeActionPage, type TaeActionSearchWindow} from './taeActionSearch.js';
 import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
+import { cursorIdentity } from '../workspace/cursorIdentity.js';
 import type {
   EventArg,
   EventExport,
@@ -630,8 +632,14 @@ export class WorkspaceIndex {
    * Remove semantic projections whose provenance points at changed sources.
    * Replacing the file catalog alone proves only that bytes changed; it does
    * not prove that old decoded symbols still describe the new bytes.
+   * A synchronous projection replacement may defer the intermediate graph;
+   * that caller must rebuild before returning. Reference queries do not
+   * rebuild lazily, and the default still rebuilds synchronously here.
    */
-  invalidateChangedSources(sourceUris: readonly string[]): SourceInvalidationResult {
+  invalidateChangedSources(
+    sourceUris: readonly string[],
+    options: { rebuildReferences?: boolean } = {}
+  ): SourceInvalidationResult {
     const uniqueSources = [...new Set(sourceUris.filter((sourceUri) => sourceUri.trim().length > 0))];
     this.invalidateSemanticSourceUriCache();
     if (uniqueSources.length > 0) this.markReferencesDirty();
@@ -645,9 +653,15 @@ export class WorkspaceIndex {
     const changedFiles = uniqueSources
       .map((sourceUri) => findUniqueSourceFile(this.filesByUri, sourceUri))
       .filter((file): file is IndexedFile => file !== undefined);
-    const isChangedSource = (sourceUri: string): boolean =>
-      uniqueSources.includes(sourceUri)
-      || changedFiles.some((file) => sourceUriMatchesFile(sourceUri, file));
+    const changedSourceByUri = new Map<string, boolean>();
+    const isChangedSource = (sourceUri: string): boolean => {
+      const cached = changedSourceByUri.get(sourceUri);
+      if (cached !== undefined) return cached;
+      const changed = uniqueSources.includes(sourceUri)
+        || changedFiles.some((file) => sourceUriMatchesFile(sourceUri, file));
+      changedSourceByUri.set(sourceUri, changed);
+      return changed;
+    };
     const removed = {
       events: 0,
       mapEntities: 0,
@@ -701,7 +715,12 @@ export class WorkspaceIndex {
     });
     this.scriptExports = this.scriptExports.filter((item) => !isChangedSource(item.sourceUri));
 
-    const referencesRebuilt = uniqueSources.length > 0 ? this.rebuildReferences().edges.length : this.references.length;
+    let referencesRebuilt = this.references.length;
+    if (uniqueSources.length > 0) {
+      referencesRebuilt = options.rebuildReferences === false
+        ? 0
+        : this.rebuildReferences().edges.length;
+    }
     this.recomputeCoverageStates();
     return { sourceUris: uniqueSources, removed, referencesRebuilt };
   }
@@ -836,6 +855,19 @@ export class WorkspaceIndex {
   mergeParamRows(value: ParamExport): boolean {
     const key = paramExportKey(value);
     const existing = this.paramExports.find((item) => paramExportKey(item) === key);
+    // A row ID may name multiple physical slots. Unknown identity cannot
+    // select one of those slots or add a synthetic third copy of that row.
+    const physicalIdentityByRow = new Map<string, boolean>();
+    for (const batch of [existing?.rows ?? [], value.rows]) {
+      for (const row of batch) {
+        const rowIndex = paramRowPhysicalIndex(row);
+        if (rowIndex === null) return false;
+        const logicalKey = paramRowLogicalKey(row);
+        const known = rowIndex !== undefined;
+        if (physicalIdentityByRow.has(logicalKey) && physicalIdentityByRow.get(logicalKey) !== known) return false;
+        physicalIdentityByRow.set(logicalKey, known);
+      }
+    }
     if (existing && sameProvidedParamExportMetadata(existing, value)
       && value.rows.every((incoming) => {
         const previous = existing.rows.find((row) => paramRowKey(row) === paramRowKey(incoming));
@@ -869,9 +901,13 @@ export class WorkspaceIndex {
       rows.set(key, mergedRow);
     }
     const mergedRows = [...rows.values()];
-    const sourceHashes = new Set(mergedRows.map((row) => row.sourceHash).filter((item): item is string => Boolean(item)));
-    const outerFileHashes = new Set(mergedRows.map((row) => row.outerFileHash).filter((item): item is string => Boolean(item)));
-    const sourceRevisions = new Set(mergedRows.map((row) => row.sourceRevision).filter((item): item is number => item !== undefined));
+    const sourceHashes = new Set([value.sourceHash, ...mergedRows.map((row) => row.sourceHash)].filter((item): item is string => Boolean(item)));
+    const outerFileHashes = new Set([value.outerFileHash, ...mergedRows.map((row) => row.outerFileHash)].filter((item): item is string => Boolean(item)));
+    const sourceRevisions = new Set([value.sourceRevision, ...mergedRows.map((row) => row.sourceRevision)].filter((item): item is number => item !== undefined));
+    // A partial native read must not erase explicit version conflicts by
+    // omitting the export-level identity. Keep the prior snapshot unchanged;
+    // a source refresh must establish one coherent version before publication.
+    if (sourceHashes.size > 1 || outerFileHashes.size > 1 || sourceRevisions.size > 1) return false;
     return this.upsertParamExport({
       ...(value.sourceUri !== undefined ? { sourceUri: value.sourceUri } : existing?.sourceUri !== undefined ? { sourceUri: existing.sourceUri } : {}),
       ...(value.entryIndex !== undefined ? { entryIndex: value.entryIndex } : existing?.entryIndex !== undefined ? { entryIndex: existing.entryIndex } : {}),
@@ -922,6 +958,34 @@ export class WorkspaceIndex {
     this.taeExports = replaceByKey(this.taeExports, value.sourceUri, (item) => item.sourceUri, value);
     this.recomputeCoverageStates();
     return true;
+  }
+
+  /** Merge bounded reads from the same snapshot without dropping unread siblings. */
+  mergeTaeEvents(value: TaeExport): boolean {
+    const previous = this.taeExports.find((item) => item.sourceUri === value.sourceUri);
+    // A physical snapshot can be ingested without a catalog mtime and later
+    // read through the public tool with one. Matching captured bytes, native
+    // logical identity and reader revision retain unread sibling projections.
+    const sameSnapshot = previous && previous.sourceHash === value.sourceHash
+      && previous.readerSchemaRevision === value.readerSchemaRevision
+      && (previous.outerFileHash && value.outerFileHash
+        ? previous.outerFileHash === value.outerFileHash
+        : previous.sourceRevision === value.sourceRevision);
+    if (!sameSnapshot)
+      return this.upsertTaeExport(value);
+    const key = (animation: TaeAnimSymbol) => JSON.stringify([animation.taeEntryIndex, animation.taeEntryId, animation.taeEntryName, animation.taeGroup, animation.animId]);
+    const animations = new Map(previous.animations.map((animation) => [key(animation), animation]));
+    for (const animation of value.animations) {
+      const old = animations.get(key(animation));
+      const events = new Map((old?.events ?? []).map((event) => [event.index, event]));
+      for (const event of animation.events) events.set(event.index, event);
+      const ordered = [...events.values()].sort((a, b) => a.index - b.index);
+      const eventCount = animation.eventCount ?? old?.eventCount;
+      const eventsComplete = eventCount !== undefined && ordered.length === eventCount
+        && ordered.every((event, index) => event.index === index);
+      animations.set(key(animation), { ...old, ...animation, ...(eventCount === undefined ? {} : { eventCount }), eventsComplete, events: ordered });
+    }
+    return this.upsertTaeExport({ ...previous, ...value, animations: [...animations.values()] });
   }
 
   /**
@@ -1117,7 +1181,7 @@ export class WorkspaceIndex {
           code: 'RESOURCE_SEARCH_CURSOR_SCOPE_MISMATCH'
         });
       }
-      if (!isResourceSearchCursorScope(parsed) || parsed.workspaceId !== this.workspaceId) {
+      if (!isResourceSearchCursorScope(parsed) || parsed.workspaceId !== cursorIdentity(this.workspaceId)) {
         throw Object.assign(new Error('资源搜索 cursor 范围无效。'), {
           code: 'RESOURCE_SEARCH_CURSOR_SCOPE_MISMATCH'
         });
@@ -1130,7 +1194,8 @@ export class WorkspaceIndex {
           code: 'RESOURCE_SEARCH_CURSOR_SCOPE_MISMATCH'
         });
       }
-      scope = parsed;
+      // Restore the real workspace id in memory only; the wire carries its digest.
+      scope = { ...parsed, workspaceId: this.workspaceId };
       offset = payload.offset;
       expectedHash = payload.sourceHash;
     }
@@ -1157,7 +1222,7 @@ export class WorkspaceIndex {
       // is used as the existing opaque token domain without broadening the
       // native edit-domain contract.
       domain: RESOURCE_SEARCH_CURSOR_DOMAIN,
-      scope: JSON.stringify(scope),
+      scope: JSON.stringify({ ...scope, workspaceId: cursorIdentity(this.workspaceId) }),
       sourceHash,
       offset: nextOffset
     }) : undefined;
@@ -1289,6 +1354,17 @@ export class WorkspaceIndex {
     return searchSymbols(events, query, limit, taeEventSearchText);
   }
 
+  /** Compatibility projection; the search provider always owns bounded pages. */
+  searchTaeActionGroups(query: string, limit = 100) {
+    return this.searchTaeActionGroupsPage(query, {limit: Math.min(128, limit), eventLimit:128}).matches;
+  }
+
+  searchTaeActionGroupsPage(query:string, window:TaeActionSearchWindow={}) {
+    const profile=buildSearchQueryProfile(query);
+    const self=this;
+    function* sources(){for(const source of self.taeExports)if(self.isActiveSemanticSourceUri(source.sourceUri))yield source;}
+    return searchTaeActionPage(sources,event=>scoreSearchProfile(taeEventSearchText(event),profile),window);
+  }
   lookupTextEntries(textId: number, category?: string): TextEntrySymbol[] {
     const normalizedCategory = category?.toLowerCase();
     const matches: TextEntrySymbol[] = [];
@@ -1521,7 +1597,9 @@ export class WorkspaceIndex {
   }
 }
 
-const RESOURCE_SEARCH_CURSOR_SESSION = 'workspace-resource-search-v1';
+// v2: scope.workspaceId is cursorIdentity(workspaceId). Unhashed v1 tokens
+// carried the absolute workspace URL and are rejected (session id mismatch).
+const RESOURCE_SEARCH_CURSOR_SESSION = 'workspace-resource-search-v2';
 // Native cursor payloads use the existing edit-domain union. The session id
 // and scope below make this a separate catalog-only cursor contract.
 const RESOURCE_SEARCH_CURSOR_DOMAIN = 'script' as const;
@@ -1852,7 +1930,22 @@ function paramExportKey(value: ParamExport): string {
   return `${sourceUri}\u0000${entryIdentity.toLowerCase()}`;
 }
 
-function paramRowKey(value: Pick<ParamRowSymbol, 'sourceUri' | 'entryName' | 'entryIndex' | 'rowId'>): string {
+function paramRowPhysicalIndex(value: Pick<ParamRowSymbol, 'rowIndex' | 'raw'>): number | undefined | null {
+  const top = value.rowIndex;
+  const raw = isRecord(value.raw) ? value.raw.rowIndex : undefined;
+  if (top !== undefined && (!Number.isSafeInteger(top) || top < 0)) return null;
+  if (raw !== undefined && (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw < 0)) return null;
+  if (top !== undefined && raw !== undefined && top !== raw) return null;
+  return top ?? (typeof raw === 'number' ? raw : undefined);
+}
+
+function paramRowKey(value: Pick<ParamRowSymbol, 'sourceUri' | 'entryName' | 'entryIndex' | 'rowId' | 'rowIndex' | 'raw'>): string {
+  const logicalKey = paramRowLogicalKey(value);
+  const rowIndex = paramRowPhysicalIndex(value);
+  return rowIndex === undefined ? logicalKey : `${logicalKey}\u0000@${rowIndex}`;
+}
+
+function paramRowLogicalKey(value: Pick<ParamRowSymbol, 'sourceUri' | 'entryName' | 'entryIndex' | 'rowId'>): string {
   const entryIdentity = value.entryName
     ?? (value.entryIndex === undefined ? '' : `#${value.entryIndex}`);
   return `${value.sourceUri}\u0000${entryIdentity.toLowerCase()}\u0000${value.rowId}`;

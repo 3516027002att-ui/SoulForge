@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { pathToFileURL } from 'node:url';
 import type { RagChunk, RagCorpus, RagRetrieveResult } from '@soulforge/shared';
 import { retrieveEvidenceHybrid, fuseRrf } from '../rag/hybridRetrieve.js';
 import { compareCodePointText, compareRanked, topK } from '../rag/topK.js';
@@ -17,6 +18,10 @@ interface SmokeSummary {
   readonly taskId: 'SF-18';
   readonly cases: number;
   readonly productionExports: readonly string[];
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  console.log(JSON.stringify(runAuditRagScopeSmoke()));
 }
 
 export function runAuditRagScopeSmoke(): SmokeSummary {

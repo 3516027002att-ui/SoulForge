@@ -1,0 +1,17 @@
+.loaded-comparison { margin: 4px 0; border: 1px solid var(--line); border-radius: var(--radius-s); font-size: 12px; flex-shrink: 0; }
+.loaded-comparison > summary { cursor: pointer; padding: 6px 8px; color: var(--ink-1); }
+.loaded-comparison > summary:focus-visible { outline: 2px solid var(--ember); outline-offset: -2px; }
+.loaded-comparison__body { padding: 0 8px 8px; max-height: 340px; overflow: auto; }
+.loaded-comparison__legend { display: flex; flex-wrap: wrap; gap: 12px; margin: 4px 0; }
+.loaded-comparison__legend .is-remove { color: var(--danger-text); }
+.loaded-comparison__legend .is-add { color: var(--ok); }
+.loaded-comparison__note { margin: 4px 0 8px; font-size: 11px; }
+.loaded-comparison__source { max-height: 260px; overflow: auto; font-family: var(--font-mono); }
+.loaded-comparison__line { display: flex; align-items: baseline; padding: 2px 4px; border-left: 2px solid transparent; font-family: var(--font-mono); }
+.loaded-comparison__line.is-remove { background: color-mix(in srgb, var(--danger) 12%, transparent); border-left-color: var(--danger); }
+.loaded-comparison__line.is-add { background: color-mix(in srgb, var(--ok) 12%, transparent); border-left-color: var(--ok); }
+.loaded-comparison__line.is-hunk { color: var(--ink-3); background: var(--forge-2); }
+.loaded-comparison__number { flex: 0 0 5ch; color: var(--ink-3); text-align: right; margin-right: 6px; }
+.loaded-comparison__sign { flex: 0 0 2ch; user-select: none; }
+.loaded-comparison__text { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.loaded-comparison__field-name { margin: 8px 0 4px; }

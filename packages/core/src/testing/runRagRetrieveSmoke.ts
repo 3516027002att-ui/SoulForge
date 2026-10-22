@@ -807,9 +807,8 @@ INSERT INTO workspaces (workspace_id, root_path, game, created_at, updated_at)
     });
     if (missRun.finishReason !== 'stop') throw new Error(`rag miss run failed: ${missRun.finishReason}`);
 
-    // adversarial E2 regression: an internal continuation is appended as a
-    // role=user message after a tool call, but retrieval must keep using the
-    // host-captured external taskQuery.
+    // The fixed external taskQuery is retrieved once and injected once in the
+    // current window; a subsequent empty model stop is not resampled.
     const retryQueries: string[] = [];
     const retryInjected: string[] = [];
     let retryCalls = 0;
@@ -828,11 +827,12 @@ INSERT INTO workspaces (workspace_id, root_path, game, created_at, updated_at)
               toolCalls: [{ id: 'retry-tool', name: 'noop', argumentsJson: '{}' }]
             },
             finishReason: 'tool_use' as const,
+            usage:{inputTokens:1,outputTokens:1},
             diagnostics: []
           };
         }
         if (retryCalls === 2) {
-          return { message: { role: 'assistant', content: '' }, finishReason: 'stop' as const, diagnostics: [] };
+          return { message: { role: 'assistant', content: '' }, finishReason: 'stop' as const, diagnostics: [],usage:{inputTokens:1,outputTokens:1} };
         }
         return { message: { role: 'assistant', content: 'done' }, finishReason: 'stop' as const, diagnostics: [] };
       },
@@ -854,7 +854,7 @@ INSERT INTO workspaces (workspace_id, root_path, game, created_at, updated_at)
         }
       }
     });
-    if (retryResult.finishReason !== 'stop' || retryCalls !== 3 || retryQueries.length !== 1
+    if (retryResult.finishReason !== 'stop' || retryCalls !== 2 || retryQueries.length !== 1
       || retryInjected.filter((content) => content.length > 0).length !== 1
       || retryQueries.some((query) => query !== 'flag 71000000 在哪个事件里使用')) {
       throw new Error(`RAG evidence/query must be cached per context window: ${JSON.stringify({ retryCalls, retryQueries, retryInjected, finish: retryResult.finishReason })}`);
@@ -1263,6 +1263,7 @@ function makeTaeExport(): BridgeResult<unknown> {
     diagnostics: [],
     data: {
       format: 'TAE',
+      identityProjectionVersion: 2,
       version: '0x0001000D',
       sourceSize: 1234,
       sourceHash: 'tae-synthetic-hash',

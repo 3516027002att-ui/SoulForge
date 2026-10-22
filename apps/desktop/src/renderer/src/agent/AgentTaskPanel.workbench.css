@@ -1,0 +1,19 @@
+
+/* AI 工作台（编辑器区 ai 模式） */
+.ai-context-card { margin-bottom: 0; }
+.context-card span { display: block; margin-top: 6px; color: var(--ink-2); word-break: break-all; font-size: 12px; user-select: text; }
+.tool-group { margin-top: 10px; }
+.tool-group small { display: block; color: var(--ink-3); text-transform: uppercase; letter-spacing: .08em; font-size: 10px; }
+.tool-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 7px 0 10px; }
+.tool-list span {
+  border: 1px solid var(--line); border-radius: var(--radius-m);
+  padding: 3px 8px; color: var(--ink-1); font-size: 11px; background: var(--forge-0);
+}
+.tool-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 8px; }
+.tool-row input { padding: 6px 10px; font-size: 12px; width: 100%; }
+.tool-chip {
+  display: inline-block; margin: 0;
+  border-radius: 999px; padding: 3px 10px;
+  color: var(--ember-text); background: var(--ember-soft);
+  font-size: 11px; font-family: var(--font-mono);
+}

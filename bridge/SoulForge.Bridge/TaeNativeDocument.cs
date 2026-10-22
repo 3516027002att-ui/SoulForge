@@ -9,6 +9,9 @@ using System.Text;
 /// </summary>
 internal sealed class TaeNativeDocument
 {
+    // Increment when native action identity/projection semantics change, even
+    // if the source bytes and the first-party parameter schema do not.
+    internal const int IdentityProjectionVersion = 2;
     private const int FileHeaderSize = 0x50; // 64-byte header + 16-byte extended header
     private const int Section1HeaderSize = 0x30; // 48 bytes
     private const int AnimTableEntrySize = 16;
@@ -121,10 +124,12 @@ internal sealed class TaeNativeDocument
         if (animCount < 0 || animCount > MaxAnimations)
             throw new InvalidDataException($"TAE 动画计数 {animCount} 越界。");
 
-        // Validate animation table bounds (animTableOffset points to an 8-byte header before entries)
-        var animTableDataOffset = animTableOffset + 8;
+        // Sekiro stores (animation ID, animation-entry offset) pairs directly
+        // at animTableOffset; there is no preceding eight-byte table header.
+        var animTableDataOffset = animTableOffset;
         if (animTableOffset < 0
-            || animTableDataOffset + (long)animTableEntryCount * AnimTableEntrySize > source.Length)
+            || animTableOffset > source.Length
+            || (long)animTableEntryCount * AnimTableEntrySize > source.Length - animTableOffset)
             throw new InvalidDataException("TAE 动画表越界。");
 
         var eventTypeSet = new SortedSet<int>();
@@ -135,11 +140,11 @@ internal sealed class TaeNativeDocument
         for (var i = 0; i < animTableEntryCount; i++)
         {
             var te = checked((int)(animTableDataOffset + (long)i * AnimTableEntrySize));
-            var animEntryOffset = ReadInt64(source, te);
-            var animId = ReadInt64(source, te + 8);
+            var animId = ReadInt64(source, te);
+            var animEntryOffset = ReadInt64(source, te + 8);
 
             // ── Animation Entry (48 bytes) ──
-            if (animEntryOffset < 0 || animEntryOffset + AnimationEntrySize > source.Length)
+            if (animEntryOffset < 0 || animEntryOffset > source.Length - AnimationEntrySize)
                 throw new InvalidDataException($"TAE 动画 {animId} 条目偏移 {animEntryOffset} 越界。");
 
             var ae = checked((int)animEntryOffset);
@@ -241,8 +246,19 @@ internal sealed class TaeNativeDocument
                             $"TAE 动画 {animId} 事件组 {g} 偏移数组越界。");
                     eventOffsets = new int[checked((int)groupEventCount)];
                     for (var ge = 0; ge < groupEventCount; ge++)
-                        eventOffsets[ge] = ReadInt32(
+                    {
+                        var eventHeaderOffset = ReadInt32(
                             source, checked((int)(groupEventArrayOffset + ge * 4)));
+                        // Members point to this animation's 24-byte event headers,
+                        // not arbitrary source bytes or another animation's table.
+                        var relativeOffset = (long)eventHeaderOffset - eventTableOffset;
+                        if (relativeOffset < 0
+                            || relativeOffset >= (long)eventCount * EventTableEntrySize
+                            || relativeOffset % EventTableEntrySize != 0)
+                            throw new InvalidDataException(
+                                $"TAE 动画 {animId} 事件组 {g} 成员 {ge} 偏移 {eventHeaderOffset} 不对应本动画事件表中的事件头。");
+                        eventOffsets[ge] = eventHeaderOffset;
+                    }
                 }
                 else
                 {
@@ -543,9 +559,11 @@ internal sealed class TaeNativeDocument
         return new
         {
             format = "TAE",
+            identityProjectionVersion = IdentityProjectionVersion,
             version = $"0x{Version:X8}",
             sourceSize = SourceBytes.Length,
             sourceHash = SourceHash,
+            outerFileHash = SourceHash,
             eventBank = EventBank,
             schemaBankId = SchemaBankId,
             animationCount = Animations.Count,
@@ -603,6 +621,7 @@ internal sealed class TaeNativeDocument
                 startTime = e.StartTime,
                 endTime = e.EndTime,
                 eventTypeId = e.EventTypeId,
+                typeName = resolution.Event?.Name,
                 parameterLength,
                 parameterDecoded = decodedComplete,
                 templateFields = decodedComplete ? decoded : null,

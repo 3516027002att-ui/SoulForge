@@ -28,6 +28,8 @@ export interface OperationLogStore {
   record(entry: OperationLogRecord): Promise<void>;
   get(opId: string): Promise<OperationLogRecord | undefined>;
   list(workspaceId?: string): Promise<OperationLogRecord[]>;
+  getTransactionForOperation?(opId: string): Promise<TransactionJournalRecord | undefined>;
+  findTransactionsForRequest?(sessionName: string, requestId: string): Promise<TransactionJournalRecord[]>;
   updateStatus(
     opId: string,
     status: OperationStatus,

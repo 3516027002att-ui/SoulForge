@@ -25,8 +25,10 @@
 import { createHash } from 'node:crypto';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { extname, join, relative, resolve } from 'node:path';
+import { materializeCorpusSnapshot } from './verify/fixedCorpusSnapshot.mjs';
 
 /**
  * corpus 根解析。与 verify-native-dcx-documents.mjs 采用同一口径，理由见那里的
@@ -42,8 +44,14 @@ import { extname, join, relative, resolve } from 'node:path';
  *
  * 显式传参时不下沉——那是调用方明确指定的目录。
  */
+const args=process.argv.slice(2);let explicitRoot;let explicitManifest;
+for(let index=0;index<args.length;index++){
+ if(args[index]==='--manifest'){explicitManifest=args[++index];if(!explicitManifest||explicitManifest.startsWith('--'))throw new Error('CORPUS_MANIFEST_ARGUMENT_INVALID');}
+ else if(!explicitRoot&&!args[index].startsWith('--'))explicitRoot=args[index];
+ else throw new Error('CORPUS_MANIFEST_ARGUMENT_INVALID');
+}
 const corpusRoot = (() => {
-  if (process.argv[2]) return resolve(process.argv[2]);
+  if (explicitRoot) return resolve(explicitRoot);
   const envRoot = process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
     ?? process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
   if (!envRoot) return resolve('mods');
@@ -51,13 +59,8 @@ const corpusRoot = (() => {
   const modsUnder = join(base, 'mods');
   return existsSync(modsUnder) ? modsUnder : base;
 })();
-const manifestArgIndex = process.argv.indexOf('--manifest');
-const manifestPath = resolve(
-  manifestArgIndex >= 0 && process.argv[manifestArgIndex + 1]
-    ? process.argv[manifestArgIndex + 1]
-    : 'testdata/corpus/sekiro-1.6.corpus-manifest.json'
-);
-const executable = resolve('bridge/SoulForge.Bridge/bin/Debug/net10.0/win-x64/SoulForge.Bridge.exe');
+const manifestPath = resolve(explicitManifest??'testdata/corpus/sekiro-1.6.corpus-manifest.json');
+const executable = process.env.SOULFORGE_BRIDGE_PATH?resolve(process.env.SOULFORGE_BRIDGE_PATH):resolve('bridge/SoulForge.Bridge/bin/Debug/net10.0/win-x64/SoulForge.Bridge.exe');
 
 const frozenSchema = JSON.parse(await readFile(
   resolve('packages/core/src/bridge/releaseCorpusRegistry.schema.json'),
@@ -79,7 +82,7 @@ if (manifest?.schemaVersion !== '1.0.0' || !Array.isArray(manifest.entries)) {
 }
 const entriesByHash = new Map();
 for (const entry of manifest.entries) {
-  if (typeof entry.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(entry.sha256)) {
+  if (typeof entry.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(entry.sha256)||!Number.isSafeInteger(entry.size)||entry.size<1) {
     fail('CORPUS_MANIFEST_INVALID', `manifest 条目 sha256 非法：${entry.logicalId}`);
   }
   if (entriesByHash.has(entry.sha256)) {
@@ -88,7 +91,8 @@ for (const entry of manifest.entries) {
   entriesByHash.set(entry.sha256, entry);
 }
 
-const files = await walkDcx(corpusRoot);
+let files;
+try{files=await walkDcx(corpusRoot);}catch(error){if(error.code==='ENOENT'||error.code==='EACCES'){unavailable('CORPUS_MANIFEST_ROOT_UNAVAILABLE','Pinned corpus root is missing or unreadable.');}throw error;}
 const unmatched = new Set(entriesByHash.keys());
 const mismatches = [];
 const extraFiles = [];
@@ -97,6 +101,7 @@ let filesScanned = files.length;
 let uniqueContentFiles = 0;
 let matchedEntries = 0;
 const matchedHashes = new Set();
+const matchedFiles=[];
 
 for (const file of files) {
   const rel = relative(corpusRoot, file).replaceAll('\\', '/');
@@ -120,10 +125,24 @@ for (const file of files) {
   if (size !== entry.size) {
     mismatches.push({ file: rel, field: 'size', manifest: entry.size, actual: size });
   }
-  const classification = classifyViaBridge(file, rel);
+  matchedFiles.push({file,rel,entry});
+  unmatched.delete(hash);
+  matchedEntries += 1;
+}
+
+if(unmatched.size||mismatches.length){unavailable('CORPUS_MANIFEST_INPUT_UNAVAILABLE','Local inputs do not match this pinned manifest.',{missingEntries:[...unmatched],mismatches,extraFiles});}
+if(!existsSync(executable))unavailable('CORPUS_MANIFEST_BRIDGE_UNAVAILABLE','Native Bridge executable is unavailable.');
+for(const {file,rel,entry} of matchedFiles){
+  // Keep only one owned file at a time rather than duplicating the whole corpus.
+  const ownedRoot=await mkdtemp(join(tmpdir(),'soulforge-fixed-corpus-'));let classification;
+  try{
+    const snapshot=await materializeCorpusSnapshot(file,entry,ownedRoot);
+    classification=snapshot.status==='available'?classifyViaBridge(snapshot.path,rel):{inputUnavailable:true};
+  }finally{await rm(ownedRoot,{recursive:true,force:true});}
+  if(classification.inputUnavailable)unavailable('CORPUS_MANIFEST_INPUT_UNAVAILABLE','Local input changed before native classification.',{file:rel});
   if (classification.unavailable) {
-    mismatches.push({ file: rel, field: 'classification', manifest: entry.observedVariant, actual: classification.unavailable });
-    continue;
+    if(classification.unavailable==='bridge-runtime-missing')unavailable('CORPUS_MANIFEST_BRIDGE_UNAVAILABLE','Native Bridge could not execute the fixed-corpus check.',{file:rel,reason:classification.unavailable});
+    mismatches.push({file:rel,field:'classification',manifest:entry.observedVariant,actual:classification.unavailable});continue;
   }
   if (classification.unrecognizedVariant) {
     unrecognizedVariants.add(classification.variant);
@@ -136,8 +155,6 @@ for (const file of files) {
   if (classification.observedVariant !== entry.observedVariant) {
     mismatches.push({ file: rel, field: 'observedVariant', manifest: entry.observedVariant, actual: classification.observedVariant });
   }
-  unmatched.delete(hash);
-  matchedEntries += 1;
 }
 
 const missing = [...unmatched];
@@ -173,9 +190,9 @@ function classifyViaBridge(file, rel) {
     maxBuffer: 32 * 1024 * 1024,
     timeout: 120_000
   });
-  if (result.error || result.status !== 0) {
-    return { unavailable: 'bridge-read-failed' };
-  }
+  if(result.error&&['ENOENT','EACCES'].includes(result.error.code))return {unavailable:'bridge-runtime-missing'};
+  if(result.error)return {unavailable:'bridge-process-failed'};
+  if(/You must install or update \.NET|Failed to load.*hostfxr/iu.test(result.stderr??''))return {unavailable:'bridge-runtime-missing'};
   let envelope;
   try {
     envelope = JSON.parse(result.stdout);
@@ -183,7 +200,7 @@ function classifyViaBridge(file, rel) {
     return { unavailable: 'bridge-response-invalid' };
   }
   const data = envelope.data;
-  if (envelope.parseStatus === 'failed' || !data || data.format !== 'DCX') {
+  if (result.status!==0 || envelope.parseStatus === 'failed' || !data || data.format !== 'DCX') {
     return { unavailable: 'bridge-rejected' };
   }
   if (data.compressionFormat === 'KRAK') {
@@ -234,3 +251,5 @@ function fail(code, message) {
   console.error(JSON.stringify({ ok: false, status: 'failed', code, message }, null, 2));
   process.exit(1);
 }
+
+function unavailable(code,message,details={}){console.log(JSON.stringify({ok:null,status:'skipped',availability:'unavailable',code,message,manifest:manifestPath,...details},null,2));process.exit(0);}

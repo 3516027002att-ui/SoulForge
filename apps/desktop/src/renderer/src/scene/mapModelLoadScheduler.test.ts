@@ -328,3 +328,24 @@ test('MapModelLoadCache exposes dispose instead of converting it to a missing me
   cache.dispose();
   await assert.rejects(cache.load('m000010'), /MAP_MESH_LOAD_CACHE_DISPOSED/);
 });
+
+test('MapModelLoadCache times out a stuck loader, cancels it, and frees its worker slot', async () => {
+  let signal: AbortSignal | undefined;
+  const cache = new MapModelLoadCache((_model, value) => { signal = value; return new Promise(() => {}); }, { timeoutMs: 5 });
+  const outcome = await Promise.race([
+    cache.load('stuck').then(() => 'resolved', (error) => String(error)),
+    new Promise<string>((resolve) => setTimeout(() => resolve('still-stuck'), 30))
+  ]);
+  assert.match(outcome, /MAP_MESH_LOAD_TIMEOUT/);
+  assert.equal(cache.getRetentionStats().inFlightCount, 0);
+  assert.equal(signal?.aborted, true);
+  cache.dispose();
+});
+
+test('MapModelLoadCache disposal settles a loader that ignores AbortSignal', async () => {
+  const cache = new MapModelLoadCache(() => new Promise(() => {}));
+  const pending = cache.load('stuck').then(() => 'resolved', (error) => String(error));
+  cache.dispose();
+  const outcome = await Promise.race([pending, new Promise<string>((resolve) => setTimeout(() => resolve('still-stuck'), 30))]);
+  assert.match(outcome, /MAP_MESH_LOAD_CANCELLED/);
+});

@@ -2,7 +2,7 @@
  * Production script container evidence projection (W-BEHAVIOR-MAP-01).
  *
  * Provides a readonly, structured container-level magic/reference inventory
- * for script containers (luabnd, talkesdbnd, action/*.hks) backing the
+ * for script containers (luabnd, talkesdbnd) backing the
  * script editor:
  *   - entry enumeration (BND4 reference table: name / index / size / id);
  *   - extension distribution across the whole container;
@@ -27,8 +27,8 @@
  * evidence entry names are therefore sanitized to their basename so no
  * absolute path ever reaches the editor/renderer.
  *
- * SoulForge does NOT decompile, recompile, or execute scripts. Disassembly is
- * never presented as editable source.
+ * This inventory projection does not decompile, recompile, or execute scripts.
+ * Standalone source reading is a separate path, not a synthetic container.
  *
  * Authority cap: `candidate`. This projection proves container-level
  * enumeration, bytecode format identification and bounded header evidence
@@ -38,7 +38,7 @@
  * main-process `containerPath`.
  */
 
-import { runBridge } from '../bridge/runBridge.js';
+import { runBridge, type BridgeRunner } from '../bridge/runBridge.js';
 import type { StructuredDiagnostic } from '@soulforge/shared';
 import { createDiagnostic } from '@soulforge/shared';
 
@@ -100,6 +100,38 @@ export interface ScriptContainerEvidence {
   /** Authority marker: container-level inventory only (cap=candidate). */
   authority: 'candidate';
   diagnostics: StructuredDiagnostic[];
+}
+
+/**
+ * Container evidence must not turn a standalone script into a pretend BND4
+ * child. Keep the container-only API explicit and leave source opening to the
+ * production `readScriptSource` path.
+ */
+export function buildRequiresContainerEvidence(
+  containerPath: string,
+  containerFormat: string,
+  extensionDistribution: Record<string, number> = {}
+): ScriptContainerEvidence {
+  return {
+    ok: false,
+    containerPath,
+    containerFormat,
+    entryCount: 0,
+    entries: [],
+    truncated: false,
+    classificationSummary: emptyClassificationSummary(),
+    extensionDistribution,
+    magicVerifiedCount: 0,
+    scriptEntryCount: 0,
+    magicSampleCount: 0,
+    authority: 'candidate',
+    diagnostics: [createDiagnostic({
+      severity: 'error',
+      code: 'SCRIPT_EVIDENCE_REQUIRES_CONTAINER',
+      message: '该接口只提供 BND4 容器条目证据；独立脚本请走 readScriptSource，不构造虚假的 BND4 条目索引。',
+      targetUri: `file:///${containerPath.replace(/\\/g, '/')}`
+    })]
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -264,12 +296,9 @@ interface Bnd4InventoryData {
   resourceKinds?: Record<string, number>;
 }
 
-interface DcxReadEnvelope {
+interface Bnd4ListEnvelope {
   compressionFormat?: string;
-  nested?: {
-    entryCount?: number;
-    entries?: Bnd4InventoryEntry[];
-  };
+  entries?: Bnd4InventoryEntry[];
 }
 
 interface Bnd4ChildSnapshotEnvelope {
@@ -292,7 +321,7 @@ function normalizeExtensionKey(key: string): string {
  * Build a readonly container-level magic/reference inventory for a script
  * container. Uses the Bridge `inventory-asset-resources` command for the
  * container anchor (format / entryCount / extension distribution), the
- * `read-dcx-document` command for the full BND4 reference table when the
+ * `list-bnd4-entries` command for the full BND4 reference table when the
  * container is DCX-wrapped, and `snapshot-bnd4-child` for a bounded magic
  * sample over real `.lua`/`.hks` header bytes.
  *
@@ -301,14 +330,15 @@ function normalizeExtensionKey(key: string): string {
  * script entry) and no absolute paths beyond the documented `containerPath`.
  */
 export async function buildScriptContainerEvidence(
-  options: ScriptEvidenceOptions
+  options: ScriptEvidenceOptions,
+  bridgeRunner: BridgeRunner = runBridge
 ): Promise<ScriptContainerEvidence> {
   const diagnostics: StructuredDiagnostic[] = [];
   const sourceUri = `file:///${options.containerPath.replace(/\\/g, '/')}`;
 
   // Step 1: Container anchor via Bridge inventory (format / entryCount /
   // extension distribution / bounded samples). Sanitized, container-level.
-  const inventory = await runBridge<Bnd4InventoryData>({
+  const inventory = await bridgeRunner<Bnd4InventoryData>({
     command: 'inventory-asset-resources',
     filePath: options.containerPath,
     resourceUri: sourceUri,
@@ -347,30 +377,41 @@ export async function buildScriptContainerEvidence(
     extensionDistribution[normalizeExtensionKey(key)] = count;
   }
 
+  // Non-container resources are not BND4s with a missing table. Reject them
+  // before list-bnd4-entries so a standalone `.hks`/`.lua` can never acquire a
+  // synthetic slot from the inventory sample.
+  if (data.containerType === 'none') {
+    return buildRequiresContainerEvidence(
+      options.containerPath,
+      data.format ?? 'raw',
+      extensionDistribution
+    );
+  }
+
   // Step 2: Full BND4 reference table (index / size / id per entry) via the
-  // DCX document reader when the container is DCX-wrapped; otherwise fall back
-  // to the inventory bounded sample set (name/id only).
+  // listing command (no mutation self-test). A missing reference table leaves
+  // only name/id inventory, which must not be presented as a successful read.
   let rawEntries: Bnd4InventoryEntry[] = data.sampleEntries ?? data.entries ?? [];
   let containerFormat = data.format ?? 'BND4';
-  let enumerationSource: 'read-dcx-document' | 'inventory-sample' = 'inventory-sample';
-  const dcx = await runBridge<DcxReadEnvelope>({
-    command: 'read-dcx-document',
+  let enumerationSource: 'list-bnd4-entries' | 'inventory-sample' = 'inventory-sample';
+  const dcx = await bridgeRunner<Bnd4ListEnvelope>({
+    command: 'list-bnd4-entries',
     filePath: options.containerPath,
     resourceUri: sourceUri,
     allowedRoots: options.allowedRoots,
     ...(options.oodleRuntimeRoot ? { oodleRuntimeRoot: options.oodleRuntimeRoot } : {}),
     timeoutMs: options.timeoutMs ?? 60_000
   });
-  const dcxEntries = dcx.data?.nested?.entries;
+  const dcxEntries = dcx.data?.entries;
   if (dcx.parseStatus !== 'failed' && Array.isArray(dcxEntries) && dcxEntries.length > 0) {
     rawEntries = dcxEntries;
     if (dcx.data?.compressionFormat) {
       containerFormat = `DCX-${dcx.data.compressionFormat}->BND4`;
     }
-    enumerationSource = 'read-dcx-document';
+    enumerationSource = 'list-bnd4-entries';
   }
 
-  const truncated = rawEntries.length > MAX_EVIDENCE_ENTRIES;
+  const truncated = rawEntries.length > MAX_EVIDENCE_ENTRIES || rawEntries.length < (data.entryCount ?? 0);
   const boundedEntries = rawEntries.slice(0, MAX_EVIDENCE_ENTRIES);
 
   // Step 3: Per-entry classification with sanitized names (extension-based).
@@ -381,7 +422,9 @@ export async function buildScriptContainerEvidence(
     const classification = classifyScriptEntry(rawName);
     return {
       name,
-      index: entry.index ?? 0,
+      // Inventory samples do not promise a physical slot. Never lend slot 0's
+      // bytes to another entry when a full reference table was unavailable.
+      index: Number.isSafeInteger(entry.index) && entry.index! >= 0 ? entry.index! : -1,
       size: entry.uncompressedSize ?? 0,
       extension: rawName.split('.').pop()?.toLowerCase() ?? '',
       classification,
@@ -396,13 +439,13 @@ export async function buildScriptContainerEvidence(
   // content never leaves the daemon response into the evidence projection.
   const luaBytecodeIndices: number[] = [];
   entries.forEach((entry, index) => {
-    if (entry.classification === 'lua-bytecode') luaBytecodeIndices.push(index);
+    if (entry.classification === 'lua-bytecode' && entry.index >= 0) luaBytecodeIndices.push(index);
   });
   const magicSampleCount = Math.min(MAGIC_SAMPLE_LIMIT, luaBytecodeIndices.length);
   let magicVerifiedCount = 0;
   for (const entryIndex of luaBytecodeIndices.slice(0, MAGIC_SAMPLE_LIMIT)) {
     const entry = entries[entryIndex]!;
-    const snapshot = await runBridge<Bnd4ChildSnapshotEnvelope>({
+    const snapshot = await bridgeRunner<Bnd4ChildSnapshotEnvelope>({
       command: 'snapshot-bnd4-child',
       filePath: options.containerPath,
       resourceUri: sourceUri,
@@ -435,6 +478,12 @@ export async function buildScriptContainerEvidence(
     classificationSummary[entry.classification] += 1;
   }
   const scriptEntryCount = entries.filter((entry) => isScriptClassification(entry.classification)).length;
+  const referencesAvailable = enumerationSource === 'list-bnd4-entries'
+    && entries.every(entry => entry.index >= 0);
+  if (!referencesAvailable) diagnostics.push(createDiagnostic({
+    severity: 'warning', code: 'SCRIPT_EVIDENCE_REFERENCE_TABLE_UNAVAILABLE',
+    message: '原生条目引用表不可用；仅保留名称分类，不将缺失槽位视作第 0 项或完整证据。', targetUri: sourceUri
+  }));
 
   diagnostics.push(createDiagnostic({
     severity: 'info',
@@ -444,7 +493,7 @@ export async function buildScriptContainerEvidence(
   }));
 
   return {
-    ok: true,
+    ok: referencesAvailable,
     containerPath: options.containerPath,
     containerFormat,
     entryCount: data.entryCount ?? rawEntries.length,

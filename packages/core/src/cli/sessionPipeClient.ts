@@ -1,8 +1,19 @@
 /** T11-C 本地 IPC 客户端：握手、请求与结果传输；只走本机管道，不走 TCP。 */
 import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { connect, type Socket } from 'node:net';
 import { DAEMON_PROTOCOL, daemonPaths } from './sessionPipeDaemon.js';
-import { MAX_FRAME_BYTES, type SessionError } from './localSessionHost.js';
+import { MAX_FRAME_BYTES, type SessionError, type SessionRequestState } from './localSessionHost.js';
+
+import { summarizeOperationOutcomes, type SessionTransactionOutcome } from '../runtime/operationOutcome.js';
+
+export class SessionTransportError extends Error {
+  readonly retryable = false;
+  readonly transaction = summarizeOperationOutcomes([]);
+  constructor(readonly requestId: string, readonly code: string, cause?: Error) {
+    super(`${code}: 请求已发送，事务结果尚未确认；请查询请求或操作状态。`, { cause });
+  }
+}
 
 const DEFAULT_CALL_TIMEOUT_MS = 30_000;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -18,6 +29,8 @@ export interface PipeSessionResult {
   ok: boolean;
   result?: unknown;
   error?: SessionError;
+  requestState?: SessionRequestState;
+  transaction?: SessionTransactionOutcome;
 }
 
 export class SessionPipeClient {
@@ -71,7 +84,7 @@ export class SessionPipeClient {
 
   async cancel(requestId: string): Promise<PipeSessionResult> {
     return await this.call({
-      id: `cancel-${requestId}-${Date.now()}`,
+      id: `cancel-${randomUUID()}`,
       tool: '__host_cancel',
       args: { requestId }
     });
@@ -79,10 +92,14 @@ export class SessionPipeClient {
 
   async requestStatus(requestId: string): Promise<PipeSessionResult> {
     return await this.call({
-      id: `status-${requestId}-${Date.now()}`,
+      id: `status-${randomUUID()}`,
       tool: '__host_request_status',
       args: { requestId }
     });
+  }
+
+  async operationStatus(opId: string): Promise<PipeSessionResult> {
+    return this.call({ id: `operation-${randomUUID()}`, tool: '__host_operation_status', args: { opId } });
   }
 
   close(): void {
@@ -106,9 +123,14 @@ export class SessionPipeClient {
         const entry = this.pending.get(id);
         if (!entry) return;
         this.pending.delete(id);
-        entry.reject(new Error('CLI_REQUEST_TIMEOUT'));
+        entry.reject(new SessionTransportError(id, 'CLI_REQUEST_TIMEOUT'));
       }, timeoutMs);
       timer.unref?.();
+      if (this.pending.has(id)) {
+        clearTimeout(timer);
+        reject(new Error('CLI_REQUEST_ID_CONFLICT'));
+        return;
+      }
       this.pending.set(id, { resolve, reject, timer });
       const payload = `${JSON.stringify({ ...frame, id })}\n`;
       if (Buffer.byteLength(payload, 'utf8') > MAX_FRAME_BYTES) {
@@ -122,7 +144,7 @@ export class SessionPipeClient {
           const entry = this.pending.get(id);
           if (entry) clearTimeout(entry.timer);
           this.pending.delete(id);
-          reject(error instanceof Error ? error : new Error(String(error)));
+          reject(new SessionTransportError(id, 'CLI_TRANSPORT_FAILED', error instanceof Error ? error : new Error(String(error))));
         }
       });
     });
@@ -163,7 +185,7 @@ export class SessionPipeClient {
     for (const [id, entry] of this.pending) {
       this.pending.delete(id);
       clearTimeout(entry.timer);
-      entry.reject(error);
+      entry.reject(new SessionTransportError(id, error.message.split(':', 1)[0]!, error));
     }
   }
 }

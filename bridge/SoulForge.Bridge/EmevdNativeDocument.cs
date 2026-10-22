@@ -70,7 +70,7 @@ internal sealed class EmevdNativeDocument
 
     private string? sourceHashMemo;
     // ToEnvelope 里与 page 无关的两块投影，按文档实例记忆化（文档不可变）。
-    // 事件表 1730 条、指令分布要遍历全部 33266 条指令，分页读时原本每页各算一遍。
+    // 事件表和指令分布要遍历全部事件与指令，分页读时原本每页各算一遍。
     private object[]? eventsProjectionMemo;
     private (object[] Distribution, bool Truncated)? distributionMemo;
 

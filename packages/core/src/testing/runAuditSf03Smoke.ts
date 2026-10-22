@@ -94,9 +94,9 @@ function readRawRegionRecord(buf: Buffer, entryOffset: number): RawRegionRecord 
   const rotX = buf.readFloatLE(entryOffset + 0x20);
   const rotY = buf.readFloatLE(entryOffset + 0x24);
   const rotZ = buf.readFloatLE(entryOffset + 0x28);
-  const shapeDataPointer = buf.readBigInt64LE(entryOffset + 0x30);
-  const entityDataPointer = buf.readBigInt64LE(entryOffset + 0x38);
-  const rawPointers = Buffer.from(buf.subarray(entryOffset + 0x30, entryOffset + 0x40));
+  const shapeDataPointer = buf.readBigInt64LE(entryOffset + 0x48);
+  const entityDataPointer = buf.readBigInt64LE(entryOffset + 0x50);
+  const rawPointers = Buffer.from(buf.subarray(entryOffset + 0x30, entryOffset + 0x60));
   return {
     name,
     entryOffset,
@@ -132,17 +132,17 @@ export async function runSf03UnitTests(): Promise<void> {
   assert.equal(getShapeProfile(0)?.writable, false);
   assert.equal(isShapeSupported(0), false, 'Point shape has no dimension mutation support');
 
-  assert.equal(getShapeProfile(1)?.kind, 'sphere');
-  assert.equal(getShapeProfile(1)?.writable, true);
-  assert.equal(isShapeSupported(1), true);
-
-  assert.equal(getShapeProfile(2)?.kind, 'cylinder');
+  assert.equal(getShapeProfile(2)?.kind, 'sphere');
   assert.equal(getShapeProfile(2)?.writable, true);
   assert.equal(isShapeSupported(2), true);
 
-  assert.equal(getShapeProfile(3)?.kind, 'box');
+  assert.equal(getShapeProfile(3)?.kind, 'cylinder');
   assert.equal(getShapeProfile(3)?.writable, true);
   assert.equal(isShapeSupported(3), true);
+
+  assert.equal(getShapeProfile(5)?.kind, 'box');
+  assert.equal(getShapeProfile(5)?.writable, true);
+  assert.equal(isShapeSupported(5), true);
 
   assert.equal(isShapeSupported(4), false);
   assert.equal(isShapeSupported(99), false);
@@ -151,21 +151,21 @@ export async function runSf03UnitTests(): Promise<void> {
   assert.equal(validateRegionShape({ kind: 'point', shapeType: 0 }).valid, true);
 
   // Sphere: radius must be positive finite number
-  assert.equal(validateRegionShape({ kind: 'sphere', shapeType: 1, radius: 5.0 }).valid, true);
-  assert.equal(validateRegionShape({ kind: 'sphere', shapeType: 1, radius: 0 }).valid, false);
-  assert.equal(validateRegionShape({ kind: 'sphere', shapeType: 1, radius: -1.0 }).valid, false);
-  assert.equal(validateRegionShape({ kind: 'sphere', shapeType: 1, radius: Number.NaN }).valid, false);
-  assert.equal(validateRegionShape({ kind: 'sphere', shapeType: 1, radius: Number.POSITIVE_INFINITY }).valid, false);
+  assert.equal(validateRegionShape({ kind: 'sphere', shapeType: 2, radius: 5.0 }).valid, true);
+  assert.equal(validateRegionShape({ kind: 'sphere', shapeType: 2, radius: 0 }).valid, false);
+  assert.equal(validateRegionShape({ kind: 'sphere', shapeType: 2, radius: -1.0 }).valid, false);
+  assert.equal(validateRegionShape({ kind: 'sphere', shapeType: 2, radius: Number.NaN }).valid, false);
+  assert.equal(validateRegionShape({ kind: 'sphere', shapeType: 2, radius: Number.POSITIVE_INFINITY }).valid, false);
 
   // Cylinder: radius & height must be positive finite numbers
-  assert.equal(validateRegionShape({ kind: 'cylinder', shapeType: 2, radius: 2.0, height: 10.0 }).valid, true);
-  assert.equal(validateRegionShape({ kind: 'cylinder', shapeType: 2, radius: 0, height: 10.0 }).valid, false);
-  assert.equal(validateRegionShape({ kind: 'cylinder', shapeType: 2, radius: 2.0, height: -5.0 }).valid, false);
+  assert.equal(validateRegionShape({ kind: 'cylinder', shapeType: 3, radius: 2.0, height: 10.0 }).valid, true);
+  assert.equal(validateRegionShape({ kind: 'cylinder', shapeType: 3, radius: 0, height: 10.0 }).valid, false);
+  assert.equal(validateRegionShape({ kind: 'cylinder', shapeType: 3, radius: 2.0, height: -5.0 }).valid, false);
 
   // Box: length, width, height must be positive finite numbers
-  assert.equal(validateRegionShape({ kind: 'box', shapeType: 3, length: 1.0, width: 2.0, height: 3.0 }).valid, true);
-  assert.equal(validateRegionShape({ kind: 'box', shapeType: 3, length: -1.0, width: 2.0, height: 3.0 }).valid, false);
-  assert.equal(validateRegionShape({ kind: 'box', shapeType: 3, length: 1.0, width: 0, height: 3.0 }).valid, false);
+  assert.equal(validateRegionShape({ kind: 'box', shapeType: 5, length: 1.0, width: 2.0, height: 3.0 }).valid, true);
+  assert.equal(validateRegionShape({ kind: 'box', shapeType: 5, length: -1.0, width: 2.0, height: 3.0 }).valid, false);
+  assert.equal(validateRegionShape({ kind: 'box', shapeType: 5, length: 1.0, width: 0, height: 3.0 }).valid, false);
 
   // Unsupported shape kinds
   assert.equal(validateRegionShape({ kind: 'unsupported', shapeType: 4 }).valid, false);
@@ -173,27 +173,27 @@ export async function runSf03UnitTests(): Promise<void> {
 
   // 4. scaleRegionShape geometric checks
   // Sphere: uniform scaling only
-  const scaledSphere = scaleRegionShape({ kind: 'sphere', shapeType: 1, radius: 5.0 }, [2, 2, 2]);
+  const scaledSphere = scaleRegionShape({ kind: 'sphere', shapeType: 2, radius: 5.0 }, [2, 2, 2]);
   assert.equal((scaledSphere as any).radius, 10.0);
   assert.throws(
-    () => scaleRegionShape({ kind: 'sphere', shapeType: 1, radius: 5.0 }, [2, 1, 2]),
+    () => scaleRegionShape({ kind: 'sphere', shapeType: 2, radius: 5.0 }, [2, 1, 2]),
     (err: any) => err.code === 'SHAPE_OPERATION_UNSUPPORTED',
     'Sphere non-uniform scale must be rejected with SHAPE_OPERATION_UNSUPPORTED'
   );
 
   // Cylinder: radial scaling must be uniform (scaleX === scaleZ)
-  const scaledCyl = scaleRegionShape({ kind: 'cylinder', shapeType: 2, radius: 3.0, height: 10.0 }, [2, 4, 2]);
+  const scaledCyl = scaleRegionShape({ kind: 'cylinder', shapeType: 3, radius: 3.0, height: 10.0 }, [2, 4, 2]);
   assert.equal((scaledCyl as any).radius, 6.0);
   assert.equal((scaledCyl as any).height, 40.0);
   assert.throws(
-    () => scaleRegionShape({ kind: 'cylinder', shapeType: 2, radius: 3.0, height: 10.0 }, [2, 4, 1]),
+    () => scaleRegionShape({ kind: 'cylinder', shapeType: 3, radius: 3.0, height: 10.0 }, [2, 4, 1]),
     (err: any) => err.code === 'SHAPE_OPERATION_UNSUPPORTED',
     'Cylinder non-uniform radial scale must be rejected with SHAPE_OPERATION_UNSUPPORTED'
   );
 
   // Box: asymmetric dimensions scale along respective axes without swapping
   const scaledBox = scaleRegionShape(
-    { kind: 'box', shapeType: 3, length: 10.0, width: 20.0, height: 30.0 },
+    { kind: 'box', shapeType: 5, length: 10.0, width: 20.0, height: 30.0 },
     [2, 3, 4]
   );
   assert.equal((scaledBox as any).length, 20.0, 'length * scaleX');
@@ -212,11 +212,11 @@ export async function runSf03UnitTests(): Promise<void> {
 
   // Non-positive scale factor reject
   assert.throws(
-    () => scaleRegionShape({ kind: 'box', shapeType: 3, length: 1, width: 2, height: 3 }, [0, 1, 1]),
+    () => scaleRegionShape({ kind: 'box', shapeType: 5, length: 1, width: 2, height: 3 }, [0, 1, 1]),
     (err: any) => err.code === 'SHAPE_OPERATION_UNSUPPORTED'
   );
   assert.throws(
-    () => scaleRegionShape({ kind: 'box', shapeType: 3, length: 1, width: 2, height: 3 }, [-1, 1, 1]),
+    () => scaleRegionShape({ kind: 'box', shapeType: 5, length: 1, width: 2, height: 3 }, [-1, 1, 1]),
     (err: any) => err.code === 'SHAPE_OPERATION_UNSUPPORTED'
   );
 
@@ -245,10 +245,10 @@ export async function runSf03UnitTests(): Promise<void> {
     kind: 'region',
     family: 'region',
     typeId: 0,
-    shapeType: 3,
+    shapeType: 5,
     nativeOffset: 0x200,
     transform: { position: [0, 0, 0], rotation: [0, 0, 0] },
-    shapeData: { kind: 'box', shapeType: 3, length: 1, width: 2, height: 3 }
+    shapeData: { kind: 'box', shapeType: 5, length: 1, width: 2, height: 3 }
   };
 
   const dummyDoc: any = {
@@ -336,7 +336,7 @@ export async function runSf03UnitTests(): Promise<void> {
     author: 'agent',
     timestamp: Date.now(),
     operations: [
-      { kind: 'set_region_shape', target: 'r100', shape: { kind: 'box', shapeType: 3, length: 5, width: 6, height: 7 } }
+      { kind: 'set_region_shape', target: 'r100', shape: { kind: 'box', shapeType: 5, length: 5, width: 6, height: 7 } }
     ]
   });
   assert.equal(resShapeValid.valid, true);
@@ -350,13 +350,13 @@ export async function runSf03UnitTests(): Promise<void> {
     author: 'agent',
     timestamp: Date.now(),
     operations: [
-      { kind: 'set_region_shape', target: 'r100', shape: { kind: 'sphere', shapeType: 1, radius: -5 } }
+      { kind: 'set_region_shape', target: 'r100', shape: { kind: 'sphere', shapeType: 2, radius: -5 } }
     ]
   });
   assert.equal(resShapeInvalid.valid, false);
   assert.equal(resShapeInvalid.diagnostics.some((d) => d.code === 'SHAPE_OPERATION_UNSUPPORTED'), true);
 
-  // 6. Native fixture buffer unit test: Raw 16-byte pointers at +0x30..+0x40 must remain 100% intact
+  // 6. Native fixture buffer unit test: Raw 48-byte header tail at +0x30..+0x60 must remain 100% intact
   const sourceDcx = await resolveNativeFixture(
     undefined,
     'msb-primary',
@@ -368,8 +368,8 @@ export async function runSf03UnitTests(): Promise<void> {
 
   const regionRecord = oracle.regions[0]!;
   const rawReg = readRawRegionRecord(decompressed, regionRecord.entryOffset);
-  assert.equal(rawReg.rawPointers.length, 16);
-  assert.notEqual(rawReg.shapeDataPointer, 0n);
+  assert.equal(rawReg.rawPointers.length, 48);
+  assert.equal(rawReg.shapeDataPointer === 0n, rawReg.shapeType === 0);
   assert.notEqual(rawReg.entityDataPointer, 0n);
 
   // Verify that an edit to position and rotation preserves rawPointers
@@ -385,7 +385,7 @@ export async function runSf03UnitTests(): Promise<void> {
   assert.equal(
     mutatedRawReg.rawPointers.equals(rawReg.rawPointers),
     true,
-    'Raw 16-byte pointers at +0x30..+0x40 must remain 100% byte-for-byte identical'
+    'Raw 48-byte header tail at +0x30..+0x60 must remain 100% byte-for-byte identical'
   );
   assert.equal(mutatedRawReg.shapeDataPointer, rawReg.shapeDataPointer);
   assert.equal(mutatedRawReg.entityDataPointer, rawReg.entityDataPointer);
@@ -569,7 +569,7 @@ export async function runSf03NativeTests(): Promise<void> {
             family: 'region',
             nativeOffset: testRegion.nativeOffset,
             expectedName: testRegion.name,
-            shape: { kind: 'box', shapeType: 3, length: 1, width: 2, height: 3 }
+            shape: { kind: 'box', shapeType: 5, length: 1, width: 2, height: 3 }
           }
         ]
       }

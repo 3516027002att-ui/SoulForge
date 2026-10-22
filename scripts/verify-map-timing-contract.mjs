@@ -20,7 +20,10 @@ const [collectorSource, characterCollectorSource, transportCollectorSource, runB
   readFile(new URL('../bridge/SoulForge.Bridge/BridgeDaemonHost.cs', import.meta.url), 'utf8'),
   readFile(new URL('../bridge/SoulForge.Bridge/BridgeCommandService.cs', import.meta.url), 'utf8'),
   readFile(new URL('../bridge/SoulForge.Bridge/MapStaticGeometryService.cs', import.meta.url), 'utf8'),
-  readFile(new URL('../apps/desktop/src/main/ipc/map.ts', import.meta.url), 'utf8'),
+  Promise.all([
+    readFile(new URL('../apps/desktop/src/main/ipc/map.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../apps/desktop/src/main/services/mapService.ts', import.meta.url), 'utf8')
+  ]).then(parts => parts.join('\n')),
   readFile(new URL('../apps/desktop/src/main/mapTimingTelemetry.ts', import.meta.url), 'utf8'),
   readFile(new URL('../apps/desktop/src/main/characterTimingTelemetry.ts', import.meta.url), 'utf8'),
   readFile(new URL('../scripts/character-native-timing-aggregate.mjs', import.meta.url), 'utf8'),
@@ -60,7 +63,7 @@ for (const key of [
   'base64DecodeMs',
   'concatJsonParseMs',
   'materializeTotalMs',
-  'return materializeFileBackedResult'
+  'materializeFileBackedResult'
 ]) assert.match(runBridgeSource, new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `runBridge transport wiring missing ${key}`);
 for (const key of [
   'BRIDGE_TRANSPORT_TIMING_CODE',
@@ -199,6 +202,9 @@ static class Program
             if (value.ValueKind == JsonValueKind.Number)
                 Require(value.GetDouble() >= 0 && double.IsFinite(value.GetDouble()), $"invalid timing: {phase}");
         }
+        Require(root.GetProperty("nativeStartedAtUnixMs").GetDouble() >= root.GetProperty("nativeEnqueuedAtUnixMs").GetDouble(), "native queue timeline must be causal");
+        Require(root.GetProperty("nativeCompletedAtUnixMs").GetDouble() >= root.GetProperty("nativeStartedAtUnixMs").GetDouble(), "native execution timeline must be causal");
+        Require(Math.Abs(root.GetProperty("nativeCompletedAtUnixMs").GetDouble() - root.GetProperty("nativeStartedAtUnixMs").GetDouble() - root.GetProperty("totalMs").GetDouble()) < 0.01, "timeline duration must match native monotonic measurement");
         Require(!root.TryGetProperty("unknownPhaseMs", out _), "unknown phase must not enter snapshot");
         Require(root.GetProperty("resourceAcquireMs").GetDouble() > 0, "resourceAcquireMs missing");
         Require(root.GetProperty("fileReadMs").GetDouble() > 0, "fileReadMs missing");

@@ -6,7 +6,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const executable = resolve(
-  process.argv[2] ?? 'bridge/SoulForge.Bridge/bin/Debug/net10.0/win-x64/SoulForge.Bridge.exe'
+  process.argv[2] ?? `bridge/SoulForge.Bridge/bin/Debug/net10.0/${process.platform === 'linux' ? 'linux-x64/SoulForge.Bridge' : 'win-x64/SoulForge.Bridge.exe'}`
 );
 const root = await mkdtemp(join(tmpdir(), 'soulforge-oodle-runtime-'));
 const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
@@ -18,9 +18,10 @@ try {
   const krakPath = join(root, 'sample.krak.dcx');
   await writeFile(krakPath, buildKrakDcx());
   const krakWithoutRuntime = invoke('inspect', krakPath);
-  requireDiagnostic(krakWithoutRuntime, 'OODLE_RUNTIME_ROOT_NOT_CONFIGURED');
+  requireDiagnostic(krakWithoutRuntime, process.platform === 'win32' ? 'OODLE_RUNTIME_ROOT_NOT_CONFIGURED' : 'OODLE_PLATFORM_PROVIDER_UNAVAILABLE');
   checks.push('KRAK without configured runtime is blocked');
 
+  if (process.platform === 'win32') {
   const notGame = await gameDirectory('not-game', false);
   requireDiagnostic(invoke('probe-oodle', notGame), 'OODLE_GAME_EXECUTABLE_MISSING');
   checks.push('non-Sekiro directory rejected');
@@ -101,6 +102,16 @@ try {
     checks,
     realRuntimeSuccessPath
   }, null, 2));
+  } else {
+    const configuredRoot = await gameDirectory('foreign-runtime');
+    await writeFile(join(configuredRoot, 'oo2core_6_win64.dll'), 'must-never-load');
+    const probe = invoke('probe-oodle', configuredRoot);
+    requireDiagnostic(probe, 'OODLE_PLATFORM_PROVIDER_UNAVAILABLE');
+    if (probe.data?.runtime?.capability !== 'none') throw new Error('Foreign runtime gained a capability');
+    checks.push('Windows game library unavailable before native loading on this host');
+    console.log(JSON.stringify({ ok: true, status: 'partial', checks,
+      windowsRuntimeChecks: 'unavailable', realRuntimeSuccessPath: 'unavailable-compatible-native-provider-required' }, null, 2));
+  }
 } finally {
   await rm(root, { recursive: true, force: true });
 }

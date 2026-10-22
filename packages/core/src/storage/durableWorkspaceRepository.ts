@@ -185,6 +185,29 @@ FROM transaction_journal WHERE workspace_id = ? AND transaction_id = ?
     return row ? hydrateJournal<TState>(row) : undefined;
   }
 
+  getTransactionForOperation(opId: string): TransactionJournalRecord | undefined {
+    const row = this.database.prepare<[string, string], JournalRow>(`
+SELECT transaction_id AS transactionId, workspace_id AS workspaceId, op_id AS opId,
+       phase, state_json AS stateJson, created_at AS createdAt, updated_at AS updatedAt
+FROM transaction_journal WHERE workspace_id = ? AND op_id = ?
+ORDER BY created_at DESC, transaction_id DESC LIMIT 1
+`).get(this.workspaceId, opId);
+    return row ? hydrateJournal(row) : undefined;
+  }
+
+  findTransactionsForRequest(sessionName: string, requestId: string): TransactionJournalRecord[] {
+    const rows = this.database.prepare<[string, string, string], JournalRow>(`
+SELECT transaction_id AS transactionId, workspace_id AS workspaceId, op_id AS opId,
+       phase, state_json AS stateJson, created_at AS createdAt, updated_at AS updatedAt
+FROM transaction_journal
+WHERE workspace_id = ? AND json_valid(state_json)
+  AND json_extract(state_json, '$.request.sessionName') = ?
+  AND json_extract(state_json, '$.request.id') = ?
+ORDER BY created_at, transaction_id
+`).all(this.workspaceId, sessionName, requestId);
+    return rows.map(row => hydrateJournal(row));
+  }
+
   listIncompleteTransactions(): TransactionJournalRecord[] {
     const placeholders = TERMINAL_PHASES.map(() => '?').join(', ');
     return this.database.prepare<[string, ...TransactionJournalPhase[]], JournalRow>(`

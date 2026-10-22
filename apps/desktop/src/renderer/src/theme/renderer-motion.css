@@ -1,0 +1,10 @@
+
+/* ═══════════ 动效关键帧 ═══════════
+   入场动画一律 transform-only：隐藏窗口（e2e fixture）下 Chromium
+   节流 BeginFrame，opacity 入场会冻结在首帧使内容不可见。 */
+@keyframes msg-in { from { transform: translateY(8px); } to { transform: none; } }
+@keyframes rise-in { from { transform: translateY(12px); } to { transform: none; } }
+@keyframes toast-in { from { transform: translateX(24px); } to { transform: none; } }
+@keyframes toast-out { to { opacity: 0; transform: translateX(24px); } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }

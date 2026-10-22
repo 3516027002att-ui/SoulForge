@@ -1,0 +1,46 @@
+
+/* ═══════════ Agent 面板 ═══════════ */
+/* §12.1 固定行：48px header / minmax conversation / context / composer。
+   DOM 有四个 grid item（header、conversation、composer-context、composer），
+   模板必须给四行：漏掉一行会让 composer 落到隐式行，auto 行先取内容高，
+   minmax(0,1fr) 的 conversation 只能分到剩余（极矮视口下是 0，实测审批卡
+   直接塌没、approve 按钮不可达）。composer 是输入核心（发送按钮在 toolbar），
+   auto 保内容高；context 是辅助信息，minmax(0,auto) 允许被压且超高内滚；
+   conversation minmax(48px,1fr) 保底可滚动——内容再高都能滚到，不再塌没。 */
+.agent {
+  width: var(--agent-w); min-width: var(--agent-dock-min); max-width: var(--agent-dock-max); flex: none;
+  display: grid;
+  grid-template-rows: var(--agent-header-height) minmax(48px, 1fr) minmax(0, auto) auto;
+  grid-template-areas: "header" "conversation" "context" "composer";
+  color: var(--ink-0); background: var(--forge-1); border-left: 1px solid var(--line);
+  box-shadow: none;
+  position: relative;
+  overflow: hidden;
+  transition: margin-right var(--dur-trans) var(--ease-standard);
+}
+.agent.is-collapsed { margin-right: calc(-1 * var(--agent-w)); border-left-color: transparent; }
+/* §12.2.1 固定视觉：AgentDockHeader */
+.agent__header {
+  grid-area: header;
+  height: var(--agent-header-height); flex: none;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 12px 0 16px; border-bottom: 1px solid var(--line);
+}
+.agent__title { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; }
+.agent-dot {
+  display: none;
+}
+.agent__header-actions { display: flex; align-items: center; gap: 4px; }
+/* §12.3：28×28 按钮、16px 图标；默认无背景无边框，hover 只显示一级表面色 */
+.agent-icon-btn {
+  width: var(--agent-icon-button-size); height: var(--agent-icon-button-size);
+  display: grid; place-items: center;
+  color: var(--ink-2); border-radius: var(--radius-s);
+  background: transparent;
+  transition: color var(--dur-micro), background var(--dur-micro);
+}
+.agent-icon-btn:hover { color: var(--ink-0); background: var(--forge-hover); }
+.agent-icon-btn:active { background: var(--forge-active); }
+.agent-icon-btn:focus-visible { outline: 2px solid var(--ember-text); outline-offset: 1px; }
+.agent__header-state { color: var(--warn); font-size: 10.5px; font-weight: 500; }
+.agent__header-separator { width: 1px; height: 24px; margin: 0 3px; background: var(--line-strong); }

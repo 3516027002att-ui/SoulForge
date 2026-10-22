@@ -24,6 +24,7 @@ import {
   formatMapBlock,
   RAG_CHUNK_FAMILIES
 } from '@soulforge/shared';
+import { TAE_IDENTITY_PROJECTION_VERSION } from '@soulforge/shared';
 import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { attachLookupIndex } from './lookupIndex.js';
 import {
@@ -212,6 +213,13 @@ export function buildRagCorpus(
   });
 }
 
+// Retrieval hides obsolete identities, while persistence still needs their IDs
+// to delete the exact durable SQLite/FTS rows. This metadata stays host-local.
+const persistenceBaselines = new WeakMap<RagCorpus, readonly RagChunk[]>();
+export function ragPersistenceChunks(corpus: RagCorpus): readonly RagChunk[] {
+  return persistenceBaselines.get(corpus) ?? corpus.chunks;
+}
+
 export function createRagCorpus(input: {
   workspaceId: string;
   builtAt: string;
@@ -221,13 +229,17 @@ export function createRagCorpus(input: {
   /** Defaults to eager; deferred callers must attach the lookup at an async retrieval boundary. */
   lookupIndex?: RagCorpusLookupIndexMode;
 }): RagCorpus {
+  // Version lives in the durable chunk ID, so SQLite/FTS/embedding rows need
+  // no all-format schema migration. Legacy TAE rows cannot match current IDs.
+  const chunks = input.chunks.filter((chunk) => chunk.family !== 'tae_event'
+    || chunk.chunkId.startsWith(`rag:tae_event:v${TAE_IDENTITY_PROJECTION_VERSION}:`));
   const byFamily = emptyFamilyCounts();
-  for (const chunk of input.chunks) byFamily[chunk.family] += 1;
+  for (const chunk of chunks) byFamily[chunk.family] += 1;
   // RAG availability is intentionally stricter than "there is some parsed
-  // metadata".  A file catalog, map-region shell, or TAE export alone cannot
-  // prove that the object-location families used by the agent are searchable.
-  // Keep the four production lookup families as the fail-closed gate.
-  const semanticCount = byFamily.event + byFamily.map_entity
+  // metadata". A file catalog or map-region shell alone is insufficient.
+  // Native TAE event chunks are searchable action evidence, even when the
+  // retained native completeness metadata requires a subsequent read.
+  const semanticCount = byFamily.tae_event + byFamily.event + byFamily.map_entity
     + byFamily.param_row + byFamily.text_entry;
   const diagnostics = (input.diagnostics ?? [])
     .filter((diagnostic) => diagnostic.code !== 'RAG_SEMANTIC_CORPUS_EMPTY' || semanticCount === 0);
@@ -238,15 +250,20 @@ export function createRagCorpus(input: {
       message: 'RAG 语义语料为空；仅有文件目录不能用于对象定位。'
     });
   }
+  const retainedSymbols = new Set(chunks.map((chunk) => chunk.symbolUri));
+  const staleSymbols = new Set(input.chunks.filter((chunk) => chunk.family === 'tae_event'
+    && !chunk.chunkId.startsWith(`rag:tae_event:v${TAE_IDENTITY_PROJECTION_VERSION}:`)
+    && !retainedSymbols.has(chunk.symbolUri)).map((chunk) => chunk.symbolUri));
   const corpus: RagCorpus = {
     workspaceId: input.workspaceId,
     builtAt: input.builtAt,
-    chunks: [...input.chunks],
-    references: [...(input.references ?? [])],
-    stats: { total: input.chunks.length, byFamily },
+    chunks,
+    references: (input.references ?? []).filter((edge) => !staleSymbols.has(edge.fromUri) && !staleSymbols.has(edge.toUri)),
+    stats: { total: chunks.length, byFamily },
     availability: semanticCount > 0 ? 'available' : 'unavailable',
     diagnostics
   };
+  if (chunks.length !== input.chunks.length) persistenceBaselines.set(corpus, input.chunks);
   if (input.lookupIndex !== 'deferred') attachLookupIndex(corpus);
   return corpus;
 }
@@ -499,6 +516,10 @@ function taeEventChunk(
     sourceUri: taeExport.sourceUri,
     symbolUri: event.uri,
     family: 'tae_event',
+    identityVersion: taeExport.readerSchemaRevision ?? 0,
+    ...(anim.eventCount === undefined ? {} : { taeActionEventCount: anim.eventCount }),
+    taeActionEventsComplete: anim.eventCount !== undefined && anim.eventCount === anim.events.length
+      && [...anim.events].sort((a, b) => a.index - b.index).every((event, index) => event.index === index),
     title: address,
     body: lines.join('\n'),
     numericIds: collectNumbers([
@@ -676,10 +697,13 @@ function makeChunk(input: {
   resourceKind?: ResourceKind;
   confidence?: RagChunk['confidence'];
   identityKey?: string;
+  identityVersion?: number;
+  taeActionEventCount?: number;
+  taeActionEventsComplete?: boolean;
 }): RagChunk {
   const body = truncateBody(input.body);
   return {
-    chunkId: `rag:${input.family}:${stableId(input.identityKey ?? input.symbolUri)}`,
+    chunkId: `rag:${input.family}:${input.identityVersion === undefined ? '' : `v${input.identityVersion}:`}${stableId(input.identityKey ?? input.symbolUri)}`,
     workspaceId: input.workspaceId,
     sourceUri: input.sourceUri,
     symbolUri: input.symbolUri,
@@ -687,7 +711,9 @@ function makeChunk(input: {
     title: input.title,
     body,
     numericIds: input.numericIds,
-    contentHash: sha256(body),
+    contentHash: sha256(input.family === 'tae_event' ? JSON.stringify([body, input.taeActionEventCount, input.taeActionEventsComplete]) : body),
+    ...(input.taeActionEventCount === undefined ? {} : { taeActionEventCount: input.taeActionEventCount }),
+    ...(input.taeActionEventsComplete === undefined ? {} : { taeActionEventsComplete: input.taeActionEventsComplete }),
     ...(input.sourceRevision !== undefined ? { sourceRevision: input.sourceRevision } : {}),
     ...(input.outerFileHash ? { outerFileHash: input.outerFileHash } : {}),
     ...(input.sourceHash ? { sourceHash: input.sourceHash } : {}),

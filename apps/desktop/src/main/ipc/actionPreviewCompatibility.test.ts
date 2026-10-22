@@ -10,7 +10,7 @@ import {
 
 declare const __SOULFORGE_REPO_ROOT__: string;
 const actionSource = readFileSync(
-  join(__SOULFORGE_REPO_ROOT__, 'apps', 'desktop', 'src', 'main', 'ipc', 'action.ts'),
+  join(__SOULFORGE_REPO_ROOT__, 'apps', 'desktop', 'src', 'main', 'services', 'characterPreviewService.ts'),
   'utf8'
 );
 

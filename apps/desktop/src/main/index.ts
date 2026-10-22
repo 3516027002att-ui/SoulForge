@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { disposeBridgeDaemonPool } from '@soulforge/core';
-import { disposeOperationLogUtility, registerIpcHandlers } from './ipc.js';
+import { disposeApplicationProducers, disposeOperationLogUtility, registerIpcHandlers } from './ipc.js';
 import { disposeAuxiliaryServices, registerAuxiliaryIpcHandlers } from './auxiliaryServices.js';
 
 /**
@@ -35,6 +35,7 @@ process.on('uncaughtException', (err: Error & { code?: string }) => {
 
 const here = dirname(fileURLToPath(import.meta.url));
 let bridgeShutdownStarted = false;
+let bridgeShutdownFinished = false;
 
 /**
  * 与 renderer light 主题 `--canvas` / `--ink-0` 的 sRGB 近似。
@@ -175,12 +176,13 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', (event) => {
-  if (bridgeShutdownStarted) return;
+  if (bridgeShutdownFinished) return;
   event.preventDefault();
+  if (bridgeShutdownStarted) return;
   bridgeShutdownStarted = true;
   disposeAuxiliaryServices();
-  void Promise.allSettled([
+  void disposeApplicationProducers().then(() => Promise.allSettled([
     disposeBridgeDaemonPool(),
     disposeOperationLogUtility()
-  ]).finally(() => app.quit());
+  ])).finally(() => { bridgeShutdownFinished = true; app.quit(); });
 });

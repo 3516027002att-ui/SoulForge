@@ -82,13 +82,22 @@ if (snapshotRoot) {
   if (typeof snapshotManifest?.artifactId !== 'string' || snapshotManifest.artifactId.length < 16) {
     throw new Error(`AGENT_PRODUCTION_ARTIFACT_SNAPSHOT_INVALID: ${snapshotManifestPath}`);
   }
+  const bridgeExecutables = {
+    'win-x64': 'bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Bridge.exe',
+    'linux-x64': 'bridge/SoulForge.Bridge/bin/Release/net10.0/linux-x64/publish/SoulForge.Bridge'
+  };
+  const bridgeRuntime = snapshotManifest.runtime?.bridgeRuntimeIdentifier ?? 'win-x64';
+  const bridgeExecutable = snapshotManifest.runtime?.bridgeExecutable ?? bridgeExecutables['win-x64'];
+  if (!Object.hasOwn(bridgeExecutables, bridgeRuntime) || bridgeExecutable !== bridgeExecutables[bridgeRuntime]) {
+    throw new Error(`AGENT_PRODUCTION_ARTIFACT_SNAPSHOT_BRIDGE_INVALID: ${snapshotManifestPath}`);
+  }
   for (const requiredPath of [
     join(snapshotRoot, 'apps/desktop/.native/better_sqlite3.node'),
     join(outRoot, 'main/index.js'),
     join(outRoot, 'preload/index.cjs'),
     join(outRoot, 'renderer/index.html'),
     join(snapshotRoot, 'bridge/SoulForge.Bridge/SoulForge.Bridge.csproj'),
-    join(snapshotRoot, 'bridge/SoulForge.Bridge/bin/Release/net10.0/win-x64/publish/SoulForge.Bridge.exe')
+    join(snapshotRoot, bridgeExecutable)
   ]) {
     if (!existsSync(requiredPath)) {
       throw new Error(`AGENT_PRODUCTION_ARTIFACT_SNAPSHOT_FILE_MISSING: ${requiredPath}`);
@@ -575,7 +584,8 @@ const baseRoot = externalBaseRoot || join(app.getPath('userData'), 'e2e-base');
 // Keep production-Electron tests from opening the user's persistent
 // <overlay>/.soulforge/workspace.db. Real assets remain read-only inputs;
 // SQLite/fingerprint/staging state is isolated under this run's userData.
-process.env.SF_E2E_WORKSPACE_STORAGE_ROOT = join(app.getPath('userData'), 'workspace-storage');
+process.env.SF_E2E_WORKSPACE_STORAGE_ROOT = process.env.SF_E2E_WORKSPACE_STORAGE_ROOT?.trim()
+  || join(app.getPath('userData'), 'workspace-storage');
 
 /** 测试工作区：目录结构镜像真实 mod 布局，内容是最小合法样本。 */
 function seedWorkspace() {

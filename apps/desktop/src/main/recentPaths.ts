@@ -43,11 +43,9 @@ interface RecentPathsFile {
 
 const DEFAULT_CANDIDATE_PATHS: Record<RecentPathKind, readonly string[]> = {
   overlay: [
-    'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro\\mods',
     'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Sekiro\\mods'
   ],
   base: [
-    'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro',
     'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Sekiro'
   ]
 };

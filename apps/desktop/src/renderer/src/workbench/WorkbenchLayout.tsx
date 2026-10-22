@@ -195,9 +195,9 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
     const drag = dragState.current;
     if (!drag) return;
     const delta = event.clientX - drag.startX;
-    const nextWidth = Math.min(
-      maxWidthFor(drag.columnId),
-      Math.max(drag.minWidth, drag.startWidth + delta)
+    const nextWidth = Math.max(
+      drag.minWidth,
+      Math.min(maxWidthFor(drag.columnId), drag.startWidth + delta)
     );
     setWidths((current) => ({ ...current, [drag.columnId]: nextWidth }));
     // eslint-disable-next-line react-hooks/exhaustive-deps

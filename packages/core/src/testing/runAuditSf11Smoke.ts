@@ -1,12 +1,13 @@
 /**
  * SF-11 Smoke Test Suite
- * 验证 TAE 最终事件状态、区间写入计划、全文共享时间槽守卫与无快照克隆写入。
+ * 验证 TAE 最终事件状态、完整时间表 COW、未知布局守卫与无快照克隆写入。
  *
  * 命令行用法：
  *   node dist/testing/runAuditSf11Smoke.js --layer unit
  *   node dist/testing/runAuditSf11Smoke.js --layer native
  */
 
+import assert from 'node:assert/strict';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { BridgeResult } from '@soulforge/shared';
@@ -26,7 +27,6 @@ const TAE_READ_COMMAND = 'read-tae-document' as const;
 const TAE_STAGING_WRITE_VERIFIED = 'TAE_STAGING_WRITE_VERIFIED';
 const TAE_STAGING_WRITE_FAILED = 'TAE_STAGING_WRITE_FAILED';
 const TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE = 'TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE';
-const TAE_SHARED_TIME_SLOT_WRITE_UNSUPPORTED = 'TAE_SHARED_TIME_SLOT_WRITE_UNSUPPORTED';
 
 interface TaeEnvelope {
   format?: string;
@@ -104,11 +104,10 @@ function buildStandardSyntheticTae(): Buffer {
   b.writeBigInt64LE(0n, 0x78);
 
   // Animation Table (0x80)
-  b.writeBigInt64LE(0n, 0x80);
+  b.writeBigInt64LE(10n, 0x80); // anim0 id
   b.writeBigInt64LE(0xA8n, 0x88); // anim0 entry
-  b.writeBigInt64LE(10n, 0x90);   // anim0 id = 10
+  b.writeBigInt64LE(20n, 0x90);   // anim1 id
   b.writeBigInt64LE(0xE8n, 0x98); // anim1 entry
-  b.writeBigInt64LE(20n, 0xA0);   // anim1 id = 20
 
   // anim0 Entry (0xA8)
   b.writeBigInt64LE(0x128n, 0xA8); // eventTableOffset
@@ -161,8 +160,8 @@ function buildStandardSyntheticTae(): Buffer {
   b.writeBigInt64LE(2n, 0x180);
   b.writeBigInt64LE(0x1A0n, 0x188);
   b.writeBigInt64LE(0x1A8n, 0x190);
-  b.writeInt32LE(0x158, 0x1A0);
-  b.writeInt32LE(0x168, 0x1A4);
+  b.writeInt32LE(0x128, 0x1A0); // group members reference event headers, not event data
+  b.writeInt32LE(0x140, 0x1A4);
   b.writeInt32LE(16, 0x1A8);
   b.writeInt32LE(0, 0x1AC);
 
@@ -186,8 +185,8 @@ function buildStandardSyntheticTae(): Buffer {
   b.writeBigInt64LE(2n, 0x208);
   b.writeBigInt64LE(0x228n, 0x210);
   b.writeBigInt64LE(0x230n, 0x218);
-  b.writeInt32LE(0x1E8, 0x228);
-  b.writeInt32LE(0x1F8, 0x22C);
+  b.writeInt32LE(0x1B8, 0x228);
+  b.writeInt32LE(0x1D0, 0x22C);
   b.writeInt32LE(16, 0x230);
   b.writeInt32LE(0, 0x234);
 
@@ -203,6 +202,26 @@ function buildCrossSharedAndPointSyntheticTae(): Buffer {
   // 2. 跨动画共享槽：将 anim1 事件 0 的 start 槽改成 0xE0 (借用 anim0 事件 1 的 start 槽)
   b.writeBigInt64LE(0xE0n, 0x1B8);
   return b;
+}
+
+// This oracle is an explicitly specified byte layout, not offsets/values
+// obtained from read-tae-document, the writer receipt or its output pointers.
+function expectSyntheticTimeCow(
+  source: Buffer, output: Buffer, entry: number, table: number,
+  times: readonly number[], eventSlots: readonly [number, number, number, number]
+): void {
+  const expected = Buffer.concat([source, Buffer.alloc(times.length * 4)]);
+  expected.writeInt32LE(expected.length, SYN.declaredSizeAbs);
+  expected.writeBigInt64LE(BigInt(SYN.fileSize), entry + 0x10);
+  expected.writeInt32LE(times.length, entry + 0x28);
+  times.forEach((time, index) => expected.writeFloatLE(time, SYN.fileSize + index * 4));
+  for (const [index, offset] of [0, 8, 24, 32].entries()) {
+    expected.writeBigInt64LE(BigInt(SYN.fileSize + eventSlots[index]! * 4), table + offset);
+  }
+  if (!output.equals(expected)) {
+    const firstDifference = expected.findIndex((byte, index) => byte !== output[index]);
+    fail(`完整时间表 COW 字节不符：expected size=${expected.length}, actual=${output.length}, firstDifference=${firstDifference}`);
+  }
 }
 
 async function readTae(path: string, allowedRoots: string[]): Promise<TaeEnvelope> {
@@ -257,13 +276,12 @@ async function runUnitLayer(): Promise<void> {
       fail('taeEventHandleKey 预期 action://c1050/A0200::anim:200::event:0，实际 ' + key);
     }
 
-    // 负向校验
-    try {
-      validateTaeEventHandle({ ...handle, animId: -1 });
-      fail('animId 为负应报错');
-    } catch {
-      // pass
-    }
+    // 负向校验：断言本身必须在被测调用之外，不能被 catch 当作成功吞掉。
+    assert.throws(
+      () => validateTaeEventHandle({ ...handle, animId: -1 }),
+      { code: 'INVALID_INTEGER' },
+      'animId 为负应报错'
+    );
   }
 
   await withSmokeWorkspace('audit-sf11-unit', async (ws) => {
@@ -277,19 +295,18 @@ async function runUnitLayer(): Promise<void> {
     const stdDoc = await readTae(stdSrcPath, [root]);
     const stdHash = stdDoc.sourceHash!;
 
-    // Case 2: 同动画共享时间槽更新拒绝并返回 TAE_SHARED_TIME_SLOT_WRITE_UNSUPPORTED (SF-11 §2.6.2)
+    // Case 2: 同动画共享时间槽 COW；原时间表/兄弟事件值/未知字节全部保留。
     {
-      const blockedOut = join(staging, 'blocked_same_anim.tae');
-      const res = await writeTae(stdSrcPath, [root], [staging], blockedOut, stdHash, [
+      const cowOut = join(staging, 'shared_same_anim.tae');
+      const res = await writeTae(stdSrcPath, [root], [staging], cowOut, stdHash, [
         { mutation: 'update-event-times', animId: 20, eventIndex: 1, startTime: 0.3, endTime: 1.5 }
       ]);
-      if (res.parseStatus !== 'failed') fail('同动画共享槽更新必须失败');
-      const hasSpecificCode = res.diagnostics.some((d) => d.code === TAE_SHARED_TIME_SLOT_WRITE_UNSUPPORTED);
-      if (!hasSpecificCode) fail('预期包含 TAE_SHARED_TIME_SLOT_WRITE_UNSUPPORTED 诊断');
-      const hasCompatCode = res.diagnostics.some((d) => d.code === TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE);
-      if (!hasCompatCode) fail('预期包含 TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE 兼容诊断');
-      const outStat = await stat(blockedOut).catch(() => null);
-      if (outStat && outStat.size > 0) fail('fail-closed 必须不落盘');
+      if (res.parseStatus === 'failed' || !res.data?.rereadVerified || res.data.byteSurgical !== false) {
+        fail('同动画共享槽 COW 失败: ' + JSON.stringify(res.diagnostics));
+      }
+      expectSyntheticTimeCow(stdBytes, await readFile(cowOut), SYN.anim1EntryAbs, SYN.anim1EventTableAbs,
+        [0, 0.3, 1.5, 2], [0, 3, 1, 2]);
+      if (!(await readFile(stdSrcPath)).equals(stdBytes)) fail('共享槽 COW 改动了原文件');
     }
 
     // 构造跨动画共享与点事件样本
@@ -299,30 +316,27 @@ async function runUnitLayer(): Promise<void> {
     const crossDoc = await readTae(crossSrcPath, [root]);
     const crossHash = crossDoc.sourceHash!;
 
-    // Case 3: 跨动画共享时间槽更新拒绝 (SF-11 §2.6.2)
+    // Case 3: 跨动画共享时间槽 COW，未选动画继续引用原槽。
     {
-      const blockedOut = join(staging, 'blocked_cross_anim.tae');
+      const cowOut = join(staging, 'shared_cross_anim.tae');
       // anim 1 (id 20) 的事件 0 的 start 槽指向 0xE0，与 anim 0 (id 10) 的事件 1 共享
-      const res = await writeTae(crossSrcPath, [root], [staging], blockedOut, crossHash, [
+      const res = await writeTae(crossSrcPath, [root], [staging], cowOut, crossHash, [
         { mutation: 'update-event-times', animId: 20, eventIndex: 0, startTime: 0.8, endTime: 2.0 }
       ]);
-      if (res.parseStatus !== 'failed') fail('跨动画共享槽更新必须失败');
-      if (!res.diagnostics.some((d) => d.code === TAE_SHARED_TIME_SLOT_WRITE_UNSUPPORTED)) {
-        fail('跨动画共享槽未发 TAE_SHARED_TIME_SLOT_WRITE_UNSUPPORTED');
-      }
+      if (res.parseStatus === 'failed' || !res.data?.rereadVerified) fail('跨动画共享槽 COW 失败');
+      expectSyntheticTimeCow(crossBytes, await readFile(cowOut), SYN.anim1EntryAbs, SYN.anim1EventTableAbs,
+        [0, 0.8, 2], [1, 2, 0, 2]);
     }
 
-    // Case 4: 单事件点事件（start==end 共享单槽）一致性写入与非一致性拒绝 (SF-11 §2.6.2)
+    // Case 4: 点事件可 COW 拆分；仍为单值且未被其它事件共享时保留原位写法。
     {
-      // 4.1 start != end 应拒绝
-      const badPointOut = join(staging, 'bad_point.tae');
-      const badRes = await writeTae(crossSrcPath, [root], [staging], badPointOut, crossHash, [
+      const splitPointOut = join(staging, 'split_point.tae');
+      const splitRes = await writeTae(crossSrcPath, [root], [staging], splitPointOut, crossHash, [
         { mutation: 'update-event-times', animId: 10, eventIndex: 0, startTime: 1.0, endTime: 1.5 }
       ]);
-      if (badRes.parseStatus !== 'failed') fail('点事件 start != end 必须被拒绝');
-      if (!badRes.diagnostics.some((d) => d.code === TAE_SHARED_TIME_SLOT_WRITE_UNSUPPORTED)) {
-        fail('点事件 start != end 诊断未报 TAE_SHARED_TIME_SLOT_WRITE_UNSUPPORTED');
-      }
+      if (splitRes.parseStatus === 'failed' || !splitRes.data?.rereadVerified) fail('点事件 COW 拆分失败');
+      expectSyntheticTimeCow(crossBytes, await readFile(splitPointOut), SYN.anim0EntryAbs, SYN.anim0EventTableAbs,
+        [0.5, 1, 1.5, 2], [1, 2, 0, 3]);
 
       // 4.2 start == end 应成功
       const goodPointOut = join(staging, 'good_point.tae');
@@ -337,6 +351,28 @@ async function runUnitLayer(): Promise<void> {
       if (Math.abs((e0?.startTime ?? 0) - 1.25) > 1e-5 || Math.abs((e0?.endTime ?? 0) - 1.25) > 1e-5) {
         fail('点事件重读时间不符合 1.25');
       }
+      const expected = Buffer.from(crossBytes); expected.writeFloatLE(1.25, SYN.anim0Event0StartTimeAbs);
+      if (!(await readFile(goodPointOut)).equals(expected)) fail('点事件单值原位更新改动了其它字节');
+    }
+
+    // An in-bounds pointer into opaque bytes is NOT a declared time slot.
+    // Preserve the old fail-closed guarantee instead of treating every shared
+    // or arbitrary pointer as permission to write or to invent a new table.
+    {
+      const source = join(root, 'unknown_time_pointer.tae');
+      const unknownBytes = Buffer.from(stdBytes); unknownBytes.writeBigInt64LE(0x23Cn, 0x1C0);
+      await writeFile(source, unknownBytes);
+      const document = await readTae(source, [root]);
+      const output = join(staging, 'unknown_time_pointer.tae');
+      await writeFile(output, Buffer.from([7, 8, 9]));
+      const res = await writeTae(source, [root], [staging], output, document.sourceHash!, [
+        { mutation: 'update-event-times', animId: 20, eventIndex: 1, startTime: 0.3, endTime: 1.5 }
+      ]);
+      if (res.parseStatus !== 'failed' || !res.diagnostics.some(d => d.code === TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE)) {
+        fail('未知时间槽必须 fail closed');
+      }
+      if (!(await readFile(output)).equals(Buffer.from([7, 8, 9]))) fail('未知布局覆盖了既有暂存输出');
+      if (!(await readFile(source)).equals(unknownBytes)) fail('未知布局修改了原文件');
     }
 
     // Case 5: Sibling verify (修改一事件不改兄弟事件) (SF-11 §2.6.4)
@@ -436,8 +472,8 @@ async function runUnitLayer(): Promise<void> {
     ok: true,
     layer: 'unit',
     suite: 'test:audit-sf-11-unit',
-    executedCases: 10,
-    message: 'SF-11 unit tests passed: TaeEventHandle, whole-file shared slot guard, point events, sibling verify, template check, grouped animation insert, and streaming verification.'
+    executedCases: 11,
+    message: 'SF-11 unit tests passed: TaeEventHandle, independent complete-table COW bytes, unknown-slot guard, point events, sibling verify, template check, grouped insertion, and streaming verification.'
   }, null, 2));
 }
 
@@ -486,7 +522,7 @@ async function runNativeLayer(): Promise<void> {
 
     // 找一个包含事件的动画
     const targetAnim = doc.animations?.find((a) => (a.eventCount ?? 0) >= 2 && !a.eventsTruncated);
-    if (!targetAnim || !targetAnim.animId) {
+    if (!targetAnim || typeof targetAnim.animId !== 'number') {
       fail('未找到具备充足事件的目标动画');
     }
 

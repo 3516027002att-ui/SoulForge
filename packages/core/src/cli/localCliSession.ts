@@ -1,24 +1,25 @@
 /** T11 CLI 本地会话：同一进程复用 CoreToolSession；写入经统一注册表门禁。 */
 import { createHash } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
 import { scanWorkspace } from '../workspace/scanWorkspace.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { analyzeWorkspace, type AnalyzeWorkspaceProgress } from '../pipeline/workspacePipeline.js';
-import { nativeEditSessionFromContext, type NativeEditSession } from '../editing/nativeEditSession.js';
+import { type NativeEditSession } from '../editing/nativeEditSession.js';
 import { MemoryOperationLogStore, type OperationLogStore } from '../patch/operationLog.js';
 import { openSqliteOperationLogStore } from '../patch/sqliteOperationLogStore.js';
-import { createDefaultToolRegistry, type ToolRegistry } from '../ai/toolRegistry.js';
+import { createDefaultToolRegistry, type ToolRegistry, type ToolContext } from '../ai/toolRegistry.js';
 import { createAgentToolBridge, type AgentToolBridge } from '../ai/agentToolBridge.js';
-import { CoreToolSession } from '../runtime/coreToolSession.js';
+import { type CoreToolSession } from '../runtime/coreToolSession.js';
+import { createAgentBridgeBaseContext,createAgentCoreToolSession,createAgentToolContextProvider } from '../model-services/agentHostComposition.js';
 import { disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { KnowledgeStore } from '../knowledge/knowledgeStore.js';
 import { SqliteKnowledgeStorePersistence } from '../knowledge/sqliteKnowledgeStore.js';
 import { createManagedReferenceCursorStore } from '../references/referenceCursorStore.js';
 import { openWorkspaceDatabase } from '../storage/sqliteDatabase.js';
 import { WorkspaceDataRepository } from '../storage/workspaceDataRepository.js';
+import { localApplicationDataDirectory } from '../storage/localApplicationData.js';
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 import {
   extractFileSymbolBundle,
@@ -138,7 +139,7 @@ export function cliWorkspaceRoot(workspaceId: string): string {
   // process exits unexpectedly.
   const isolatedRoot = process.env.SF_E2E_WORKSPACE_STORAGE_ROOT?.trim();
   if (isolatedRoot) return join(resolve(isolatedRoot), key);
-  const local = process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local');
+  const local = localApplicationDataDirectory();
   return join(local, 'SoulForge', 'cli-workspaces', key);
 }
 
@@ -257,6 +258,25 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
       ...(options.onProgress ? { onProgress: options.onProgress } : {})
     }));
     workspaceIndex = analyzed.index;
+    const counts = workspaceIndex.getStats();
+    const paramUnavailable = scan.files.some(file => file.resourceKind === 'param') && counts.paramRows === 0;
+    const analysisDiagnostics = analyzed.diagnostics.slice(0, 32).map(diagnostic => ({
+      severity: diagnostic.severity,
+      code: diagnostic.code,
+      message: diagnostic.message.slice(0, 512),
+      ...(diagnostic.sourceUri ? {sourceUri: diagnostic.sourceUri.slice(0, 1024)} : {})
+    }));
+    emit({phase: 'workspace.analyze.summary', status: paramUnavailable ? 'failed' : 'complete', details: {
+      parsedFiles: analyzed.parsedFiles, inspectedFiles: analyzed.inspectedFiles, counts,
+      diagnostics: analysisDiagnostics, diagnosticCount: analyzed.diagnostics.length,
+      diagnosticsTruncated: analyzed.diagnostics.length > analysisDiagnostics.length
+    }});
+    if (paramUnavailable) {
+      const cause = analysisDiagnostics[0];
+      options.onFallbackWarning?.(`CLI_PARAM_SEMANTICS_UNAVAILABLE: 工作区分析未建立 PARAM 行索引；`
+        + (cause ? `${cause.code}: ${cause.message}` : '没有可用语义导出。')
+        + ' 此状态不能作为成功分析或任务完成证据；可用的独立原生读取仍保留。');
+    }
   } else {
     workspaceIndex.rebuildReferences();
     if (workspaceIndex.getStats().paramRows > 0) workspaceIndex.setParamSemanticState('ready');
@@ -273,23 +293,31 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
     }
   });
   let operationLog: OperationLogStore;
+  let closeOwnedOperationLog: (() => void) | undefined;
   let durableLog = true;
   let knowledgeStore: KnowledgeStore | null = null;
   let knowledgeDatabase: ReturnType<typeof openWorkspaceDatabase> | null = semanticDatabase;
   try {
-    operationLog = openSqliteOperationLogStore({
+    const ownedOperationLog = openSqliteOperationLogStore({
       databasePath: join(root, 'workspace.db'),
       workspaceId,
       rootPath: options.overlayRoot,
       game: options.game ?? 'sekiro'
     });
+    operationLog = ownedOperationLog;
+    closeOwnedOperationLog = () => ownedOperationLog.close();
+    emit({phase:'storage.audit',status:'complete',details:{durableLog:true}});
   } catch (error) {
+    const cause = {code: typeof (error as {code?:unknown})?.code === 'string'
+      ? (error as {code:string}).code : 'SQLITE_DATABASE_OPEN_FAILED',
+      message: (error instanceof Error ? error.message : String(error)).slice(0, 1024)};
+    emit({phase:'storage.audit',status:'failed',details:{...cause,durableLog:false}});
     if (options.requireDurableLog === true) {
       throw new Error(`CLI_SQLITE_UNAVAILABLE: 本地审计数据库打不开，写入已失败关闭：${error instanceof Error ? error.message : String(error)}`);
     }
     durableLog = false;
     (options.onFallbackWarning ?? (() => undefined))(
-      'CLI_SQLITE_FALLBACK: 本地审计数据库打不开，本次只读命令使用内存日志；写入命令将失败关闭。'
+      `CLI_SQLITE_FALLBACK: ${cause.code}: ${cause.message}；本次只读命令使用内存日志；写入命令将失败关闭。`
     );
     operationLog = new MemoryOperationLogStore();
   }
@@ -314,28 +342,16 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
     }
   }
 
-  const editSession = nativeEditSessionFromContext({
-    session,
-    operationLog,
-    backupBaseDir: join(root, 'backups'),
-    recoveryDir: join(root, 'recovery'),
-    stagingRoot: join(root, 'staging')
-  });
   const mode = options.mode ?? 'normal';
-  const coreSession = new CoreToolSession({
-    principal: options.principal ?? 'local-cli',
-    workspaceId,
-    workspaceSession: session,
-    workspaceIndex,
-    editSession,
-    operationLog,
-    modeCeiling: mode
+  const coreSession = createAgentCoreToolSession({
+    principal: options.principal ?? 'local-cli', workspaceId, workspaceSession: session,
+    workspaceIndex, operationLog, modeCeiling: mode,
+    storage: {backupBaseDir:join(root,'backups'),recoveryDir:join(root,'recovery'),stagingRoot:join(root,'staging')}
   });
+  const editSession = coreSession.requireEditSession();
   const registry = createDefaultToolRegistry();
-  const rawBridge = createAgentToolBridge({
-    registry,
-    context: {
-      workspaceIndex,
+  const localToolContext: ToolContext = {
+      get workspaceIndex() { return coreSession.workspaceIndex; },
       mode,
       modeCeiling: mode,
       allowMemoryWrite: false,
@@ -348,6 +364,7 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
       ...(options.onDiagnostic ? { onDiagnostic: options.onDiagnostic } : {}),
       onSemanticEvidenceUpdated: async (sourceUris) => {
         if (!semanticCache || !sourceUris?.length) return;
+        const workspaceIndex = coreSession.workspaceIndex;
         const files = workspaceIndex.getFiles();
         const sources = new Set(sourceUris.map((sourceUri) => (
           workspaceIndex.getFile(sourceUri)?.sourceUri
@@ -362,21 +379,16 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
       },
       ...(knowledgeStore ? { knowledgeStore } : {}),
       ...(!knowledgeStore ? { knowledgeStoreDiagnostic: 'CLI 持久知识数据库不可用。' } : {})
-    }
+    };
+  const rawBridge = createAgentToolBridge({
+    registry,
+    context: createAgentBridgeBaseContext(mode),
+    contextProvider: createAgentToolContextProvider({coreSession,workspaceSession:session,
+      getWorkspaceSession:()=>session,getWorkspaceIndex:()=>coreSession.workspaceIndex,
+      getToolContext:()=>localToolContext})
   });
-  const mutatingTools = new Set([
-    'commit_patch',
-    'mutate_param_fields',
-    'mutate_fmg_entries',
-    'apply_emevd_dsl',
-    'mutate_tae_event_times',
-    'mutate_tae_event_fields',
-    'mutate_msb_part_transform',
-    'mutate_luabnd_script',
-    'batch_transform_map_objects',
-    'import_map_from_blender',
-    'rollback_operation'
-  ]);
+  const mutatingTools = new Set(registry.list().filter(tool => tool.effect === 'write' || tool.effect === 'rollback').map(tool => tool.name));
+
   const executeTool: AgentToolBridge['executeTool'] = async (call, contextOverride = {}) => {
     if (!durableLog && mutatingTools.has(call.name)) {
       return cliToolFailure('CLI_SQLITE_UNAVAILABLE', '本地审计数据库不可用，写入已失败关闭。');
@@ -421,13 +433,17 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
     registry,
     bridge,
     executeTool,
-    workspaceIndex,
+    get workspaceIndex() { return coreSession.workspaceIndex; },
     durableLog,
     knowledgeStore,
     dispose: async () => {
-      coreSession.close();
-      try { knowledgeDatabase?.close(); } catch {}
-      await disposeBridgeDaemonPool();
+      try {
+        coreSession.close();
+        await disposeBridgeDaemonPool();
+      } finally {
+        try { knowledgeDatabase?.close(); } catch {}
+        closeOwnedOperationLog?.();
+      }
     }
   };
 }

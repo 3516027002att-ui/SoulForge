@@ -9,7 +9,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ConfirmationReceipt, IndexedFile, NativeEditDomain, ResourceFormatKind, ResourceKind } from '@soulforge/shared';
@@ -21,6 +20,7 @@ import {
   type WorkspaceSession
 } from '../workspace/workspaceSession.js';
 import { saveRawReplace } from './saveRawResource.js';
+import { localApplicationDataDirectory } from '../storage/localApplicationData.js';
 import type { RawReplaceCommitPort, WriteConfirmationPort } from './editorMutationService.js';
 
 export interface HostNativeHandleEntry {
@@ -271,8 +271,7 @@ function cliStoragePaths(workspaceId: string): {
   stagingRoot: string;
 } {
   const key = createHash('sha256').update(workspaceId).digest('hex').slice(0, 24);
-  const local = process.env.LOCALAPPDATA
-    ?? join(homedir(), 'AppData', 'Local');
+  const local = localApplicationDataDirectory();
   const root = join(local, 'SoulForge', 'cli-workspaces', key);
   return {
     root,

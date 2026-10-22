@@ -328,39 +328,89 @@ function commitRefreshProjection(
   // source whose native read failed.  That keeps failed sources stale and
   // partial sources explicitly incomplete instead of leaving an old row set
   // that looks current.
-  target.invalidateChangedSources(sourceUris);
-  const bundle = refreshed.toSymbolBundle();
-  const sourceBundle: SymbolBundle = {
-    ...(bundle.events ? {
-      events: bundle.events
-        .map((item) => ({ ...item, events: item.events.filter((event) => sourceSet.has(event.sourceUri)) }))
-        .filter((item) => item.events.length > 0)
-    } : {}),
-    ...(bundle.maps ? {
-      maps: bundle.maps
-        .map((item) => ({
-          ...item,
-          entities: item.entities.filter((entity) => sourceSet.has(entity.sourceUri)),
-          regions: item.regions.filter((region) => sourceSet.has(region.sourceUri))
-        }))
-        .filter((item) => item.entities.length > 0 || item.regions.length > 0)
-    } : {}),
-    ...(bundle.params ? {
-      params: bundle.params.filter((item) => sourceSet.has(item.sourceUri ?? '')
-        || item.rows.some((row) => sourceSet.has(row.sourceUri)))
-    } : {}),
-    ...(bundle.msgs ? {
-      msgs: bundle.msgs
-        .map((item) => ({ ...item, entries: item.entries.filter((entry) => sourceSet.has(entry.sourceUri)) }))
-        .filter((item) => item.entries.length > 0)
-    } : {}),
-    ...(bundle.tae ? { tae: bundle.tae.filter((item) => sourceSet.has(item.sourceUri)) } : {})
-  };
-  loadSymbolBundleIntoIndex(target, sourceBundle);
-  if (partialSources.length > 0) {
-    target.markCoveragePartial(partialSources);
+  // This synchronous replacement does not yield or publish an intermediate
+  // graph. Rebuild once after loading, or after restoring a failed source to
+  // its stale state; public reference queries are not lazy.
+  let commitFailed = false;
+  let commitError: unknown;
+  try {
+    target.invalidateChangedSources(sourceUris, { rebuildReferences: false });
+    const bundle = refreshed.toSymbolBundle();
+    const sourceBundle: SymbolBundle = {
+      ...(bundle.events ? {
+        events: bundle.events
+          .map((item) => ({ ...item, events: item.events.filter((event) => sourceSet.has(event.sourceUri)) }))
+          .filter((item) => item.events.length > 0)
+      } : {}),
+      ...(bundle.maps ? {
+        maps: bundle.maps
+          .map((item) => ({
+            ...item,
+            entities: item.entities.filter((entity) => sourceSet.has(entity.sourceUri)),
+            regions: item.regions.filter((region) => sourceSet.has(region.sourceUri))
+          }))
+          .filter((item) => item.entities.length > 0 || item.regions.length > 0)
+      } : {}),
+      ...(bundle.params ? {
+        params: bundle.params.filter((item) => sourceSet.has(item.sourceUri ?? '')
+          || item.rows.some((row) => sourceSet.has(row.sourceUri)))
+      } : {}),
+      ...(bundle.msgs ? {
+        msgs: bundle.msgs
+          .map((item) => ({ ...item, entries: item.entries.filter((entry) => sourceSet.has(entry.sourceUri)) }))
+          .filter((item) => item.entries.length > 0)
+      } : {}),
+      ...(bundle.tae ? { tae: bundle.tae.filter((item) => sourceSet.has(item.sourceUri)) } : {})
+    };
+    loadSymbolBundleIntoIndex(target, sourceBundle);
+    if (partialSources.length > 0) {
+      target.markCoveragePartial(partialSources);
+    }
+  } catch (error) {
+    commitFailed = true;
+    commitError = error;
   }
-  target.rebuildReferences();
+
+  const recoveryErrors: unknown[] = [];
+  if (commitFailed) {
+    // A synchronous failure may happen after some rows have been loaded.
+    // Remove every target source again, mark it stale, and build only from
+    // the remaining unchanged projection.
+    try {
+      target.invalidateChangedSources(sourceUris, { rebuildReferences: false });
+    } catch (error) {
+      recoveryErrors.push(error);
+      // A partial upsert may already have accepted a native version and
+      // cleared its stale marker. Even if removing that projection fails,
+      // do not let it advertise complete coverage.
+      try {
+        target.markCoverageStale(sourceUris, 'native semantic projection commit recovery failed');
+      } catch (staleError) {
+        recoveryErrors.push(staleError);
+      }
+    }
+  }
+  if (recoveryErrors.length === 0) {
+    try {
+      // If invalidation itself failed, do not publish a graph from a possibly
+      // partial projection. Otherwise success and recovery each build once.
+      target.rebuildReferences();
+    } catch (error) {
+      recoveryErrors.push(error);
+    }
+  }
+  if (commitFailed) {
+    if (recoveryErrors.length > 0) {
+      const aggregate = new AggregateError(
+        [commitError, ...recoveryErrors],
+        'Native semantic projection commit failed and recovery also encountered errors.'
+      );
+      Object.defineProperty(aggregate, 'cause', { configurable: true, value: commitError });
+      throw aggregate;
+    }
+    throw commitError;
+  }
+  if (recoveryErrors.length > 0) throw recoveryErrors[0];
 }
 
 async function readEventExport(
@@ -586,8 +636,9 @@ export async function decodeNativeParamRows(input: {
   rows: readonly unknown[];
   signal?: AbortSignal;
   referenceFieldsOnly?: boolean;
+  /** @internal Scoped to one native table; never retained by the live workspace. */
+  fieldProjectionCache?: NativeParamFieldProjectionCache;
 }): Promise<ParamRowSymbol[]> {
-  const fieldsById = new Map(input.definition.fields.map((field) => [field.id, field]));
   // PARAM reference enrichment only needs fields carrying trusted Refs= rules,
   // their condition siblings, or the existing text-id predicate.  Keeping the
   // projection narrow matters on real gameparam tables with tens of thousands
@@ -627,6 +678,26 @@ export async function decodeNativeParamRows(input: {
   const decodeDefinition = input.referenceFieldsOnly
     ? { ...input.definition, fields: input.definition.fields.filter((field) => referenceFieldIds.has(field.id)) }
     : input.definition;
+  const fieldCache = input.fieldProjectionCache ?? new Map();
+  const fieldProjections = new Map(decodeDefinition.fields.map((field) => {
+    const refs = input.referenceFieldsOnly ? parsedReferenceFields.get(field.id) : undefined;
+    const metadata = {
+      fieldId: field.id, name: field.name, type: field.type,
+      ...(field.description ? { description: field.description } : {}),
+      ...(refs && refs.targets.length > 0 ? { refs: refs.targets, refsProvenance: 'trusted-metadata' as const } : {}),
+      ...(refs && refs.rejected.length > 0 ? { refsRejected: refs.rejected, refsProvenance: 'trusted-metadata' as const } : {})
+    };
+    const metadataKey = JSON.stringify(metadata, (_key, value) =>
+      typeof value === 'number' && (Object.is(value, -0) || !Number.isFinite(value))
+        ? { nativeNumericValue: Object.is(value, -0) ? '-0' : String(value) }
+        : value);
+    let bucket = fieldCache.get(field.id);
+    if (!bucket || bucket.metadataKey !== metadataKey) {
+      bucket = { metadataKey, values: new Map() };
+      fieldCache.set(field.id, bucket);
+    }
+    return [field.id, { metadata, bucket }] as const;
+  }));
   // Keep backwards-compatible fixture callers (which only supplied
   // file.sha256) while making the packed/native path explicit.  Once either
   // identity is supplied, do not copy one hash into the other domain.
@@ -657,19 +728,23 @@ export async function decodeNativeParamRows(input: {
       : undefined;
     const fields: ParamFieldSymbol[] = decodeRowFields(bytes, decodeDefinition)
       .map((field) => {
-      const definitionField = fieldsById.get(field.fieldId);
-      const refs = input.referenceFieldsOnly
-        ? parsedReferenceFields.get(field.fieldId)
-        : undefined;
-      return {
-        fieldId: field.fieldId,
-        name: field.name,
-        type: field.type,
-        ...(definitionField?.description ? { description: definitionField.description } : {}),
-        value: field.value,
-        ...(refs && refs.targets.length > 0 ? { refs: refs.targets, refsProvenance: 'trusted-metadata' as const } : {}),
-        ...(refs && refs.rejected.length > 0 ? { refsRejected: refs.rejected, refsProvenance: 'trusted-metadata' as const } : {})
-      };
+        const projection = fieldProjections.get(field.fieldId)!;
+        const key = field.value === null ? 'null'
+          : typeof field.value === 'number' && Object.is(field.value, -0) ? 'number:-0'
+            : `${typeof field.value}:${String(field.value)}`;
+        // Keep arbitrary long native strings and uncommon values out of the
+        // bounded table-local cache. Their full visible values still survive.
+        const cacheable = !(typeof field.value === 'string' && field.value.length > 256);
+        if (cacheable) {
+          const existing = projection.bucket.values.get(key);
+          if (existing) return existing;
+        }
+        const cell: ParamFieldSymbol = { ...projection.metadata, value: field.value };
+        if (cacheable && projection.bucket.values.size < 64) {
+          freezeParamFieldCell(cell);
+          projection.bucket.values.set(key, cell);
+        }
+        return cell;
     });
     rows.push({
       uri: `${input.file.sourceUri}#${input.tableName}/${rowId}`,
@@ -696,6 +771,20 @@ export async function decodeNativeParamRows(input: {
   }
   throwIfAborted(input.signal);
   return rows;
+}
+
+/** Primitive values share metadata cells; row vectors and physical receipts remain independent. */
+export type NativeParamFieldProjectionCache = Map<string, {
+  metadataKey: string;
+  values: Map<string, ParamFieldSymbol>;
+}>;
+
+function freezeParamFieldCell(value: object): void {
+  if (Object.isFrozen(value)) return;
+  for (const child of Object.values(value)) {
+    if (child !== null && typeof child === 'object') freezeParamFieldCell(child);
+  }
+  Object.freeze(value);
 }
 
 async function runWithConcurrencyPool<T>(
@@ -771,6 +860,7 @@ async function readParamExports(
       reportProgress('read-start', entry);
       const tableName = stripLeafExtension(entry.name, '.param');
       const decodedRows: ParamRowSymbol[] = [];
+      const fieldProjectionCache: NativeParamFieldProjectionCache = new Map();
       let definition: ParamDefDocument | undefined;
       let decodeStarted = false;
       const pagedRead = await readParamDocumentRowsPagedViaBridge({
@@ -810,6 +900,7 @@ async function readParamExports(
           typeName: identity.typeName,
           definition,
           rows: batch,
+          fieldProjectionCache,
           ...(input.referenceFieldsOnly ? { referenceFieldsOnly: true } : {}),
           ...(input.signal ? { signal: input.signal } : {})
         });
@@ -954,6 +1045,7 @@ async function readMsgExports(
       });
       const exported: MsgExport = {
         category,
+        ...(typeof data.readerSchemaRevision === 'number' ? {readerSchemaRevision: data.readerSchemaRevision} : {}),
         ...(stringValue(data.sourceHash) ? { sourceHash: stringValue(data.sourceHash) } : {}),
         outerFileHash: expectedOuterFileHash,
         ...(file.mtimeMs !== undefined ? { sourceRevision: file.mtimeMs } : {}),
@@ -1012,7 +1104,10 @@ async function listNativeEntries(
   }
   const bridgeRunner = input.bridgeRunner ?? runBridge;
   const result = await bridgeRunner<Record<string, unknown>>({
-    command: 'read-dcx-document',
+    // Directory enumeration does not need the DCX/BND writer self-tests in
+    // read-dcx-document. Keep the same native physical source and entry
+    // identities while avoiding several full-container rebuilds per refresh.
+    command: 'list-bnd4-entries',
     filePath: file.absolutePath,
     resourceUri: file.sourceUri,
     allowedRoots,
@@ -1026,15 +1121,23 @@ async function listNativeEntries(
   if (reportedOuterFileHash !== expectedOuterFileHash) {
     throw new Error('native container read outer hash 与固定 source receipt 不一致。');
   }
-  const nested = recordValue(data.nested);
-  return arrayValue(nested.entries).flatMap((value) => {
+  if (!Array.isArray(data.entries)
+    || !Number.isSafeInteger(data.entryCount) || data.entryCount !== data.entries.length) {
+    throw new Error('native container directory 缺少完整的条目目录或 entryCount 不一致。');
+  }
+  const seenIndexes = new Set<number>();
+  const entries = data.entries.map((value) => {
     const record = recordValue(value);
     const index = numberValue(record.index);
     const name = stringValue(record.name);
-    return index !== undefined && Number.isSafeInteger(index) && name.toLowerCase().endsWith(extension)
-      ? [{ index, name }]
-      : [];
+    if (index === undefined || !Number.isSafeInteger(index) || index < 0
+      || seenIndexes.has(index) || name.length === 0) {
+      throw new Error('native container directory 包含无效或重复的物理条目身份。');
+    }
+    seenIndexes.add(index);
+    return { index, name };
   });
+  return entries.filter((entry) => entry.name.toLowerCase().endsWith(extension));
 }
 
 async function materializeNativeEntry(

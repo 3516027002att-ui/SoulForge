@@ -153,6 +153,7 @@ static class MsgTextExport
             {
                 category = table.Category,
                 sourceHash = table.SourceHash,
+                readerSchemaRevision = 2,
                 entryIndex = table.EntryIndex,
                 entryName = table.EntryName,
                 entries = table.Entries
@@ -161,6 +162,7 @@ static class MsgTextExport
             {
                 ["msgs"] = msgPayload,
                 ["outerFileHash"] = outerFileHash
+                ,["readerSchemaRevision"] = 2
             };
             // 保留单 FMG 调用方的旧形状；多表结果通过 msgs[] 明确表达。
             if (tables.Count == 1)

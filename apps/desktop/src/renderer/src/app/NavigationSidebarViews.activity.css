@@ -1,0 +1,26 @@
+
+/* ═══════════ 活动栏 ═══════════ */
+.activitybar {
+  width: var(--activitybar-w); flex: none;
+  display: flex; flex-direction: column; align-items: center; padding: 8px 0; gap: 4px;
+  background: var(--forge-1); border-right: 1px solid var(--line);
+}
+.ab-item {
+  position: relative; width: 36px; height: 36px; display: grid; place-items: center;
+  color: var(--ink-2); border-radius: var(--radius-l);
+  background: var(--control-rest-bg);
+  transition: color var(--dur-micro), background var(--dur-micro), box-shadow var(--dur-micro);
+}
+.ab-item:hover { color: var(--ink-0); background: var(--control-hover-bg); box-shadow: var(--control-hover-shadow); }
+.ab-item:active { background: var(--control-active-bg); box-shadow: var(--control-active-shadow); }
+.ab-item.is-active { color: var(--ember-text); background: var(--ember-soft); }
+.ab-item.is-active::before {
+  content: ""; position: absolute; left: -6px; top: 8px; bottom: 8px; width: 2px;
+  background: var(--ember); border-radius: 2px;
+}
+.ab-badge {
+  position: absolute; top: 2px; right: 0; min-width: 14px; height: 14px;
+  font-size: 9px; font-weight: 700; line-height: 14px; text-align: center;
+  color: var(--on-ember); background: var(--ember); border-radius: 7px; padding: 0 4px;
+}
+.ab-spacer { flex: 1; }

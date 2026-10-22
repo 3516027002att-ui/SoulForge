@@ -1,0 +1,13 @@
+
+/* Theme configuration stays in Settings; no daily workbench chrome is added. */
+.theme-settings { min-width: 0; }
+.theme-settings select { max-width: 58%; min-width: 0; background: var(--forge-2); color: var(--ink-0); }
+.theme-parameters { border-bottom: 1px solid var(--line); font-size: 12px; }
+.theme-parameters summary { cursor: pointer; color: var(--ink-1); padding: 8px 0; }
+.theme-parameters__body { display: grid; gap: 10px; padding: 4px 0 12px; }
+.theme-slider { display: grid; gap: 4px; min-width: 0; }
+.theme-slider > span { display: flex; justify-content: space-between; gap: 8px; color: var(--ink-1); }
+.theme-slider output { font-variant-numeric: tabular-nums; color: var(--ink-2); }
+.theme-slider input { width: 100%; min-width: 0; accent-color: var(--ember); }
+.theme-parameters__actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.theme-parameters__json { width: 100%; min-height: 100px; padding: 6px; color: var(--ink-1); background: var(--forge-2); font: 10px var(--font-mono); }

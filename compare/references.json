@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "references": {
+    "soulsformats": {
+      "repository": "https://github.com/JKAnderson/SoulsFormats.git",
+      "commit": "9c0da6b0721372b34f36b4be503ec020dca1043a"
+    },
+    "soulsformats-next": {
+      "repository": "https://github.com/soulsmods/SoulsFormatsNEXT.git",
+      "commit": "ee1dd61958f60bdc51ce3da548e9a90a8ab39905"
+    }
+  }
+}

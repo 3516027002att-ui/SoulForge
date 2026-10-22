@@ -7,7 +7,7 @@
  * Authority: candidate — read-only, no writer or game-load verification.
  */
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
-import { nativeFixtureRoleRegistered, resolveNativeFixture } from './nativeFixtureRegistry.js';
+import { nativeFixtureRoleRegistered, nativeOodleRuntimeRoot, resolveNativeFixture } from './nativeFixtureRegistry.js';
 
 interface TaeEnvelope {
   format: string;
@@ -56,7 +56,7 @@ async function main(): Promise<void> {
     '../../mods/chr/c0000.anibnd.dcx'
   );
 
-  const oodleRuntimeRoot = process.env.SOULFORGE_OODLE_RUNTIME_ROOT || 'D:/mystream/Sekiro Shadows Die Twice/Sekiro';
+  const oodleRuntimeRoot = nativeOodleRuntimeRoot();
   const result = await runBridge<TaeEnvelope>({
     command: 'read-tae-document',
     filePath: source,

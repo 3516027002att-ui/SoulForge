@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type {
   BridgeFileBackedResultDescriptor,
+  BridgeCommandName,
   BridgeResult,
   Diagnostic,
   ResourceKind
@@ -18,8 +19,9 @@ import {
   createBridgeTransportTimingCollector,
   type BridgeTransportTimingCollector
 } from './bridgeTransportTiming.js';
+import { prepareBridgeSourceBuild } from './bridgeSourceBuild.js';
 
-export type BridgeCommand = 'inspect' | 'read-dcx-document' | 'write-bnd4' | 'snapshot-bnd4-child' | 'extract-bnd4-child' | 'list-bnd4-entries' | 'inventory-asset-resources' | 'read-fmg-document' | 'write-fmg' | 'read-param-document' | 'write-param' | 'read-gparam-document' | 'write-gparam' | 'read-text-catalog' | 'read-emevd-document' | 'write-emevd' | 'read-msb-document' | 'write-msb' | 'read-tae-document' | 'read-tae-event-params' | 'read-tae-animation-clip' | 'sample-tae-animation-pose' | 'read-bridge-artifact' | 'read-chrbnd-flver-preview' | 'read-map-part-flver-preview' | 'read-map-static-geometry' | 'read-tpf-document' | 'export-tpf-texture' | 'read-tpf-texture-preview' | 'write-tpf-texture-replace' | 'read-flver-document' | 'write-flver' | 'read-flver-mesh' | 'read-flver-skeleton' | 'read-flver-texture-slots' | 'read-flver-dummies' | 'read-esd-document' | 'write-esd-document' | 'write-tae-document' | 'write-fxr-document' | 'read-mtd-document' | 'write-mtd-document' | 'read-fxr-document' | 'list-ffxbnd-entries' | 'read-luabnd-document' | 'inspect-luabnd' | 'read-luabnd-script' | 'read-hks-source' | 'compile-hks-source' | 'write-luabnd-script' | 'export-luabnd' | 'export-event' | 'export-map' | 'export-param' | 'export-msg' | 'validate' | 'probe-oodle' | 'probe-document-locator';
+export type BridgeCommand = Exclude<BridgeCommandName, 'capabilities' | 'health'>;
 
 export type BridgeRequestPhase = 'command' | 'artifact';
 
@@ -61,9 +63,31 @@ export interface RunBridgeOptions {
 const DEFAULT_TIMEOUT_MS = 15_000;
 const BRIDGE_PROJECT_RELATIVE_PATH = 'bridge/SoulForge.Bridge/SoulForge.Bridge.csproj';
 type BridgeClientPool = Map<string, Promise<BridgeDaemonClient>>;
+interface BridgeClientLease {
+  client: BridgeDaemonClient;
+  key: string;
+  promise: Promise<BridgeDaemonClient>;
+}
 
 const clients: BridgeClientPool = new Map();
 const activeClientUses = new WeakMap<BridgeDaemonClient, number>();
+interface BridgeClientScopeOptions {
+  readonly executable: string;
+  readonly args?: readonly string[];
+  readonly cwd?: string;
+  readonly workspaceSessionId: string;
+  readonly allowedRoots: readonly string[];
+  readonly writableRoots?: readonly string[];
+  readonly oodleRuntimeRoot?: string;
+  readonly maxFrameBytes?: number;
+  readonly maxConcurrency?: number;
+}
+// Scope is known before the handshake settles. Keep an immutable snapshot so
+// an unrelated startup cannot delay a request that it could never serve.
+const startupScopes = new WeakMap<Promise<BridgeDaemonClient>, BridgeClientScopeOptions>();
+// Weak ownership follows the pool promise. Readiness never changes its scope
+// proof, and fulfilled clients still require identity/closed/scope validation.
+const readyClients = new WeakMap<Promise<BridgeDaemonClient>, BridgeDaemonClient>();
 
 function withCancellationTerminalPhase(
   observer: RunBridgeOptions['onCancellationTerminal'],
@@ -89,6 +113,7 @@ interface BridgeLaunch {
   args: string[];
   cwd?: string;
   packaged?: boolean;
+  sourceBuildArgs?: string[];
 }
 
 /**
@@ -222,7 +247,7 @@ async function runBridgeWithPool<T = unknown>(
     const missing = failedBridgeResult<T>(
       options,
       'BRIDGE_PACKAGED_EXECUTABLE_MISSING',
-      '打包运行时缺少 resources/bridge/SoulForge.Bridge.exe，拒绝回退到源码项目或 dotnet run。',
+      `打包运行时缺少 ${launch.executable}，拒绝回退到源码项目或 dotnet run。`,
       { executable: launch.executable }
     );
     return withTransportTiming(missing, transportTiming, 'failed');
@@ -241,9 +266,18 @@ async function runBridgeWithPool<T = unknown>(
   });
 
   let leasedClient: BridgeDaemonClient | undefined;
+  let acquiredLease: BridgeClientLease | undefined;
   try {
+    const sourceBuildArgs = launch.sourceBuildArgs;
+    const prepareSource = sourceBuildArgs ? () => prepareBridgeSourceBuild({
+      executable: launch.executable,
+      args: sourceBuildArgs,
+      cwd: dirname(bridgeProjectPath),
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.onProgress ? { onProgress: options.onProgress } : {})
+    }) : undefined;
     const poolScope = transportTiming?.begin('poolAcquireMs') ?? null;
-    const client = await getOrCreateClient(poolKey, {
+    const lease = await getOrCreateClient(poolKey, {
       executable: launch.executable,
       args: launch.args,
       cwd: options.cwd ?? launch.cwd ?? dirname(bridgeProjectPath),
@@ -256,7 +290,9 @@ async function runBridgeWithPool<T = unknown>(
       maxFrameBytes,
       maxConcurrency,
       startupTimeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    }, launch, clientPool);
+    }, launch, clientPool, prepareSource);
+    acquiredLease = lease;
+    const client = lease.client;
     leasedClient = client;
     transportTiming?.end(poolScope);
     const daemonScope = transportTiming?.begin('daemonRequestMs') ?? null;
@@ -292,8 +328,13 @@ async function runBridgeWithPool<T = unknown>(
     leasedClient = undefined;
     return materialized.finally(() => releaseBridgeClientUse(client));
   } catch (error) {
-    const client = await clientPool.get(poolKey)?.catch(() => undefined);
-    if (!client || client.isClosed) clientPool.delete(poolKey);
+    // Startup failures clean up their own promise in getOrCreateClient. A
+    // newer startup under the same key is independent of this failure: never
+    // await or remove it while reporting the original error.
+    if (acquiredLease?.client.isClosed
+      && clientPool.get(acquiredLease.key) === acquiredLease.promise) {
+      clientPool.delete(acquiredLease.key);
+    }
     const bridgeError = error instanceof BridgeDaemonError
       ? error
       : new BridgeDaemonError(
@@ -557,10 +598,29 @@ async function findCoveringClient(
   oodleRuntimeRoot?: string,
   maxFrameBytes?: number,
   maxConcurrency?: number
-): Promise<BridgeDaemonClient | undefined> {
-  const normAllowed = allowedRoots.map((r) => resolve(r));
-  const normWritable = writableRoots.map((r) => resolve(r));
+): Promise<BridgeClientLease | undefined> {
+  // A compatible handshake can be slower than a later, already-ready daemon.
+  // Prefer available capacity before joining a pending startup. This is route
+  // selection, not a retry: no request has been dispatched or lease acquired.
   for (const [key, promise] of clientPool.entries()) {
+    const client = readyClients.get(promise);
+    if (!client || clientPool.get(key) !== promise) continue;
+    if (client.isClosed) {
+      clientPool.delete(key);
+      continue;
+    }
+    const startupScope = startupScopes.get(promise);
+    if (startupScope && !canServeBridgeRequest(startupScope, launch, workspaceSessionId,
+      allowedRoots, writableRoots, oodleRuntimeRoot, maxFrameBytes, maxConcurrency)) continue;
+    if (!canServeBridgeRequest(client.options, launch, workspaceSessionId,
+      allowedRoots, writableRoots, oodleRuntimeRoot, maxFrameBytes, maxConcurrency)) continue;
+    retainBridgeClientUse(client);
+    return { client, key, promise };
+  }
+  for (const [key, promise] of clientPool.entries()) {
+    const startupScope = startupScopes.get(promise);
+    if (startupScope && !canServeBridgeRequest(startupScope, launch, workspaceSessionId,
+      allowedRoots, writableRoots, oodleRuntimeRoot, maxFrameBytes, maxConcurrency)) continue;
     try {
       const client = await promise;
       if (clientPool.get(key) !== promise) continue;
@@ -568,37 +628,51 @@ async function findCoveringClient(
         clientPool.delete(key);
         continue;
       }
-      if (client.options.executable !== launch.executable) continue;
-      // Native document sessions are scoped to this opaque workspace session.
-      // A client whose roots cover the request is not interchangeable with a
-      // client from another session: reusing it can make a valid PARAM session
-      // token look expired when the follow-up request lands on the other daemon.
-      if (client.options.workspaceSessionId !== workspaceSessionId) continue;
-      if (oodleRuntimeRoot && client.options.oodleRuntimeRoot !== resolve(oodleRuntimeRoot)) continue;
-      if (maxFrameBytes && (client.options.maxFrameBytes ?? 0) < maxFrameBytes) continue;
-      if (maxConcurrency && (client.options.maxConcurrency ?? 1) < maxConcurrency) continue;
-
-      const clientAllowed = client.options.allowedRoots.map((r) => resolve(r));
-      const allAllowedCovered = normAllowed.every((root) => isCoveredBy(root, clientAllowed));
-      if (!allAllowedCovered) continue;
-
-      const clientWritable = (client.options.writableRoots ?? []).map((r) => resolve(r));
-      const allWritableCovered = normWritable.every((root) => isCoveredBy(root, clientWritable));
-      if (!allWritableCovered) continue;
+      if (!canServeBridgeRequest(client.options, launch, workspaceSessionId,
+        allowedRoots, writableRoots, oodleRuntimeRoot, maxFrameBytes, maxConcurrency)) continue;
 
       retainBridgeClientUse(client);
-      return client;
-    } catch {
-      clientPool.delete(key);
+      return { client, key, promise };
+    } catch (error) {
+      const current = clientPool.get(key);
+      if (current !== undefined && current !== promise) continue;
+      if (current === promise) clientPool.delete(key);
+      // A matching startup is the caller's startup too. Its own failure may
+      // already have removed the entry; still report it without a hidden retry.
+      if (startupScope) throw error;
     }
   }
   return undefined;
 }
 
+function canServeBridgeRequest(
+  scope: BridgeClientScopeOptions,
+  launch: { executable: string; args?: readonly string[] },
+  workspaceSessionId: string,
+  allowedRoots: readonly string[],
+  writableRoots: readonly string[],
+  oodleRuntimeRoot?: string,
+  maxFrameBytes?: number,
+  maxConcurrency?: number
+): boolean {
+  if (scope.executable !== launch.executable || scope.workspaceSessionId !== workspaceSessionId) return false;
+  const launchArgs = launch.args ?? [];
+  const scopeArgs = scope.args ?? [];
+  if (scopeArgs.length !== launchArgs.length || scopeArgs.some((arg, index) => arg !== launchArgs[index])) return false;
+  if (oodleRuntimeRoot && scope.oodleRuntimeRoot !== resolve(oodleRuntimeRoot)) return false;
+  if (maxFrameBytes && (scope.maxFrameBytes ?? 0) < maxFrameBytes) return false;
+  if (maxConcurrency && (scope.maxConcurrency ?? 1) < maxConcurrency) return false;
+  const clientAllowed = scope.allowedRoots.map(root => resolve(root));
+  if (!allowedRoots.every(root => isCoveredBy(resolve(root), clientAllowed))) return false;
+  const clientWritable = (scope.writableRoots ?? []).map(root => resolve(root));
+  return writableRoots.every(root => isCoveredBy(resolve(root), clientWritable));
+}
+
 function isCoveredBy(target: string, roots: string[]): boolean {
-  const normalizedTarget = resolve(target).toLowerCase();
+  const windows = process.platform === 'win32';
+  const normalizedTarget = windows ? resolve(target).toLowerCase() : resolve(target);
   return roots.some((root) => {
-    const normalizedRoot = resolve(root).toLowerCase();
+    const normalizedRoot = windows ? resolve(root).toLowerCase() : resolve(root);
     return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(normalizedRoot + (process.platform === 'win32' ? '\\' : '/'));
   });
 }
@@ -607,8 +681,9 @@ async function getOrCreateClient(
   key: string,
   options: Parameters<typeof BridgeDaemonClient.start>[0],
   launch: { executable: string; args: string[] },
-  clientPool: BridgeClientPool
-): Promise<BridgeDaemonClient> {
+  clientPool: BridgeClientPool,
+  prepareSource?: () => Promise<void>
+): Promise<BridgeClientLease> {
   const covering = await findCoveringClient(
     clientPool,
     launch,
@@ -626,13 +701,34 @@ async function getOrCreateClient(
     const client = await existing;
     if (!client.isClosed && clientPool.get(key) === existing) {
       retainBridgeClientUse(client);
-      return client;
+      return { client, key, promise: existing };
     }
-    clientPool.delete(key);
+    if (clientPool.get(key) === existing) clientPool.delete(key);
+    return getOrCreateClient(key, options, launch, clientPool, prepareSource);
   }
 
+  if (prepareSource) {
+    // Keep compiler cancellation owned by each caller, then recheck the pool:
+    // another caller may have started the daemon while compilation completed.
+    await prepareSource();
+    return getOrCreateClient(key, options, launch, clientPool);
+  }
+
+  const startupScope = Object.freeze({
+    executable: options.executable,
+    args: Object.freeze([...(options.args ?? [])]),
+    ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+    workspaceSessionId: options.workspaceSessionId,
+    allowedRoots: Object.freeze([...options.allowedRoots]),
+    ...(options.writableRoots ? { writableRoots: Object.freeze([...options.writableRoots]) } : {}),
+    ...(options.oodleRuntimeRoot ? { oodleRuntimeRoot: options.oodleRuntimeRoot } : {}),
+    ...(options.maxFrameBytes !== undefined ? { maxFrameBytes: options.maxFrameBytes } : {}),
+    ...(options.maxConcurrency !== undefined ? { maxConcurrency: options.maxConcurrency } : {})
+  });
   const created = BridgeDaemonClient.start(options);
+  startupScopes.set(created, startupScope);
   clientPool.set(key, created);
+  void created.then(client => { readyClients.set(created, client); }, () => undefined);
   try {
     const client = await created;
     if (clientPool.get(key) !== created || client.isClosed) {
@@ -640,9 +736,9 @@ async function getOrCreateClient(
       return getOrCreateClient(key, options, launch, clientPool);
     }
     retainBridgeClientUse(client);
-    return client;
+    return { client, key, promise: created };
   } catch (error) {
-    clientPool.delete(key);
+    if (clientPool.get(key) === created) clientPool.delete(key);
     throw error;
   }
 }
@@ -654,6 +750,11 @@ function resolveBridgeLaunch(
   if (options.bridgeExecutablePath) {
     return { executable: resolve(options.bridgeExecutablePath), args: [] };
   }
+  // Linux x64 uses its native apphost in both packaged and source builds.
+  // Never select a neighboring Windows binary from a mixed build directory.
+  const linuxX64 = process.platform === 'linux' && process.arch === 'x64';
+  const runtimeIdentifier = linuxX64 ? 'linux-x64' : 'win-x64';
+  const executableName = linuxX64 ? 'SoulForge.Bridge' : 'SoulForge.Bridge.exe';
 
   // A packaged Electron build has no repository checkout or dotnet project.
   // electron-builder places the self-contained Bridge under resources/bridge;
@@ -665,7 +766,7 @@ function resolveBridgeLaunch(
   };
   const packagedResourceRoot = electronProcess.resourcesPath;
   if (packagedResourceRoot && electronProcess.defaultApp !== true) {
-    const packaged = resolve(packagedResourceRoot, 'bridge', 'SoulForge.Bridge.exe');
+    const packaged = resolve(packagedResourceRoot, 'bridge', executableName);
     return {
       executable: packaged,
       args: [],
@@ -676,16 +777,31 @@ function resolveBridgeLaunch(
 
   const projectDirectory = dirname(bridgeProjectPath);
   const builtCandidates = [
-    join(projectDirectory, 'bin', 'Release', 'net10.0', 'win-x64', 'publish', 'SoulForge.Bridge.exe'),
-    join(projectDirectory, 'bin', 'Release', 'net10.0', 'win-x64', 'SoulForge.Bridge.exe'),
-    join(projectDirectory, 'bin', 'Debug', 'net10.0', 'win-x64', 'SoulForge.Bridge.exe')
+    join(projectDirectory, 'bin', 'Release', 'net10.0', runtimeIdentifier, 'publish', executableName),
+    join(projectDirectory, 'bin', 'Release', 'net10.0', runtimeIdentifier, executableName),
+    join(projectDirectory, 'bin', 'Debug', 'net10.0', runtimeIdentifier, executableName)
   ];
   const built = builtCandidates.find(existsSync);
   if (built) return { executable: built, args: [] };
 
   return {
     executable: resolveDotnetPath(options.dotnetPath),
-    args: ['run', '--project', bridgeProjectPath, '--no-launch-profile', '--']
+    ...(linuxX64 ? { sourceBuildArgs: [
+      'build', bridgeProjectPath, '--runtime', runtimeIdentifier,
+      '-p:SelfContained=false', '-p:PublishSingleFile=false',
+      '-p:UseSharedCompilation=false', '--disable-build-servers', '-nodeReuse:false', '--nologo'
+    ] } : {}),
+    args: [
+      'run', '--project', bridgeProjectPath, '--no-launch-profile',
+      ...(linuxX64 ? [
+        // Build explicitly before daemon startup: compiler/restore logs are
+        // not NDJSON frames, so source fallback must never start a build.
+        '--no-build', '--no-restore',
+        '--runtime', runtimeIdentifier,
+        '-p:SelfContained=false', '-p:PublishSingleFile=false'
+      ] : []),
+      '--'
+    ]
   };
 }
 
