@@ -39,3 +39,12 @@ test('classified empty meshes complete structural coverage without becoming draw
   assert.equal(module.summarizeFlverValidation([{ ...sample, emptyMeshIndices: [1, 1] }]).ok, false);
   assert.equal(module.summarizeFlverValidation([{ ...sample, emptyMeshIndices: [3] }]).ok, false);
 });
+
+test('empty-topology meshes are counted apart from verified meshes in the summary', () => {
+  // Two drawable meshes decoded, one classified empty: three meshes, two verified.
+  const sample = { id: 'mixed', meshCount: 3, meshesChecked: 3, meshesOk: 2, emptyMeshIndices: [1], decodeFailures: [] };
+  const result = module.summarizeFlverValidation([sample]);
+  assert.deepEqual(result.meshCounts, { total: 3, verified: 2, emptyTopology: 1 });
+  assert.match(result.message, /2 verified meshes; 1 empty-topology meshes/);
+  assert.doesNotMatch(result.message, /\b3 (verified )?meshes\b/);
+});
