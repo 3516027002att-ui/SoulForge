@@ -98,11 +98,26 @@ function parseReceipt(chunks, byteLength, nonce) {
       || receipt.childExitCode < 0 || receipt.childExitCode > 255))
     || typeof receipt.treeStopped !== 'boolean' || typeof receipt.descendantsObserved !== 'boolean'
     || (receipt.terminationReason !== null && !['cancelled', 'timeout', 'spawn-error', 'descendant-leak', 'guardian-capability-unavailable', 'guardian-child-state-unavailable', 'tree-unproven'].includes(receipt.terminationReason))
-    || !receiptSemanticsAreConsistent(receipt)) {
+    || !receiptSemanticsAreConsistent(receipt) || !descendantEvidenceIsValid(receipt)) {
     throw new Error('OWNED_PROCESS_GUARDIAN_RECEIPT_INVALID');
   }
   return receipt;
 }
+
+// Optional leak evidence: how long descendants alive at target exit took to
+// exit within the grace window, or which ones were still live after it.
+function descendantEvidenceIsValid({ descendantSettleMs: settle, leakedDescendantCount: total, leakedDescendants: leaks, descendantsObserved }) {
+  if (settle !== undefined && settle !== null && (!Number.isSafeInteger(settle) || settle < 0)) return false;
+  if (leaks === undefined) return total === undefined;
+  if (!Array.isArray(leaks) || leaks.length > 8 || !Number.isSafeInteger(total) || total < leaks.length) return false;
+  if (leaks.length && !descendantsObserved) return false;
+  return leaks.every(entry => entry && typeof entry === 'object' && Number.isSafeInteger(entry.pid) && entry.pid > 0
+    && Number.isSafeInteger(entry.ppid) && entry.ppid > 0 && typeof entry.state === 'string' && /^[A-Za-z]$/.test(entry.state)
+    && typeof entry.comm === 'string' && entry.comm.length <= 16);
+}
+
+const descendantEvidence = receipt => Object.fromEntries(['descendantSettleMs', 'leakedDescendantCount', 'leakedDescendants']
+  .filter(key => receipt[key] !== undefined).map(key => [key, receipt[key]]));
 
 function receiptSemanticsAreConsistent(receipt) {
   const { code, signal, childExitCode, treeStopped, descendantsObserved, terminationReason, spawnErrno } = receipt;
@@ -270,9 +285,9 @@ export async function runLinuxGuardianProcess(options, guardianDirectory = artif
       ? 'OWNED_PROCESS_GUARDIAN_CAPABILITY_UNAVAILABLE'
       : receipt.terminationReason === 'guardian-child-state-unavailable'
         ? 'OWNED_PROCESS_GUARDIAN_CHILD_STATE_UNAVAILABLE' : 'OWNED_PROCESS_TREE_UNPROVEN';
-    return failedResult({ error: receiptError, reason: terminationReason ?? 'tree-unproven',
+    return { ...failedResult({ error: receiptError, reason: terminationReason ?? 'tree-unproven',
       timeoutMs, stdout, stderr, stdoutTruncated, stderrTruncated, childExitCode: receipt.childExitCode,
-      descendantsObserved: receipt.descendantsObserved });
+      descendantsObserved: receipt.descendantsObserved }), ...descendantEvidence(receipt) };
   }
 
   const timedOut = terminationReason === 'timeout' || receipt.terminationReason === 'timeout';
@@ -288,6 +303,7 @@ export async function runLinuxGuardianProcess(options, guardianDirectory = artif
   return {
     code, childExitCode: receipt.childExitCode, stdout, stderr, stdoutTruncated, stderrTruncated,
     timedOut, cancelled, terminationReason: reason, signal: receipt.signal, timeoutMs,
-    ...(outputError ? { outputError } : {}), treeStopped: true, descendantsObserved: receipt.descendantsObserved
+    ...(outputError ? { outputError } : {}), treeStopped: true, descendantsObserved: receipt.descendantsObserved,
+    ...descendantEvidence(receipt)
   };
 }

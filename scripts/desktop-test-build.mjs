@@ -134,7 +134,12 @@ export async function runDesktopSmoke(kind, entry, executable = process.execPath
       catch { /* Failed builds/early exits do not imply a native binding exists. */ }
       console.error(JSON.stringify({ kind, status: 'failed', code: result.code,
         signal: result.signal, timedOut: result.timedOut, cancelled: result.cancelled,
-        terminationReason: result.terminationReason, nativeLog, nativeBindingSha256 }, null, 2));
+        terminationReason: result.terminationReason, leakedDescendantCount: result.leakedDescendantCount,
+        leakedDescendants: result.leakedDescendants, descendantSettleMs: result.descendantSettleMs, nativeLog, nativeBindingSha256 }, null, 2));
+    } else if (result.descendantSettleMs !== undefined) {
+      // Evidence for the Guardian grace window: how long Electron's own
+      // descendants took to exit after the browser process did.
+      console.error(JSON.stringify({ kind, status: 'passed', descendantSettleMs: result.descendantSettleMs }));
     }
     return processSucceeded(result) ? 0 : result.code || 1;
   }, { reuseProductionBinding, repositoryRoot });
