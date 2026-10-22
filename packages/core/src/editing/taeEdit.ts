@@ -14,7 +14,7 @@ import { readFile, access } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { defaultReadSessionManager, createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
-import type { ActionAddress, Diagnostic, TaeEntryWire } from '@soulforge/shared';
+import type { ActionAddress, Diagnostic, TaeEntryWire, TaeExport } from '@soulforge/shared';
 import { formatActionAddress, formatAnimCode, parseActionAddress } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
 import { makeFileResourceUri, makeWorkspaceRelativePath } from '../workspace/resourceUri.js';
@@ -25,7 +25,7 @@ import {
   type TaeEventUpsertMutation
 } from './taeBridgeCommit.js';
 import type { NativeEditSession } from './nativeEditSession.js';
-import { readTaeBrowse } from './taeBrowse.js';
+import { readTaeBrowse, TAE_BROWSE_ANIMATION_PAGE_SIZE } from './taeBrowse.js';
 import type { TaeBrowseAction } from './taeBrowse.js';
 import { TAE_COMPACT_PAGE_SIZE } from './taeCompactEvent.js';
 
@@ -423,6 +423,94 @@ export async function readTaeEvents(input: {
     diagnostics: envelope.diagnostics
   };
 }
+
+export interface TaeScanResult {
+  ok: true;
+  filePath: string;
+  /** Every action and event of the source, in the indexed symbol shape plus the field metadata the compact
+   * projection uses (padding, assert, schema index, enum label); layout offsets, enum tables and raw copies are left out. */
+  export: TaeExport;
+  stats: { pages: number; animations: number; events: number; completedTails: number };
+  diagnostics: Diagnostic[];
+}
+
+/** Read a whole TAE source page by page for a native action search (#52), keeping only the searchable projection
+ * of each page. Animations whose page truncates their events are read whole by address. The source version must
+ * stay the same across every call; any failure is returned, never a partial export. */
+export async function scanTaeExport(input: { edit: NativeEditSession; file: string; sourceUri: string; signal?: AbortSignal;
+  onPage?: (progress: { pages: number; animations: number }) => void }): Promise<TaeScanResult | TaeEditFailureResult> {
+  const resolved = await resolveAnibndFile(input.edit, input.file);
+  if (!resolved.ok) return { ok: false, error: resolved.error, diagnostics: [] };
+  let identity: { sourceHash?: string; outerFileHash?: string; readerSchemaRevision: number } | undefined;
+  let chrId = '', taeEntryCount: number | undefined, taeEntries: TaeEntryWire[] | undefined;
+  const animations: TaeExport['animations'] = [];
+  const diagnostics: Diagnostic[] = [];
+  let pages = 0, completedTails = 0;
+  const changed = (next: { sourceHash?: string; outerFileHash?: string; readerSchemaRevision: number }) => identity !== undefined
+    && (next.sourceHash !== identity.sourceHash || next.outerFileHash !== identity.outerFileHash || next.readerSchemaRevision !== identity.readerSchemaRevision);
+  const versionChanged = (): TaeEditFailureResult => ({ ok: false,
+    error: { code: 'TAE_SOURCE_VERSION_CHANGED', message: 'TAE 来源或读取器版本在扫描期间变化，请重新搜索。' }, diagnostics });
+  for (let page = 0; ; page++) {
+    if (input.signal?.aborted) return { ok: false, error: { code: 'TAE_SCAN_CANCELLED', message: 'TAE 扫描已取消。' }, diagnostics };
+    const envelope = await readTaeEnvelope(input.edit, resolved.path, undefined, { animationPage: page, animationPageSize: TAE_BROWSE_ANIMATION_PAGE_SIZE });
+    if (!envelope.ok) return envelope.result;
+    pages++;
+    if (changed(envelope)) return versionChanged();
+    identity ??= { ...(envelope.sourceHash ? { sourceHash: envelope.sourceHash } : {}),
+      ...(envelope.outerFileHash ? { outerFileHash: envelope.outerFileHash } : {}), readerSchemaRevision: envelope.readerSchemaRevision };
+    if (page === 0) {
+      chrId = envelope.chrId; taeEntryCount = envelope.taeEntryCount; taeEntries = envelope.taeEntries;
+      diagnostics.push(...envelope.diagnostics.filter(diagnostic => diagnostic.severity !== 'info'));
+    }
+    for (const paged of envelope.animations) {
+      const animId = paged.animId;
+      if (animId === undefined) continue;
+      let anim = paged;
+      if (paged.eventsTruncated === true) {
+        const address = formatActionAddress({ chr: envelope.chrId, animId, ...sectionSelectorForAnimation(paged) });
+        const whole = await readTaeEnvelope(input.edit, resolved.path, [address]);
+        if (!whole.ok) return whole.result;
+        if (changed(whole)) return versionChanged();
+        const full = whole.animations.find(candidate => candidate.animId === animId && candidate.taeEntryIndex === paged.taeEntryIndex);
+        if (!full || full.eventsTruncated === true || (full.eventCount !== undefined && full.events?.length !== full.eventCount)) {
+          return { ok: false, error: { code: 'TAE_ACTION_READ_INCOMPLETE', message: `动作 ${address} 的词条没有完整读出。` }, diagnostics };
+        }
+        anim = full; completedTails++;
+      }
+      const events = projectEvents(envelope.chrId, [anim]);
+      animations.push({ animId, code: formatAnimCode(animId),
+        ...(anim.taeEntryIndex === undefined ? {} : { taeEntryIndex: anim.taeEntryIndex }),
+        ...(anim.taeEntryId === undefined ? {} : { taeEntryId: anim.taeEntryId }),
+        ...(anim.taeEntryName === undefined ? {} : { taeEntryName: anim.taeEntryName }),
+        ...(anim.taeGroup === undefined ? {} : { taeGroup: anim.taeGroup }),
+        ...(anim.hkxName ? { hkxName: anim.hkxName } : {}),
+        eventCount: anim.eventCount ?? events.length, eventsComplete: true,
+        events: events.map(event => ({ uri: event.uri, index: event.eventIndex, eventTypeId: event.eventTypeId,
+          ...(event.taeEntryIndex === undefined ? {} : { taeEntryIndex: event.taeEntryIndex }),
+          ...(event.typeName ? { typeName: event.typeName } : {}),
+          startTime: event.startTime, endTime: event.endTime, startFrame: event.startFrame, endFrame: event.endFrame,
+          ...(event.fields ? { fields: event.fields.map(field => ({ name: field.name, value: field.value,
+            ...(field.index === undefined ? {} : { index: field.index }),
+            ...(field.isPadding === undefined ? {} : { isPadding: field.isPadding }),
+            ...(field.assert === undefined ? {} : { assert: field.assert }),
+            ...(field.assertValid === undefined ? {} : { assertValid: field.assertValid }),
+            ...(field.displayValue === undefined ? {} : { displayValue: field.displayValue }) })) } : {}),
+          ...(event.decodeStatus ? { decodeStatus: event.decodeStatus } : {}),
+          ...(event.decodeStatus !== 'decoded' && event.parameterBytesHex ? { parameterBytesHex: event.parameterBytesHex } : {}) })) });
+    }
+    input.onPage?.({ pages, animations: animations.length });
+    if (!envelope.animationsTruncated || envelope.animations.length === 0) break;
+  }
+  return { ok: true, filePath: resolved.path,
+    export: { chrId, sourceUri: input.sourceUri, readerSchemaRevision: identity?.readerSchemaRevision ?? 0,
+      ...(identity?.sourceHash ? { sourceHash: identity.sourceHash } : {}),
+      ...(identity?.outerFileHash ? { outerFileHash: identity.outerFileHash } : {}),
+      ...(taeEntryCount === undefined ? {} : { taeEntryCount }), ...(taeEntries ? { taeEntries } : {}), animations },
+    stats: { pages, animations: animations.length, events: animations.reduce((sum, animation) => sum + animation.events.length, 0), completedTails },
+    diagnostics };
+}
+
+type TaeEditFailureResult = { ok: false; error: TaeEditFailure; diagnostics: Diagnostic[] };
 
 function normalizeTaePageSize(value: number | undefined): number {
   if (value === undefined) return 32;

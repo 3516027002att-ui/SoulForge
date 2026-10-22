@@ -1365,6 +1365,12 @@ export class WorkspaceIndex {
     function* sources(){for(const source of self.taeExports)if(self.isActiveSemanticSourceUri(source.sourceUri))yield source;}
     return searchTaeActionPage(sources,event=>scoreSearchProfile(taeEventSearchText(event),profile),window);
   }
+
+  /** The same ranking over exports the caller supplies, such as a native scan of one file that is not indexed (#52). */
+  searchTaeActionGroupsPageIn(exports:readonly TaeExport[], query:string, window:TaeActionSearchWindow={}) {
+    const profile=buildSearchQueryProfile(query);
+    return searchTaeActionPage(()=>exports,event=>scoreSearchProfile(taeEventSearchText(event),profile),window);
+  }
   lookupTextEntries(textId: number, category?: string): TextEntrySymbol[] {
     const normalizedCategory = category?.toLowerCase();
     const matches: TextEntrySymbol[] = [];

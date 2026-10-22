@@ -93,3 +93,49 @@ test('public preview indexing retains native action totals and source-bound exac
   assert.deepEqual(continued.data.events.map(event => event.index), Array.from({ length: 7 }, (_, index) => 7 + index), 'continuation starts exactly after the search-delivered page without skipping or replaying an event');
   assert.deepEqual(calls.at(-1).commandOptions, { animId: 0, taeEntryIndex: 0 });
 }));
+
+test('a file-scoped search scans an unindexed anibnd natively, finds a never-read action whole, and reuses the scan until the file changes', async () => withBrowse(async ({ source, bytes, edit, calls, registry, context }) => {
+  const { WorkspaceIndex } = await import('../packages/core/dist/indexing/workspaceIndex.js');
+  const index = new WorkspaceIndex(`${edit.session.meta.workspaceId}#scan`); const info = await stat(source);
+  const sourceUri = 'file://chr/c0000.anibnd.dcx';
+  index.setFiles([{ sourceUri, sourcePath: source, absolutePath: source, relativePath: 'chr/c0000.anibnd.dcx', resourceKind: 'chr', formatKind: 'bnd', game: 'sekiro', mtimeMs: info.mtimeMs, size: info.size, sha256: createHash('sha256').update(bytes).digest('hex') }]);
+  const indexedContext = { ...context, workspaceIndex: index };
+  // Type 9999 occurs only in the expanded action (240 events), which nothing has read.
+  const unindexed = await registry.run('search_tae_events', { query: '9999' }, indexedContext);
+  assert.notEqual(unindexed.ok && unindexed.data.coverage, 'native-scan');
+  assert.ok(!unindexed.ok || !(unindexed.data.matches ?? []).length, 'the index alone does not know the action');
+  const found = await registry.run('search_tae_events', { query: '9999', file: sourceUri }, indexedContext);
+  assert.equal(found.ok, true, JSON.stringify(found));
+  assert.equal(found.data.coverage, 'native-scan');
+  assert.deepEqual(found.data.scan, { pages: 3, animations: 130, events: 369, completedTails: 1, cached: false });
+  const nativeCalls = calls.length;
+  assert.equal(nativeCalls, 4, 'three animation pages and one whole read of the truncated action');
+  const item = found.data.matches[0].item;
+  assert.equal(found.data.total, 1); assert.equal(item.address, 'action://c0000/tae/0/A0000');
+  assert.deepEqual(item.events.map(event => event.index), Array.from({ length: 64 }, (_, i) => i));
+  assert.equal(item.events[63].address, 'action://c0000/tae/0/A0000/e63');
+  assert.deepEqual({ totalCount: item.pagination.totalCount, totalPages: item.pagination.totalPages, offset: item.pagination.nextRead.args.offset },
+    { totalCount: 240, totalPages: 4, offset: 64 });
+  const next = await registry.run(item.pagination.nextRead.tool, item.pagination.nextRead.args, indexedContext);
+  assert.equal(next.ok, true, JSON.stringify(next));
+  assert.deepEqual(next.data.events.map(event => event.index), Array.from({ length: 64 }, (_, i) => 64 + i));
+  const callsAfterRead = calls.length;
+  // Another query on the same unchanged file reuses the scan; its cursor stays bound to the file.
+  const ordinary = await registry.run('search_tae_events', { query: '100', file: sourceUri, limit: 2 }, indexedContext);
+  assert.equal(ordinary.ok, true, JSON.stringify(ordinary)); assert.equal(ordinary.data.scan.cached, true);
+  assert.equal(calls.length, callsAfterRead, 'a cached scan makes no native call');
+  assert.ok(ordinary.data.total > 2); assert.equal(ordinary.data.nextActions[0].args.file, sourceUri);
+  const more = await registry.run('search_tae_events', ordinary.data.nextActions[0].args, indexedContext);
+  assert.equal(more.ok, true, JSON.stringify(more)); assert.equal(more.data.offset, 2);
+  const unbound = await registry.run('search_tae_events', { cursor: ordinary.data.nextCursor }, indexedContext);
+  assert.equal(unbound.ok, false, 'a scan cursor does not continue as an index search');
+  assert.equal(unbound.error.code, 'SEARCH_CURSOR_SCOPE_MISMATCH', 'refused for its provider, not by chance of a different snapshot');
+  // A changed file (one more TAE child) is scanned again rather than answered from the old scan.
+  const ordinaryChild = manyAnimationsFixture(65); const childTable = Number(ordinaryChild.readBigInt64LE(0x58));
+  const expandedChild = manyEventsFixture(ordinaryChild, [{ entry: Number(ordinaryChild.readBigInt64LE(childTable + 8)) }]);
+  await writeFile(source, taeBinderFixture([expandedChild, ordinaryChild, ordinaryChild]));
+  const rescanned = await registry.run('search_tae_events', { query: '9999', file: sourceUri }, indexedContext);
+  assert.equal(rescanned.ok, true, JSON.stringify(rescanned));
+  assert.deepEqual({ cached: rescanned.data.scan.cached, animations: rescanned.data.scan.animations }, { cached: false, animations: 195 });
+  assert.ok(!(index.toSymbolBundle().tae ?? []).some(export_ => export_.animations.length > 100), 'a scan does not fill the workspace index');
+}));

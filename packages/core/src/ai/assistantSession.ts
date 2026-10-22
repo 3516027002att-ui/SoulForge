@@ -247,7 +247,7 @@ function reasonForTool(name: string): string {
     search_event_reference: '按用户提供的事件笔记，把血条、落雷、掉落等语义映射为候选指令名，再回到当前 EMEVD 复核。',
     explain_event: '生成证据优先的事件解释输入。',
     search_map_entities: '查找地图实体、区域和可见命名候选。',
-    search_tae_events: '按任意词条字段、类型或地址（cXXXX#AXXXX.eN）找动作；命中动作按固定页返回整组精简词条，后续页走 nextRead。',
+    search_tae_events: '按任意词条字段、类型或地址（cXXXX#AXXXX.eN）找动作；带 file 时原生扫描该文件，没读过的动作也搜得到；命中动作按固定页返回整组精简词条，后续页走 nextRead。',
     insert_tae_events: '从可信原生模板新增 TAE 词条并设置字段，经 Patch Engine 返回审计与回滚。',
     read_tae_events: '按动作或词条地址（c1050#A0200 / c1050#A0200.e0）读 TAE 词条的帧/时间与已解码字段；projection "compact" 按固定页读整组词条。',
     mutate_tae_event_times: '按地址改 TAE 词条起始/结束帧，经 Patch Engine 提交。',
