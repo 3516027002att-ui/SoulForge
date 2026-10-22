@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -369,6 +369,32 @@ const dotnetAvailable = spawnSync(dotnet, ['--version'], { encoding: 'utf8', tim
 
 const sdkSkip = !dotnetAvailable && 'dotnet SDK unavailable';
 
+// A bare PID cannot tell a lingering owner from an unrelated process that
+// reused the number. On Windows, also read the live holder's creation time.
+function pidEvidence(pid) {
+  let live;
+  try { process.kill(pid, 0); live = true; } catch (error) { live = error.code !== 'ESRCH'; }
+  if (!live || process.platform !== 'win32') return { pid, live };
+  const query = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+    `$ProgressPreference='SilentlyContinue';$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}';` +
+    `if($p){@{name=$p.Name;createdMs=([DateTimeOffset]$p.CreationDate).ToUnixTimeMilliseconds();command=$p.CommandLine}|ConvertTo-Json -Compress}`],
+  { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  try { return { pid, live, ...JSON.parse(query.stdout.trim()) }; }
+  catch { return { pid, live, detail: `${query.stdout ?? ''}${query.stderr ?? ''}`.trim().slice(0, 300) }; }
+}
+
+// The recorded owner existed before its run directory was created, so a live
+// holder created later is a reused PID, not the owner.
+async function recordedOwnerEvidence(run) {
+  try {
+    const runCreatedMs = (await lstat(run)).birthtimeMs;
+    const marker = JSON.parse(await readFile(join(run, '.soulforge-temporary-owner.json'), 'utf8'));
+    const owner = pidEvidence(marker.pid);
+    return { runCreatedMs, owner, lingering: owner.live && !(owner.createdMs > runCreatedMs),
+      children: (marker.childPids ?? []).map(pidEvidence), uncertainTrees: marker.uncertainTrees ?? [] };
+  } catch (error) { return { error: error.message }; }
+}
+
 async function sdkFixture(body) {
   const validationRoot = resolve('.local-validation'); await mkdir(validationRoot, { recursive: true });
   const root = await mkdtemp(join(validationRoot, 'bridge-ownership-'));
@@ -413,7 +439,9 @@ async function sdkFixture(body) {
     await writeFile(join(root, 'NuGet.Config'), '<configuration><packageSources><clear /></packageSources></configuration>');
     const env = { ...process.env, DOTNET_CLI_HOME: join(root, 'dotnet-home'), DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: 'false', NUGET_PACKAGES: join(root, 'nuget'),
       DOTNET_CLI_TELEMETRY_OPTOUT: '1', DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1', DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false' };
-    const args = more => ['msbuild', project, '-nologo', '-v:minimal', '-m:1', ...more];
+    // -nodeReuse:false: a reused MSBuild worker node outlives the build that
+    // recorded it as owner, so its run would (correctly) never be reclaimable.
+    const args = more => ['msbuild', project, '-nologo', '-v:minimal', '-m:1', '-nodeReuse:false', ...more];
     const run = more => {
       const result = spawnSync(dotnet, args(more), { cwd: root, encoding: 'utf8', timeout: 60000, env, detached: process.platform !== 'win32' });
       assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`); return result.stdout;
@@ -461,13 +489,19 @@ test('direct SDK build promotes exact outputs, retains publish inputs, and suppo
     assert.equal(builtRuns.length, 1);
     const run = join(runs, builtRuns[0]);
     assert.equal(await exists(join(run, 'bin', 'Debug', 'net10.0', runtimeIdentifier, 'Bridge.dll')), true);
+    // The reclaim asserted below is only owed if the recorded owner ended with
+    // its build. Name it when it did not (for example a reused MSBuild node).
+    const ownerAfterBuild = await recordedOwnerEvidence(run);
+    assert.equal(ownerAfterBuild.lingering, false, `the recorded build owner outlived its build: ${JSON.stringify(ownerAfterBuild)}`);
     f.run(['-t:Publish', '-p:NoBuild=true']);
     assert.equal(await exists(join(canonical, 'publish', 'Bridge.dll')), true);
     assert.equal(await exists(join(canonical, 'publish', f.nativeName)), true);
     assert.deepEqual(await readdir(runs), builtRuns, 'no-build publish does not allocate a fresh empty run');
     f.run(['-t:Publish']);
     assert.equal(await exists(join(canonical, 'publish', 'Bridge.dll')), true);
-    assert.equal((await readdir(runs)).includes(builtRuns[0]), false, 'a default build reclaims the marked dead predecessor');
+    const predecessorKept = (await readdir(runs)).includes(builtRuns[0]);
+    assert.equal(predecessorKept, false, `a default build reclaims the marked dead predecessor${predecessorKept
+      ? `: ${JSON.stringify(await recordedOwnerEvidence(run))}` : ''}`);
     for (const name of await readdir(join(canonical, 'publish'))) assert.equal(name.includes('soulforge-'), false);
     f.run(['-restore', '-t:Build', '-p:UseAppHost=true']);
     f.run(['-t:Publish', '-p:UseAppHost=true', '-p:NoBuild=true']);
@@ -480,7 +514,7 @@ test('selected isolation stops before SDK writers when its run parent is linked'
     const outside = join(f.root, 'outside'); await put(join(outside, 'sentinel'), 'user');
     await mkdir(join(f.root, 'obj'));
     await symlink(outside, join(f.root, 'obj', '.soulforge-build-runs'), process.platform === 'win32' ? 'junction' : 'dir');
-    const result = spawnSync(dotnet, ['msbuild', f.project, '-t:PrepareForBuild', '-nologo', '-v:minimal', '-m:1'], {
+    const result = spawnSync(dotnet, ['msbuild', f.project, '-t:PrepareForBuild', '-nologo', '-v:minimal', '-m:1', '-nodeReuse:false'], {
       cwd: f.root, env: f.env, encoding: 'utf8', timeout: 30000, detached: process.platform !== 'win32'
     });
     assert.notEqual(result.status, 0);
@@ -596,7 +630,7 @@ test('SDK ProjectReference resolves the assembly built in the referenced fresh r
       const escaped = f.project.replaceAll('&', '&amp;').replaceAll('"', '&quot;');
       await writeFile(join(consumer, 'Consumer.csproj'), `<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><UseAppHost>false</UseAppHost><UseSharedCompilation>false</UseSharedCompilation></PropertyGroup><ItemGroup><ProjectReference Include="${escaped}" /></ItemGroup></Project>`);
       await writeFile(join(consumer, 'Entry.cs'), 'namespace Consumer { public static class Entry { public static void Main() { global::Program.Main(); } } }');
-      const result = spawnSync(dotnet, ['msbuild', join(consumer, 'Consumer.csproj'), '-restore', '-t:Build', '-nologo', '-v:minimal', '-m:1', `-p:RestoreConfigFile=${join(f.root, 'NuGet.Config')}`], {
+      const result = spawnSync(dotnet, ['msbuild', join(consumer, 'Consumer.csproj'), '-restore', '-t:Build', '-nologo', '-v:minimal', '-m:1', '-nodeReuse:false', `-p:RestoreConfigFile=${join(f.root, 'NuGet.Config')}`], {
         cwd: consumer, env: f.env, detached: process.platform !== 'win32', encoding: 'utf8', timeout: 60000
       });
       assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);

@@ -552,7 +552,12 @@ export async function runNativeReadProofSmoke(): Promise<void> {
     name: 'read_tae_events', description: 'fixture', permission: 'read',
     run: () => ({
       ok: true,
-      data: { filePath: containerPath, chrId: 'c1050', events: [{ animId: 200, eventIndex: 0, startFrame: 0, endFrame: 1 }] }
+      data: { filePath: containerPath, chrId: 'c1050', events: [
+        { animId: 200, eventIndex: 0, startFrame: 0, endFrame: 1 },
+        // projection "compact": identity only as the exact address, which must agree with index.
+        { index: 1, address: 'c1050#A0200.e1', eventTypeId: 1, startFrame: 2, endFrame: 3, fields: [{ name: 'Distance', value: 4 }] },
+        { index: 5, address: 'c1050#A0200.e2', eventTypeId: 1, startFrame: 2, endFrame: 3 }
+      ] }
     })
   });
   resBridgeRegistry.register({
@@ -577,6 +582,20 @@ export async function runNativeReadProofSmoke(): Promise<void> {
     objectKey: msbObjectKey(paramOuterKey(containerPath), 64),
     outerSourceKey: paramOuterKey(containerPath), version: {}, requiredFields: ['posX']
   });
+  for (const [eventIndex, requiredFields] of [[0, ['startFrame']], [1, ['startFrame', 'endFrame', 'eventTypeId', 'Distance']]] as const) {
+    resBridgeSession.proofStore.requireCoverage({
+      principal: 'resb-agent', workspaceId: 'resb-workspace',
+      objectKey: taeObjectKey(paramOuterKey(containerPath), 'c1050', 200, eventIndex),
+      outerSourceKey: paramOuterKey(containerPath), version: {}, requiredFields: [...requiredFields]
+    });
+  }
+  for (const eventIndex of [2, 5]) {
+    assert.throws(() => resBridgeSession.proofStore.requireCoverage({
+      principal: 'resb-agent', workspaceId: 'resb-workspace',
+      objectKey: taeObjectKey(paramOuterKey(containerPath), 'c1050', 200, eventIndex),
+      outerSourceKey: paramOuterKey(containerPath), version: {}, requiredFields: ['startFrame']
+    }), ProofError, `a compact event whose index disagrees with its address proves neither e${eventIndex}`);
+  }
   resBridgeSession.proofStore.requireCoverage({
     principal: 'resb-agent', workspaceId: 'resb-workspace',
     objectKey: fmgContainerKey(paramOuterKey(containerPath), 'Title'),

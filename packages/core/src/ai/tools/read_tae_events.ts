@@ -10,6 +10,7 @@ import { nativePathFromFileToken } from '.././toolRegistrySupport.js';
 import { ok } from '.././toolRegistrySupport.js';
 import { pathToFileURL } from 'node:url';
 import { readTaeEvents } from '../../editing/taeEdit.js';
+import { compactTaeEvent, TAE_COMPACT_PAGE_SIZE } from '../../editing/taeCompactEvent.js';
 import { requireEditSession } from '.././toolRegistrySupport.js';
 import { resolveIndexedResourceFile } from '.././toolRegistrySupport.js';
 
@@ -18,10 +19,12 @@ export function createReadTaeEventsTool():RegisteredTool {
  return {
     name: 'read_tae_events',
     description: 'Read a bounded native TAE animation preview when addresses are omitted; follow cursor for the next preview page. '
-      + 'Use an action-level cXXXX#AXXXX or section-qualified action URI to read every event of that action. Event addresses select exact events. Follow cursor with the same addresses, or an action nextRead, for remaining native events.',
+      + 'Use an action-level cXXXX#AXXXX or section-qualified action URI to read every event of that action. Event addresses select exact events. Follow cursor with the same addresses, or an action nextRead, for remaining native events. '
+      + `projection "compact" (with addresses) returns compact events in fixed pages of ${TAE_COMPACT_PAGE_SIZE}, numbered like search_tae_events previews; its cursor stays compact. `
+      + 'Compact omits field layout, padding that holds its asserted value, raw bytes of decoded events and info diagnostic details; omit projection for the full layout.',
     permission: 'read',
     permissionLevel: 'read',
-    inputSchema: { file: 'string', addresses: 'array?', cursor: 'string?', offset: 'safe-integer?', pageSize: 'number?', expectedSourceHash: 'string?', expectedReaderSchemaRevision: 'safe-integer?' },
+    inputSchema: { file: 'string', addresses: 'array?', cursor: 'string?', offset: 'safe-integer?', pageSize: 'number?', projection: 'string?', expectedSourceHash: 'string?', expectedReaderSchemaRevision: 'safe-integer?' },
     run: async (input, context) => {
       const edit = requireEditSession(context, 'read');
       if (!('session' in edit)) return edit;
@@ -32,6 +35,9 @@ export function createReadTaeEventsTool():RegisteredTool {
       const cursor = value.cursor === undefined ? undefined : asString(value.cursor).trim();
       if (value.cursor !== undefined && !cursor) return fail('INVALID_INPUT', 'read_tae_events 的 cursor 必须是非空 opaque token。');
       const pageSize = value.pageSize === undefined ? undefined : asNumber(value.pageSize, 32);
+      if (value.projection !== undefined && value.projection !== 'compact') {
+        return fail('INVALID_INPUT', 'read_tae_events 的 projection 只能是 "compact"。');
+      }
       // search_resources returns the indexed source URI for ACTION containers
       // (for example file://chr/c7100.anibnd.dcx), while the TAE facade needs
       // the current workspace's physical overlay path.  Resolve only this
@@ -46,6 +52,7 @@ export function createReadTaeEventsTool():RegisteredTool {
         ...(cursor ? { cursor } : {}),
         ...(typeof value.offset === 'number' ? { offset: value.offset } : {}),
         ...(pageSize === undefined ? {} : { pageSize }),
+        ...(value.projection === 'compact' ? { projection: 'compact' as const } : {}),
         ...(typeof value.expectedSourceHash === 'string' ? { expectedSourceHash: value.expectedSourceHash } : {}),
         ...(typeof value.expectedReaderSchemaRevision === 'number' ? { expectedReaderSchemaRevision: value.expectedReaderSchemaRevision } : {})
       });
@@ -118,7 +125,15 @@ export function createReadTaeEventsTool():RegisteredTool {
         context.workspaceIndex.rebuildReferences();
         await context.onSemanticEvidenceUpdated?.([sourceUri]);
       }
-      return ok(result);
+      if (result.projection !== 'compact') return ok(result);
+      // The index above keeps the full events; only the returned page is compacted. Info diagnostics keep code and
+      // message: their details (the container's TAE inventory, about 13 KB for c0000) would repeat on every page.
+      return ok({ ...result, events: result.events.map(compactTaeEvent),
+        diagnostics: result.diagnostics.map(diagnostic => {
+          if (diagnostic.severity !== 'info' || diagnostic.details === undefined) return diagnostic;
+          const { details: _omitted, ...rest } = diagnostic;
+          return rest;
+        }) });
     }
   };
 }

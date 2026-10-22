@@ -36,6 +36,15 @@
     },
     {
       "game": "sekiro",
+      "format": "tae",
+      "operation": "write-roundtrip",
+      "reference": "soulsformats-next",
+      "inputs": [
+        "chr/c0000.anibnd.dcx"
+      ]
+    },
+    {
+      "game": "sekiro",
       "format": "emevd",
       "operation": "read-events",
       "reference": "soulsformats",

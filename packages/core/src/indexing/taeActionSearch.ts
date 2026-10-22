@@ -1,7 +1,10 @@
 import {createHash} from 'node:crypto';
 import {formatActionAddress, type TaeExport, type TaeAnimSymbol, type TaeEventSymbol} from '@soulforge/shared';
+import {compactTaeEvent, type TaeCompactEvent} from '../editing/taeCompactEvent.js';
 
-export interface TaeActionSearchWindow {limit?:number;offset?:number;continuation?:string;eventLimit?:number}
+export interface TaeActionSearchWindow {limit?:number;offset?:number;continuation?:string;eventLimit?:number;
+  /** Compact events in fixed-size pages, first pages delivered in rank order while budgetBytes lasts (#52). */
+  compact?:{pageSize:number;budgetBytes:number}}
 type Rank = {score:number;ordinal:number};
 type Candidate = Rank & {source:TaeExport;animation:TaeAnimSymbol};
 const compare = (a:Rank,b:Rank) => b.score-a.score || a.ordinal-b.ordinal;
@@ -16,9 +19,11 @@ const invalid = ():never => {throw Object.assign(new Error('动作搜索窗口�
 /** Scan cached symbols, but retain only a ranked page, never all hits/groups/events. */
 export function searchTaeActionPage(sources:()=>Iterable<TaeExport>,scoreEvent:(event:TaeEventSymbol)=>number,
   window:TaeActionSearchWindow={}) {
-  const limit=window.limit??6,eventLimit=window.eventLimit??16,offset=window.offset??0;
+  const limit=window.limit??6,eventLimit=window.eventLimit??16,offset=window.offset??0,compact=window.compact;
   if(!Number.isSafeInteger(limit)||limit<1||limit>128||!Number.isSafeInteger(eventLimit)||eventLimit<0||eventLimit>128
     ||!Number.isSafeInteger(offset)||offset<0)invalid();
+  if(compact && (!Number.isSafeInteger(compact.pageSize)||compact.pageSize<1||compact.pageSize>128
+    ||!Number.isSafeInteger(compact.budgetBytes)||compact.budgetBytes<0))invalid();
   let after:Rank|undefined;
   if(window.continuation!==undefined){
     try{after=JSON.parse(window.continuation) as Rank;}catch{invalid();}
@@ -55,23 +60,41 @@ export function searchTaeActionPage(sources:()=>Iterable<TaeExport>,scoreEvent:(
     after={score:last.score,ordinal:last.ordinal};remaining-=skipped.candidates.length;
   }
   const page=scan(after,limit);
+  // Candidates are in rank order, so the shared compact budget goes to the best-ranked actions first.
+  let budget=compact?.budgetBytes??0;
+  const keep=compact?compact.pageSize:eventLimit;
   const matches=page.candidates.map(({source,animation,score})=>{
     const events:TaeEventSymbol[]=[],matchedEventIndices:number[]=[];
     let maximumBytes=1,matchedEventCount=0;
     for(const event of animation.events){
       maximumBytes=Math.max(maximumBytes,Buffer.byteLength(JSON.stringify(event),'utf8'));
-      if(eventLimit>0)retain(events,event,eventLimit,(a,b)=>a.index-b.index);
+      if(keep>0)retain(events,event,keep,(a,b)=>a.index-b.index);
       if(scoreEvent(event)>0){matchedEventCount++;if(matchedEventIndices.length<128)matchedEventIndices.push(event.index);}
     }
-    const previewSize=Math.min(eventLimit,Math.floor(20_000/limit/maximumBytes));
-    // An oversized individual event is not an exception to the preview bound.
-    // Omit its preview and leave a one-event native continuation instead.
-    const size=Math.max(1,previewSize);
-    events.length=Math.min(events.length,previewSize);
     // Index coverage and delivered-window coverage are different contracts.
     const indexedEventsComplete=animation.eventCount!==undefined && animation.events.length===animation.eventCount
       && animation.events.every((event,index)=>event.index===index);
-    const eventsComplete=indexedEventsComplete && events.length===animation.eventCount;
+    let delivered:Array<TaeEventSymbol|TaeCompactEvent>,size:number,eventsComplete:boolean;
+    if(compact){
+      // A compact page holds a fixed number of events, so search and read_tae_events number the same pages. The
+      // first page is delivered whole, as a gapless native-order prefix, while the shared budget lasts; otherwise
+      // none of it is, and the continuation starts at the action's first event.
+      const expected=Math.min(compact.pageSize,animation.eventCount??Number.POSITIVE_INFINITY);
+      const first=events.length===expected && events.every((event,index)=>event.index===index)?events.map(compactTaeEvent):[];
+      const bytes=Buffer.byteLength(JSON.stringify(first),'utf8');
+      delivered=first.length>0 && bytes<=budget?first:[];
+      if(delivered.length>0)budget-=bytes;
+      size=compact.pageSize;
+      eventsComplete=animation.eventCount!==undefined && delivered.length===animation.eventCount;
+    }else{
+      const previewSize=Math.min(eventLimit,Math.floor(20_000/limit/maximumBytes));
+      // An oversized individual event is not an exception to the preview bound.
+      // Omit its preview and leave a one-event native continuation instead.
+      size=Math.max(1,previewSize);
+      events.length=Math.min(events.length,previewSize);
+      delivered=events;
+      eventsComplete=indexedEventsComplete && events.length===animation.eventCount;
+    }
     const selector=animation.taeEntryIndex!==undefined?{taeEntryIndex:animation.taeEntryIndex}
       :animation.taeEntryId!==undefined?{taeEntryId:animation.taeEntryId}
       :animation.taeEntryName!==undefined?{taeEntryName:animation.taeEntryName}
@@ -81,7 +104,7 @@ export function searchTaeActionPage(sources:()=>Iterable<TaeExport>,scoreEvent:(
         address:formatActionAddress({chr:source.chrId,animId:animation.animId,...selector}),
         sourceHash:source.outerFileHash??source.sourceHash,sourceRevision:source.sourceRevision,readerSchemaRevision:source.readerSchemaRevision,
         indexedEventsComplete,eventsComplete,eventsTruncated:!eventsComplete,
-        events,eventPageSize:size}};
+        events:delivered,eventPageSize:size,...(compact?{eventProjection:'compact' as const}:{})}};
   });
   const last=page.candidates.at(-1);
   return {matches,total:page.total,snapshotId:page.snapshotId,retainedCandidates:page.candidates.length,
