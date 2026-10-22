@@ -1,9 +1,9 @@
 import { fork } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { constants as osConstants, tmpdir } from 'node:os';
-import { isAbsolute, join, relative } from 'node:path';
+import { constants as osConstants } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runProcess } from './subprocess-control.mjs';
 import { runLinuxGuardianProcess } from './owned-process-linux-guardian.mjs';
@@ -109,28 +109,13 @@ export async function runOwnedProcess({ owner, signal, onStdout, onStderr, ...op
     });
     if (signal?.aborted) cancel('cancelled');
     if (options.timeoutMs) timer = setTimeout(() => cancel('timeout'), options.timeoutMs);
-    // The worker's own TEMP is redirected into the owned root; the owner's is
-    // not, so it is where the Windows guardian compiles (see the worker).
-    supervisor.send({ type: 'start', ticket, options, guardianTemp: tmpdir() });
+    supervisor.send({ type: 'start', ticket, options });
     return await closed;
   } catch (value) {
     supervisor.kill('SIGKILL'); await closed; throw value;
   } finally {
     clearTimeout(timer); signal?.removeEventListener('abort', onAbort);
   }
-}
-
-// The guardian's TEMP must not be (or be inside) one of this operation's
-// owned roots. Unknown spellings or missing paths do not count as outside.
-function outsideOwnedRoots(candidate, tickets) {
-  if (typeof candidate !== 'string' || !candidate) return false;
-  try {
-    const temp = realpathSync.native(candidate);
-    return tickets.every(ticket => {
-      const rel = relative(realpathSync.native(ticket.root), temp);
-      return rel !== '' && (isAbsolute(rel) || rel.split(/[\\/]/)[0] === '..');
-    });
-  } catch { return false; }
 }
 
 // Absent or unparseable at the published path: the guardian's 'assigned'
@@ -205,7 +190,7 @@ if (process.argv[1] === helperPath && process.argv[2] === '--worker') {
     started = true;
     try {
       const tickets = [message.ticket].flat();
-      let options = message.options, windowsJobId = null, isolatedGuardianTemp = false;
+      let options = message.options, windowsJobId = null;
       if (process.platform === 'win32') {
         const id = windowsJobId = randomUUID();
         for (const ticket of tickets) prepareOwnedWindowsJob(ticket, process.pid, id);
@@ -221,22 +206,14 @@ if (process.argv[1] === helperPath && process.argv[2] === '--worker') {
         const source = (await Promise.all(['owned-windows-job-status.ps1', 'owned-windows-job.ps1']
           .map(name => readFile(new URL(name, import.meta.url), 'utf8')))).join('\n')
           .split(/\r?\n/).map(line => line.trimStart()).filter(line => line && !line.startsWith('#') && !line.startsWith('//')).join('\n');
-        // The guardian compiles its job helper (Add-Type -> csc.exe) before any
-        // job exists. Give it a TEMP outside every owned root, so a compiler
-        // that outlives a guardian killed before its job proof cannot write
-        // into one; the driver gets its own TEMP/TMP back (driverTemp).
-        const env = options.env ?? process.env;
-        const pick = name => env[Object.keys(env).find(key => key.toUpperCase() === name) ?? name] ?? '';
-        const driverTemp = { TEMP: pick('TEMP'), TMP: pick('TMP') };
-        isolatedGuardianTemp = outsideOwnedRoots(message.guardianTemp, tickets);
-        const guardianEnv = isolatedGuardianTemp
-          ? { ...Object.fromEntries(Object.entries(env).filter(([key]) => !['TEMP', 'TMP'].includes(key.toUpperCase()))),
-            TEMP: message.guardianTemp, TMP: message.guardianTemp }
-          : env;
-        options = { ...options, env: guardianEnv, command: 'powershell.exe',
+        // The guardian keeps the operation's TEMP, inside the owned root: the
+        // temporary directory its Add-Type compile leaves when it is killed
+        // mid-compile is removed with the root instead of leaking into the
+        // owner's TEMP.
+        options = { ...options, command: 'powershell.exe',
           args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')],
           stdinData: JSON.stringify({ ...message.options, commandLine, id, supervisorPid: process.pid,
-            observer: ownedTemporaryDirectoryObserver(), tickets, ...(isolatedGuardianTemp ? { driverTemp } : {}) }) };
+            observer: ownedTemporaryDirectoryObserver(), tickets }) };
       }
       const guardedOptions = { ...options, signal: cancellation.signal,
         onSpawn: child => { for (const ticket of [message.ticket].flat()) recordOwnedProcess(ticket, child.pid); },
@@ -252,11 +229,13 @@ if (process.argv[1] === helperPath && process.argv[2] === '--worker') {
       // one proven exception: runProcess resolves only after the guardian's
       // own exit, and a job proof that is absent or incomplete means it ended
       // before every 'assigned' proof was written. The driver is created
-      // suspended inside the guardian's kill-on-close job and resumed only
-      // after those proofs, so no driver ran; the guardian's compiler wrote
-      // only to a TEMP outside the owned roots.
+      // suspended inside the guardian's kill-on-close job (whose only handle
+      // the guardian held) and resumed only after those proofs, so no driver
+      // ran. The guardian's own compiler is not a job member: a tree kill ends
+      // it with the guardian, and one that outlives a guardian ended otherwise
+      // writes only under the owned root, where it makes disposal fail visibly.
       if (process.platform === 'win32' && (result.terminationReason === 'spawn-error' || result.treeTerminated
-        || (isolatedGuardianTemp && jobProofIncomplete(tickets, windowsJobId)))) {
+        || jobProofIncomplete(tickets, windowsJobId))) {
         for (const ticket of [message.ticket].flat()) recordOwnedProcess(ticket, process.pid, { finished: true });
       }
       // A large result can still be queued after send() returns. Disconnecting

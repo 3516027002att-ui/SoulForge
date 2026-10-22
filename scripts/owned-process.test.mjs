@@ -1311,7 +1311,7 @@ test('Windows guardian that ends before writing any job proof releases its tree'
     }
   });
 
-test('Windows driver keeps its own TEMP/TMP while the guardian compiles outside the owned root',
+test('Windows driver sees the TEMP/TMP it was started with',
   { skip: process.platform !== 'win32' && 'Windows job API unavailable', timeout: 60_000 }, async () => {
     const root = await mkdtemp(join(tmpdir(), 'sf-owned-windows-temp-'));
     try {
@@ -1324,6 +1324,44 @@ test('Windows driver keeps its own TEMP/TMP while the guardian compiles outside 
       assert.deepEqual(JSON.parse(result.stdout), [driverTemp, driverTemp]);
       await owner.dispose();
     } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+test('a Windows guardian stopped during its startup leaves nothing in the owner TEMP',
+  { skip: process.platform !== 'win32' && 'Windows job API unavailable', timeout: 60_000 }, async () => {
+    // PowerShell writes startup policy probes and Add-Type sources into its TEMP
+    // and cannot remove them when it is stopped. They must stay inside the
+    // owned root, which disposal removes, not land in the owner's TEMP.
+    const root = await mkdtemp(join(tmpdir(), 'sf-owned-windows-startup-'));
+    const ownerTemp = join(root, 'owner-temp'); await mkdir(ownerTemp);
+    const saved = { TEMP: process.env.TEMP, TMP: process.env.TMP };
+    try {
+      const owner = await createOwnedTemporaryDirectory('windows-startup', { parent: root });
+      const operationTemp = join(owner.root, 'tmp'); await mkdir(operationTemp);
+      process.env.TEMP = ownerTemp; process.env.TMP = ownerTemp;
+      const run = runProcess({ command: process.execPath, args: ['-e', 'setTimeout(() => {}, 30000)'],
+        cwd: owner.root, env: { ...process.env, TEMP: operationTemp, TMP: operationTemp }, owner, timeoutMs: 30_000 });
+      // Stop only the guardian, at its first TEMP write: its tree kill would
+      // give PowerShell time to clean up and hide the leak.
+      const marker = join(owner.root, '.soulforge-temporary-owner.json'), until = Date.now() + 20_000;
+      let guardian;
+      while (!guardian && Date.now() < until) {
+        if ((await readdir(ownerTemp)).length + (await readdir(operationTemp)).length) {
+          const record = JSON.parse(await readFile(marker, 'utf8'));
+          guardian = record.childPids.find(pid => !record.uncertainTrees.includes(pid));
+        }
+        if (!guardian) await new Promise(setImmediate);
+      }
+      assert.ok(guardian, 'the guardian wrote into a TEMP before it finished starting');
+      process.kill(guardian);
+      assert.notEqual((await run).code, 0);
+      await owner.dispose();
+      assert.deepEqual(await readdir(ownerTemp), [], 'a stopped guardian leaves nothing in the owner TEMP');
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name]; else process.env[name] = value;
+      }
       await rm(root, { recursive: true, force: true });
     }
   });

@@ -119,16 +119,6 @@ public static class SoulForgeOwnedJob {
 }
 '@
 
-# Add-Type above compiled with the guardian's own TEMP/TMP, which the supervisor
-# keeps outside every owned root: a compiler left behind by a guardian killed
-# before any job proof cannot write into one. The driver created below inherits
-# this environment, so give it back the TEMP/TMP it was started with.
-if ($payload.driverTemp) {
-  foreach ($name in @('TEMP', 'TMP')) {
-    [Environment]::SetEnvironmentVariable($name, [string]$payload.driverTemp.$name, 'Process')
-  }
-}
-
 $application = if ([IO.Path]::IsPathRooted($payload.command)) { $payload.command } else { (Get-Command -Name $payload.command -CommandType Application -ErrorAction Stop).Source }
 $utf8 = New-Object Text.UTF8Encoding($false)
 $proofs = @{}
