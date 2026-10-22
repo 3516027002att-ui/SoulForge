@@ -30,7 +30,7 @@ await mkdir(outputDir, { recursive: true });
 
 const browserCandidates = [
   process.env.SOULFORGE_PDF_CHROME,
-  "C:\\Users\\ASUS\\AppData\\Local\\ms-playwright\\chromium-1237\\chrome-win64\\chrome.exe",
+  process.env.LOCALAPPDATA && resolve(process.env.LOCALAPPDATA, "ms-playwright", "chromium-1237", "chrome-win64", "chrome.exe"),
   "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
 ].filter(Boolean);

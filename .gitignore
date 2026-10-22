@@ -42,7 +42,6 @@ mcps/
 .kiro/
 .zcode/
 output/*
-!output/agent-real/
 .ai-bridge/
 problem/
 docx/

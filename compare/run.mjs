@@ -10,8 +10,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { classify, compareOrdered, emevdFromBridgePages, emevdFromReferenceGraph, emevdKeys, failedComparison, fmgEntriesFromBridge,
   fmgEntriesFromReferenceGraph, fmgEntryKey, groupStatus, msbFromBridge, msbFromReferenceGraph, msbKeys, paramFromReferenceGraph, paramKeys,
   readBridgeParam, referenceBlockingDiagnostic, referenceResultDirsToRemove, resolveReferenceResponse, staleKnownDiffs, taeAnimationsFromBridge,
-  taeAnimationsFromReferenceGraph } from './lib.mjs';
-import { fmgWriteRoundtrip } from './roundtrip.mjs';
+  taeAnimationsFromReferenceGraph, taeEventsFromReferenceGraph } from './lib.mjs';
+import { fmgWriteRoundtrip, taeWriteRoundtrip } from './roundtrip.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const readJson = path => JSON.parse(readFileSync(path, 'utf8').replace(/^﻿/u, ''));
@@ -40,6 +40,8 @@ const { runBridge, disposeBridgeDaemonPool } = await coreModule('bridge/runBridg
 // The PARAM rule reads through the production reader and the editor's own row-width lookup, not a copy of them.
 const { readParamDocumentViaBridge } = await coreModule('editing/paramBridgeCommit.js');
 const { resolveTrustedParamRowWidth } = await coreModule('param/containerParamEdit.js');
+// The TAE round trip writes through the production anibnd TAE writer, not a copy of it.
+const { commitTaeEventContainerViaBridge } = await coreModule('editing/taeBridgeCommit.js');
 
 // Reference CLI cost, reported with the run: refcli runs one request per project at a time (a concurrent one is
 // status "blocked", PROJECT_BUSY), so the calls are sequential and their wall time adds up.
@@ -190,6 +192,39 @@ async function compareTae(testCase, input, items) {
   }
 }
 
+// TAE write round trip: L0 rewrites one event's times unchanged, L1 moves them by one frame, into a temp staging root
+// (compare/roundtrip.mjs). childByteIdentical (edited child bytes unchanged) is recorded only; it is not part of the status.
+async function compareTaeWriteRoundtrip(testCase, input, items) {
+  const file = join(gameRoot, ...input.split('/'));
+  if (!existsSync(file)) throw new Error(`corpus input is missing from the game root: ${input}`);
+  const key = `${testCase.game}/${testCase.format}/${testCase.operation}/${input}`;
+  const inputSha256 = createHash('sha256').update(readFileSync(file)).digest('hex');
+  const add = (suffix, reference, comparison, extra = {}) => items.push({ key: `${key}#${suffix}`, group: testCase, input, inputSha256,
+    reference: reference.status, referenceReason: reference.reason, comparison, ...extra });
+  const readEntries = path => {
+    const listing = referenceCall(testCase.reference, 'entries', { input: path });
+    if (listing.status !== 'ok') return listing;
+    return { status: 'ok', entries: referenceArtifact(listing.response, 'entries.json').entries
+      .filter(entry => entry.name.toLowerCase().endsWith('.tae'))
+      .map(entry => ({ ordinal: entry.ordinal, id: entry.id, name: entry.name, size: entry.size, sha256: entry.sha256 })) };
+  };
+  const decodeEntry = (path, entry) => {
+    const decoded = referenceCall(testCase.reference, 'decode',
+      { input: path, format: 'SoulsFormats.TAE', entryChain: [{ ordinal: entry.ordinal, id: entry.id, name: entry.name }] });
+    return decoded.status !== 'ok' ? decoded
+      : { status: 'ok', animations: taeEventsFromReferenceGraph(referenceArtifact(decoded.response, 'structure.json')) };
+  };
+  const result = await taeWriteRoundtrip({ file, gameRoot, commitTae: commitTaeEventContainerViaBridge, readEntries, decodeEntry });
+  if (result.reference.status !== 'ok') { add('L0', result.reference, null); add('L1', result.reference, null); return; }
+  for (const level of result.levels) {
+    const extra = { entry: result.entry, target: result.target, refused: result.refused, outputSha256: level.outputSha256,
+      childByteIdentical: level.childByteIdentical };
+    if (level.write.error) { add(level.level, { status: 'ok' }, failedComparison(level.write.error), extra); continue; }
+    if (level.reference.status !== 'ok') { add(level.level, level.reference, null, extra); continue; }
+    for (const [part, comparison] of Object.entries(level.comparisons)) add(`${level.level}/${part}`, level.reference, comparison, extra);
+  }
+}
+
 // The Bridge's read-emevd-document page-size ceiling (BridgeCommandService MaxInstructionPageSize); a larger request
 // silently falls back to 256. Pages after the first reuse its document session, so every page comes from one parse.
 const EMEVD_INSTRUCTION_PAGE_SIZE = 65536;
@@ -312,7 +347,8 @@ async function compareParam(testCase, input, items) {
 }
 
 const RULES = { 'fmg/read-text': compareFmg, 'fmg/write-roundtrip': compareFmgWriteRoundtrip, 'tae/read-animations': compareTae,
-  'emevd/read-events': compareEmevd, 'msb/read-map': compareMsb, 'param/read-rows': compareParam };
+  'tae/write-roundtrip': compareTaeWriteRoundtrip, 'emevd/read-events': compareEmevd, 'msb/read-map': compareMsb,
+  'param/read-rows': compareParam };
 let exitCode = 2;
 try {
   const items = [];

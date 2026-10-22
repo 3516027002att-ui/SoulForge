@@ -20,8 +20,11 @@ const session = await openLocalCliSession({overlayRoot:request.overlayRoot,baseR
   analyze:true,useCache:false,requireDurableLog:false,
   onFallbackWarning:message => process.stderr.write(`${message}\n`)});
 try {
+  // The session's own edit session: without it requireEditSession builds a fresh one whose Bridge roots were
+  // never provisioned, and every native container read fails (PARAM_CONTAINER_READ_FAILED, empty FMG tables).
   const context = {workspaceIndex:session.workspaceIndex,mode:'plan',modeCeiling:'plan',
-    allowMemoryWrite:false,session:session.coreSession.workspaceSession,coreSession:session.coreSession};
+    allowMemoryWrite:false,session:session.coreSession.workspaceSession,coreSession:session.coreSession,
+    editSession:session.editSession};
   const result = await verifyGoalsThroughNativeTool((tool,input) => session.registry.run(tool,input,context),
     goals,request.treeEvidence,request.taskContract);
   const verifierAfter = await captureVerifierArtifact(repoRoot, verifierInputs);
