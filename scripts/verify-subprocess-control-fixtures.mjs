@@ -313,6 +313,25 @@ async function main() {
       assert.equal(drained.stdout, 'drain-ok');
     });
 
+    // A busy runner can stall the holder's heartbeat for longer than one
+    // observation window. Cleanup must still stop it instead of concluding
+    // from one quiet window that it is gone. SIGSTOP makes that stall exact.
+    if (process.platform !== 'win32') {
+      await runLingerCase('cleanup-stops-holder-after-stalled-heartbeat', async (pidPath, sentinelPath, timing) => {
+        const result = await runProcess({
+          command: process.execPath,
+          args: ['-e', lingerDriverProgram, pidPath, sentinelPath, '8000'],
+          cwd: root,
+          stdioDrainMs: 300
+        });
+        timing.runElapsedMs = Math.round(performance.now() - timing.started);
+        assert.equal(result.terminationReason, 'stdio-held-after-exit');
+        const pid = Number(await readFile(pidPath, 'utf8'));
+        process.kill(pid, 'SIGSTOP');
+        setTimeout(() => { try { process.kill(pid, 'SIGCONT'); } catch { /* already gone */ } }, 400).unref();
+      });
+    }
+
     console.error(JSON.stringify({ lingerResults }));
     const lingerFailures = lingerResults.filter(item => !item.ok);
     assert.equal(lingerFailures.length, 0,
@@ -331,7 +350,8 @@ async function main() {
         'zero-exit-timeout-and-cancel-fail-success-predicate',
         'default-output-limit',
         'timeout-after-exit-releases-inherited-stdio',
-        'stdio-drain-bounds-inherited-stdio'
+        'stdio-drain-bounds-inherited-stdio',
+        ...(process.platform !== 'win32' ? ['cleanup-stops-holder-after-stalled-heartbeat'] : [])
       ],
       timeoutElapsedMs
     }, null, 2));
@@ -393,13 +413,30 @@ async function stopLingeringHolder(pidPath, sentinelPath, label) {
   try { pid = Number(await readFile(pidPath, 'utf8')); }
   catch (error) { if (error?.code === 'ENOENT') return; throw error; }
   if (!Number.isSafeInteger(pid) || pid <= 0) return;
-  if (await sentinelIsChanging(sentinelPath)) {
-    try { process.kill(pid, 'SIGKILL'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
-  }
+  // One quiet window is not proof the holder is gone: a busy runner can stall
+  // its heartbeat. Every observation that still shows it beating (only the
+  // holder writes this sentinel, so a reused PID never qualifies) kills it.
+  let killed = false;
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    if (!(await sentinelIsChanging(sentinelPath)) && !isProcessRunning(pid)) return;
+    const beating = await sentinelIsChanging(sentinelPath);
+    if (!beating && !isProcessRunning(pid)) return;
+    if (beating) {
+      try { process.kill(pid, 'SIGKILL'); killed = true; } catch (error) { if (error?.code !== 'ESRCH') throw error; }
+    }
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
   }
-  assert.fail(`${label} lingering stdio holder ${pid} did not exit`);
+  assert.fail(`${label} lingering stdio holder ${pid} did not exit (${killed ? 'SIGKILL sent' : 'no SIGKILL sent'}; ${await describeHolder(pid, sentinelPath)})`);
+}
+
+async function describeHolder(pid, sentinelPath) {
+  let state = 'state unknown';
+  if (process.platform === 'linux') {
+    try {
+      const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      state = `state ${fields[0]}, ppid ${fields[1]}`;
+    } catch (error) { state = error?.code === 'ENOENT' ? 'no /proc entry' : `stat ${error?.code}`; }
+  }
+  return `${state}, heartbeat ${await sentinelIsChanging(sentinelPath) ? 'changing' : 'stopped'}`;
 }
