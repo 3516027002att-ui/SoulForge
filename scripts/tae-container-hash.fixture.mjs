@@ -112,7 +112,8 @@ test('public DFLT read-search continuation retains the native physical hash and 
   const delivered = search.data.matches[0].item.events;
   assert.ok(delivered.length > 0 && delivered.length <= 7);
   assert.deepEqual(delivered.map(event => event.index), Array.from({ length: delivered.length }, (_, index) => index));
-  assert.equal(continued.data.events[0].eventIndex, delivered.length); assert.equal(continued.data.pagination.totalCount, 240);
+  assert.equal(continued.data.projection, 'compact');
+  assert.equal(continued.data.events[0].index, delivered.length); assert.equal(continued.data.pagination.totalCount, 240);
 }, undefined, true));
 
 test('a public bounded read merges into an unchanged native snapshot without conflicting hash domains or dropping siblings', async () => withContainer(async ({ source, physical, edit, root }) => {

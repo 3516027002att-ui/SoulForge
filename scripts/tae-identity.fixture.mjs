@@ -356,9 +356,10 @@ test('bounded native read of seven out of 240 events never becomes a complete ca
     assert.equal(action.pagination.nextRead.args.expectedReaderSchemaRevision, 2);
     assert.equal(action.eventsComplete, false);
     const next = await registry.run(action.pagination.nextRead.tool, action.pagination.nextRead.args, context);
-    assert.equal(next.ok, true, JSON.stringify(next)); assert.equal(next.data.events[0].eventIndex, 7);
+    assert.equal(next.ok, true, JSON.stringify(next)); assert.equal(next.data.events[0].index, 7);
     let cursor = next.data.pagination.nextCursor;
-    while (cursor) { const page = await registry.run('read_tae_events', { file: source, addresses: ['c0000#A400000'], cursor }, context); assert.equal(page.ok, true, JSON.stringify(page)); cursor = page.data.pagination.nextCursor; }
+    // The compact cursor keeps its projection even though these calls omit it.
+    while (cursor) { const page = await registry.run('read_tae_events', { file: source, addresses: ['c0000#A400000'], cursor }, context); assert.equal(page.ok, true, JSON.stringify(page)); assert.equal(page.data.projection, 'compact'); cursor = page.data.pagination.nextCursor; }
     const complete = index.toSymbolBundle().tae[0].animations.find(animation => animation.animId === 400000);
     assert.equal(complete.eventCount, 240); assert.equal(complete.eventsComplete, true);
     assert.deepEqual(complete.events.map(e => e.index), Array.from({ length: 240 }, (_, i) => i));
@@ -374,6 +375,51 @@ test('bounded native read of seven out of 240 events never becomes a complete ca
     assert.equal(stale.ok, false, 'source changes cannot silently continue using old ordinals');
     assert.equal(stale.error.code, 'TAE_SOURCE_VERSION_CHANGED');
 
+  } finally { await disposeBridgeDaemonPool(); }
+}));
+
+test('compact action reads keep fixed pages, carry their projection in the cursor and refuse a silent switch', async () => withFixture(async ({ source, root, bytes, expected }) => {
+  await writeFile(source, manyEventsFixture(bytes, expected));
+  const { createDefaultToolRegistry } = await import('../packages/core/dist/ai/toolRegistry.js');
+  const { openWorkspaceSession } = await import('../packages/core/dist/workspace/workspaceSession.js');
+  const { WorkspaceIndex } = await import('../packages/core/dist/indexing/workspaceIndex.js');
+  const { disposeBridgeDaemonPool } = await import('../packages/core/dist/bridge/runBridge.js');
+  const { TAE_COMPACT_PAGE_SIZE } = await import('../packages/core/dist/editing/taeCompactEvent.js');
+  const session = await openWorkspaceSession({ overlayRoot: root, game: 'sekiro' });
+  await mkdir(join(root, '.storage'), { recursive: true });
+  const registry = createDefaultToolRegistry();
+  const context = { workspaceIndex: new WorkspaceIndex(session.meta.workspaceId), mode: 'plan', session, backupBaseDir: join(root, '.storage/backups') };
+  const addresses = ['c0000#A400000'];
+  try {
+    const full = await registry.run('read_tae_events', { file: source, addresses }, context);
+    assert.equal(full.ok, true, JSON.stringify(full));
+    assert.ok(full.data.events.length < TAE_COMPACT_PAGE_SIZE, 'the full layout keeps its own smaller pages');
+    const indices = [];
+    let page = await registry.run('read_tae_events', { file: source, addresses, projection: 'compact', pageSize: 500 }, context);
+    for (let number = 1; ; number++) {
+      assert.equal(page.ok, true, JSON.stringify(page));
+      assert.equal(page.data.projection, 'compact');
+      assert.equal(page.data.events.length, Math.min(TAE_COMPACT_PAGE_SIZE, 240 - indices.length), 'a requested page above the bound is clamped, never shrunk by content');
+      assert.deepEqual({ pageNumber: page.data.pagination.pageNumber, totalPages: page.data.pagination.totalPages },
+        { pageNumber: number, totalPages: Math.ceil(240 / TAE_COMPACT_PAGE_SIZE) });
+      for (const event of page.data.events) {
+        assert.match(event.address, new RegExp(`A400000[./]e${event.index}$`), 'each compact event carries its exact address');
+        assert.equal('raw' in event || 'uri' in event || 'sourceHash' in event, false);
+        assert.ok((event.fields ?? []).every(field => !('offset' in field) && !('enumEntries' in field)));
+      }
+      indices.push(...page.data.events.map(event => event.index));
+      if (!page.data.pagination.nextCursor) break;
+      // Omitting projection continues compact.
+      page = await registry.run('read_tae_events', { file: source, addresses, cursor: page.data.pagination.nextCursor }, context);
+    }
+    assert.deepEqual(indices, Array.from({ length: 240 }, (_, index) => index), 'compact pages neither omit nor repeat events');
+    const switched = await registry.run('read_tae_events', { file: source, addresses, projection: 'compact', cursor: full.data.pagination.nextCursor }, context);
+    assert.equal(switched.ok, false); assert.equal(switched.error.code, 'TAE_CURSOR_SCOPE_MISMATCH');
+    const browse = await registry.run('read_tae_events', { file: source, projection: 'compact' }, context);
+    assert.equal(browse.ok, false); assert.equal(browse.error.code, 'TAE_PROJECTION_REQUIRES_ACTION');
+    const complete = context.workspaceIndex.toSymbolBundle().tae[0].animations.find(animation => animation.animId === 400000);
+    assert.equal(complete.eventsComplete, true, 'compact pages still index the full native events');
+    assert.ok(complete.events.every(event => 'raw' in event));
   } finally { await disposeBridgeDaemonPool(); }
 }));
 

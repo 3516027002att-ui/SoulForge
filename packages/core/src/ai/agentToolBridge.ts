@@ -49,6 +49,7 @@ import {
   msbDeliveredReads,
   outerFileKey,
   paramDeliveredReads,
+  parseTaeAddress,
   taeDeliveredReads
 } from '../editing/proofIdentities.js';
 import {
@@ -3657,18 +3658,25 @@ function recordAutomaticNativeReadProof(input: {
       events: events.flatMap((event) => {
         if (!event || typeof event !== 'object' || Array.isArray(event)) return [];
         const record = event as Record<string, unknown>;
-        if (typeof record.animId !== 'number' || !Number.isSafeInteger(record.animId)
-          || typeof record.eventIndex !== 'number' || !Number.isSafeInteger(record.eventIndex)) return [];
+        // Compact events (projection "compact") carry their identity only as the exact event address.
+        const addressed = typeof record.address === 'string' ? parseTaeAddress(record.address) : null;
+        const identity = typeof record.animId === 'number' && Number.isSafeInteger(record.animId)
+          && typeof record.eventIndex === 'number' && Number.isSafeInteger(record.eventIndex)
+          ? {
+            ...(typeof record.chrId === 'string' ? { chrId: record.chrId } : {}),
+            animId: record.animId,
+            eventIndex: record.eventIndex,
+            ...(typeof record.taeEntryIndex === 'number' && Number.isSafeInteger(record.taeEntryIndex)
+              ? { taeEntryIndex: record.taeEntryIndex } : {}),
+            ...(typeof record.taeEntryId === 'number' && Number.isSafeInteger(record.taeEntryId)
+              ? { taeEntryId: record.taeEntryId } : {}),
+            ...(typeof record.taeEntryName === 'string' ? { taeEntryName: record.taeEntryName } : {}),
+            ...(typeof record.taeGroup === 'string' ? { taeGroup: record.taeGroup } : {})
+          }
+          : addressed && record.index === addressed.eventIndex ? addressed : null;
+        if (!identity) return [];
         return [{
-          ...(typeof record.chrId === 'string' ? { chrId: record.chrId } : {}),
-          animId: record.animId,
-          eventIndex: record.eventIndex,
-          ...(typeof record.taeEntryIndex === 'number' && Number.isSafeInteger(record.taeEntryIndex)
-            ? { taeEntryIndex: record.taeEntryIndex } : {}),
-          ...(typeof record.taeEntryId === 'number' && Number.isSafeInteger(record.taeEntryId)
-            ? { taeEntryId: record.taeEntryId } : {}),
-          ...(typeof record.taeEntryName === 'string' ? { taeEntryName: record.taeEntryName } : {}),
-          ...(typeof record.taeGroup === 'string' ? { taeGroup: record.taeGroup } : {}),
+          ...identity,
           ...(typeof record.eventTypeId === 'number' ? { eventTypeId: record.eventTypeId } : {}),
           ...(typeof record.startFrame === 'number' ? { startFrame: record.startFrame } : {}),
           ...(typeof record.endFrame === 'number' ? { endFrame: record.endFrame } : {}),
