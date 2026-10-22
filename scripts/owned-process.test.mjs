@@ -777,6 +777,51 @@ test('an inherited descendant fails the run but Guardian proof permits owner cle
   }
 });
 
+test('a descendant that exits within the Guardian grace window is not a leak',
+  { skip: !linuxX64 && 'Linux x64 guardian only' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sf-owned-settling-descendant-test-'));
+  try {
+    const owner = await createOwnedTemporaryDirectory('settling-descendant-test', { parent: root });
+    const driver = join(root, 'driver.cjs');
+    // Like Electron's helpers: alive when its parent exits, then exits on its own shortly after.
+    await writeFile(driver, `require('node:child_process').spawn(process.execPath,['-e','setTimeout(()=>{},300)'],{stdio:'ignore'}).unref();`);
+    const result = await runProcess({ command: process.execPath, args: [driver], cwd: owner.root, env: process.env, owner, timeoutMs: 15000 });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.terminationReason, null);
+    assert.equal(result.descendantsObserved, false);
+    assert.equal(result.treeStopped, true);
+    assert.ok(Number.isSafeInteger(result.descendantSettleMs) && result.descendantSettleMs >= 0, `settle evidence: ${result.descendantSettleMs}`);
+    assert.deepEqual(result.leakedDescendants, []);
+    await owner.dispose();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('a descendant that outlives the Guardian grace window is still a named leak',
+  { skip: !linuxX64 && 'Linux x64 guardian only' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sf-owned-lingering-descendant-test-'));
+  const ready = join(root, 'descendant.json');
+  try {
+    const owner = await createOwnedTemporaryDirectory('lingering-descendant-test', { parent: root });
+    const driver = join(root, 'driver.cjs');
+    await writeFile(driver, `const fs=require('node:fs');const child=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});` +
+      `fs.writeFileSync(${JSON.stringify(ready)},JSON.stringify({pid:child.pid}));child.unref();`);
+    const started = Date.now();
+    const result = await runProcess({ command: process.execPath, args: [driver], cwd: owner.root, env: process.env, owner, timeoutMs: 15000 });
+    const { pid } = JSON.parse(await readFile(ready, 'utf8'));
+    assert.equal(result.code, 1);
+    assert.equal(result.terminationReason, 'descendant-leak');
+    assert.equal(result.outputError, 'OWNED_TEST_DESCENDANT_LEAKED');
+    assert.equal(result.descendantsObserved, true);
+    assert.equal(result.leakedDescendantCount, 1);
+    const leaked = result.leakedDescendants.find(entry => entry.pid === pid);
+    assert.ok(leaked, `leak evidence names the descendant: ${JSON.stringify(result.leakedDescendants)}`);
+    assert.match(leaked.state, /^[A-Za-z]$/); assert.ok(leaked.ppid > 0); assert.ok(leaked.comm.length > 0);
+    assert.ok(Date.now() - started >= 1000, 'the descendant was given the grace window before it was stopped');
+    assert.equal(await ownedPidStopped(pid), true, 'the leaked descendant is stopped before the result returns');
+    await owner.dispose();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('successful driver with a multi-generation setsid descendant fails after Guardian reaps a TERM-ignoring writer',
   { skip: !linuxX64 && 'Linux x64 guardian only' }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'sf-owned-setsid-descendant-test-'));

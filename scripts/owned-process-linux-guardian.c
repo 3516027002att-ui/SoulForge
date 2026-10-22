@@ -37,6 +37,14 @@
 #define PROC_STAT_LIMIT 8192
 #define CHILD_LIST_LIMIT 65536
 #define PROTOCOL_NAME "soulforge.owned-process-guardian.v1"
+/* Descendants still exiting when the target exits (an Electron browser's
+ * zygote/GPU/utility children) get a bounded window to exit on their own
+ * before they count as leaked and are stopped. It scales with the cleanup
+ * deadline so TERM/KILL escalation still fits inside it. */
+#ifndef DESCENDANT_GRACE_MS
+#define DESCENDANT_GRACE_MS (CLEANUP_DEADLINE_MS / 4)
+#endif
+#define LEAK_REPORT_LIMIT 8
 
 typedef struct {
   pid_t pid;
@@ -261,6 +269,79 @@ static int inspect_children(pid_t target_pid, bool target_exited, bool terminati
   return 0;
 }
 
+/* Leak evidence for the receipt: who was still live when the grace window
+ * closed (or when cancellation/timeout stopped the tree). */
+typedef struct {
+  pid_t pid;
+  pid_t parent;
+  char state;
+  char comm[17];
+} leaked_child;
+
+static leaked_child leaked[LEAK_REPORT_LIMIT];
+static size_t leaked_count = 0, leaked_total = 0;
+static long long descendant_settle_ms = -1;
+static bool descendant_grace_seen = false;
+
+static void read_comm(pid_t pid, char *out, size_t size) {
+  char path[64];
+  out[0] = '\0';
+  snprintf(path, sizeof(path), "/proc/%ld/comm", (long)pid);
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return;
+  ssize_t bytes = read(fd, out, size - 1);
+  close(fd);
+  if (bytes <= 0) { out[0] = '\0'; return; }
+  out[bytes] = '\0';
+  for (ssize_t index = 0; index < bytes; index++) {
+    unsigned char value = (unsigned char)out[index];
+    if (value == '\n') { out[index] = '\0'; break; }
+    /* Keep the receipt JSON-safe without an escaper. */
+    if (!((value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9')
+        || value == '-' || value == '_' || value == '.' || value == ':' || value == '/' || value == ' ')) out[index] = '?';
+  }
+}
+
+static int record_leaked_children(pid_t target_pid) {
+  pid_t children[CHILD_LIMIT]; size_t count = 0;
+  if (read_direct_children(children, CHILD_LIMIT, &count) != 0) return -1;
+  for (size_t index = 0; index < count; index++) {
+    if (children[index] == target_pid) continue;
+    proc_identity identity = {0};
+    int found = read_identity(children[index], &identity);
+    if (found < 0) return -1;
+    if (found == 0 || identity.state == 'Z' || identity.state == 'X') continue;
+    leaked_total++;
+    if (leaked_count >= LEAK_REPORT_LIMIT) continue;
+    leaked_child *entry = &leaked[leaked_count++];
+    entry->pid = identity.pid; entry->parent = identity.parent; entry->state = identity.state;
+    read_comm(identity.pid, entry->comm, sizeof(entry->comm));
+  }
+  return 0;
+}
+
+/* After the target exited, live descendants are a leak only if they are
+ * still live DESCENDANT_GRACE_MS later. Once cleanup started (cancellation,
+ * timeout, or an earlier leak) they are observed at once, as before. */
+static int classify_descendants(pid_t target_pid, long long now, long long target_exit_ms,
+    long long *cleanup_started_ms, bool *descendants_observed, const char **termination_reason) {
+  bool live = false;
+  if (inspect_children(target_pid, true, false, 0, &live) != 0) return -1;
+  if (!live) {
+    if (descendant_grace_seen && !*descendants_observed && descendant_settle_ms < 0) descendant_settle_ms = now - target_exit_ms;
+    return 0;
+  }
+  descendant_grace_seen = true;
+  if (*cleanup_started_ms < 0 && now - target_exit_ms < DESCENDANT_GRACE_MS) return 0;
+  if (!*descendants_observed) {
+    *descendants_observed = true;
+    if (record_leaked_children(target_pid) != 0) return -1;
+  }
+  if (*cleanup_started_ms < 0) *cleanup_started_ms = now;
+  if (!*termination_reason) *termination_reason = "descendant-leak";
+  return 0;
+}
+
 static const char *signal_name(int value) {
   switch (value) {
     case SIGHUP: return "SIGHUP"; case SIGINT: return "SIGINT"; case SIGQUIT: return "SIGQUIT";
@@ -274,7 +355,16 @@ static const char *signal_name(int value) {
 
 static int publish_result(const char *nonce, int code, const char *signal, int child_exit_code,
     bool tree_stopped, bool descendants_observed, const char *termination_reason, int spawn_errno) {
-  char output[1024], signal_json[32], child_json[32], reason_json[96];
+  char output[4096], signal_json[32], child_json[32], reason_json[96], settle_json[32], leaks_json[2048];
+  if (descendant_settle_ms >= 0) snprintf(settle_json, sizeof(settle_json), "%lld", descendant_settle_ms);
+  else snprintf(settle_json, sizeof(settle_json), "null");
+  size_t used = (size_t)snprintf(leaks_json, sizeof(leaks_json), "[");
+  for (size_t index = 0; index < leaked_count && used < sizeof(leaks_json); index++) {
+    used += (size_t)snprintf(leaks_json + used, sizeof(leaks_json) - used, "%s{\"pid\":%ld,\"ppid\":%ld,\"state\":\"%c\",\"comm\":\"%s\"}",
+      index ? "," : "", (long)leaked[index].pid, (long)leaked[index].parent, leaked[index].state, leaked[index].comm);
+  }
+  if (used + 2 > sizeof(leaks_json)) return -1;
+  snprintf(leaks_json + used, sizeof(leaks_json) - used, "]");
   if (signal) snprintf(signal_json, sizeof(signal_json), "\"%s\"", signal);
   else snprintf(signal_json, sizeof(signal_json), "null");
   if (child_exit_code >= 0) snprintf(child_json, sizeof(child_json), "%d", child_exit_code);
@@ -282,9 +372,9 @@ static int publish_result(const char *nonce, int code, const char *signal, int c
   if (termination_reason) snprintf(reason_json, sizeof(reason_json), "\"%s\"", termination_reason);
   else snprintf(reason_json, sizeof(reason_json), "null");
   int length = snprintf(output, sizeof(output),
-    "{\"protocol\":\"%s\",\"nonce\":\"%s\",\"code\":%d,\"signal\":%s,\"childExitCode\":%s,\"treeStopped\":%s,\"descendantsObserved\":%s,\"terminationReason\":%s,\"spawnErrno\":%d}\n",
+    "{\"protocol\":\"%s\",\"nonce\":\"%s\",\"code\":%d,\"signal\":%s,\"childExitCode\":%s,\"treeStopped\":%s,\"descendantsObserved\":%s,\"terminationReason\":%s,\"spawnErrno\":%d,\"descendantSettleMs\":%s,\"leakedDescendantCount\":%zu,\"leakedDescendants\":%s}\n",
     PROTOCOL_NAME, nonce, code, signal_json, child_json, tree_stopped ? "true" : "false",
-    descendants_observed ? "true" : "false", reason_json, spawn_errno);
+    descendants_observed ? "true" : "false", reason_json, spawn_errno, settle_json, leaked_total, leaks_json);
   if (length <= 0 || (size_t)length >= sizeof(output)) return -1;
   return write_all(RESULT_FD, output, (size_t)length);
 }
@@ -455,13 +545,8 @@ int main(int argc, char **argv) {
 #ifdef SOULFORGE_GUARDIAN_TEST_HOOKS
           test_target_exit_seen = true;
 #endif
-          bool live_descendant = false;
-          if (inspect_children(target_pid, true, false, 0, &live_descendant) != 0) { supervision_failed = true; break; }
-          if (live_descendant) {
-            descendants_observed = true;
-            if (cleanup_started_ms < 0) cleanup_started_ms = now;
-            if (!termination_reason) termination_reason = "descendant-leak";
-          }
+          if (classify_descendants(target_pid, now, target_exit_observed_ms, &cleanup_started_ms,
+              &descendants_observed, &termination_reason) != 0) { supervision_failed = true; break; }
         }
         int reaped;
 #ifdef SOULFORGE_GUARDIAN_TEST_HOOKS
@@ -478,13 +563,8 @@ int main(int argc, char **argv) {
     }
 
     if (target_reaped) {
-      bool live_descendant = false;
-      if (inspect_children(target_pid, true, false, 0, &live_descendant) != 0) { supervision_failed = true; break; }
-      if (live_descendant) {
-        descendants_observed = true;
-        if (cleanup_started_ms < 0) cleanup_started_ms = now;
-        if (!termination_reason) termination_reason = "descendant-leak";
-      }
+      if (classify_descendants(target_pid, now, target_exit_observed_ms, &cleanup_started_ms,
+          &descendants_observed, &termination_reason) != 0) { supervision_failed = true; break; }
       if (cleanup_started_ms >= 0) {
         long long elapsed = now - cleanup_started_ms;
         int stop_with = elapsed >= CLEANUP_GRACE_MS ? SIGKILL : SIGTERM;
