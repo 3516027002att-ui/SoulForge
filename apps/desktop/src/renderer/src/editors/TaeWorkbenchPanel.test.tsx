@@ -121,6 +121,34 @@ function renderWithSelection(): string {
   );
 }
 
+/** #47：动画栏提示只有三种来源，读不到文档时绝不显示「0 个动画」。 */
+describe('TaeWorkbenchPanel 动画数提示（#47）', () => {
+  const hintNodes = (html: string, text: string) => html.split(`>${text}<`).length - 1;
+
+  it('还没有数据时提示等待，而不是 0 个动画', () => {
+    const html = render(null);
+    assert.equal(hintNodes(html, '等待数据'), 1);
+    assert.equal(hintNodes(html, '0 个动画'), 0);
+  });
+
+  it('读取失败时提示读取失败并给出诊断，而不是 0 个动画', () => {
+    const html = renderToStaticMarkup(
+      <TaeWorkbenchPanel resourceUri="fixture://action/c0000.tae" data={{ format: 'TAE_READ_FAILED',
+        diagnostics: [{ severity: 'error', code: 'TAE_FIXTURE_READ_FAILED', message: 'fixture read failed' }] }} />
+    );
+    assert.equal(hintNodes(html, '读取失败'), 1);
+    assert.ok(html.includes('role="alert"'));
+    assert.ok(html.includes('TAE_FIXTURE_READ_FAILED') && html.includes('fixture read failed'));
+    assert.equal(hintNodes(html, '0 个动画'), 0);
+  });
+
+  it('首页被截断时提示文档的动作总数，不是已加载的行数', () => {
+    const html = render(makeDocument({ animationCount: 2219, animationsTruncated: true }));
+    assert.equal(hintNodes(html, '2219 个动画'), 1);
+    assert.equal(hintNodes(html, '2 个动画'), 0);
+  });
+});
+
 describe('TaeWorkbenchPanel 初始结构（挂载即有的四栏骨架）', () => {
   it('工作台根的可访问名是「动作工作台」', () => {
     assert.match(render(), /aria-label="动作工作台"/);
