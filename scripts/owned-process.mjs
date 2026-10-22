@@ -1,7 +1,9 @@
 import { fork } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { constants as osConstants } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runProcess } from './subprocess-control.mjs';
 import { runLinuxGuardianProcess } from './owned-process-linux-guardian.mjs';
@@ -116,6 +118,16 @@ export async function runOwnedProcess({ owner, signal, onStdout, onStderr, ...op
   }
 }
 
+// Absent or unparseable at the published path: the guardian's 'assigned'
+// write (or atomic replacement) never completed for that ticket.
+function jobProofIncomplete(tickets, id) {
+  if (!id) return false;
+  return tickets.some(ticket => {
+    try { JSON.parse(readFileSync(join(ticket.root, `.soulforge-windows-job.${id}.json`), 'utf8')); return false; }
+    catch (error) { return error.code === 'ENOENT' || error instanceof SyntaxError; }
+  });
+}
+
 function isCompleteLinuxTreeResult(value) {
   if (!isCompleteProcessResult(value) || typeof value.treeStopped !== 'boolean'
     || typeof value.descendantsObserved !== 'boolean'
@@ -178,17 +190,26 @@ if (process.argv[1] === helperPath && process.argv[2] === '--worker') {
     started = true;
     try {
       const tickets = [message.ticket].flat();
-      let options = message.options;
+      let options = message.options, windowsJobId = null;
       if (process.platform === 'win32') {
-        const id = randomUUID();
+        const id = windowsJobId = randomUUID();
         for (const ticket of tickets) prepareOwnedWindowsJob(ticket, process.pid, id);
         const quote = value => {
           value = String(value);
           return value && !/[\s"]/.test(value) ? value : `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1')}"`;
         };
         const commandLine = [options.command, ...options.args].map(quote).join(' ');
+        // -EncodedCommand (UTF-16LE base64) must fit the 32767-character command
+        // line. Comments, blank lines and indentation are for readers of the
+        // .ps1 files; no line of these scripts that starts with # or // carries
+        // code, and the C# here-string does not depend on indentation.
         const source = (await Promise.all(['owned-windows-job-status.ps1', 'owned-windows-job.ps1']
-          .map(name => readFile(new URL(name, import.meta.url), 'utf8')))).join('\n');
+          .map(name => readFile(new URL(name, import.meta.url), 'utf8')))).join('\n')
+          .split(/\r?\n/).map(line => line.trimStart()).filter(line => line && !line.startsWith('#') && !line.startsWith('//')).join('\n');
+        // The guardian keeps the operation's TEMP, inside the owned root: the
+        // temporary directory its Add-Type compile leaves when it is killed
+        // mid-compile is removed with the root instead of leaking into the
+        // owner's TEMP.
         options = { ...options, command: 'powershell.exe',
           args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')],
           stdinData: JSON.stringify({ ...message.options, commandLine, id, supervisorPid: process.pid,
@@ -204,8 +225,17 @@ if (process.argv[1] === helperPath && process.argv[2] === '--worker') {
           stdioDrainMs: process.platform === 'win32' ? WINDOWS_GUARDIAN_STDIO_DRAIN_MS : undefined,
           terminationGroup: process.platform !== 'win32' ? process.pid : undefined });
       // Windows has no POSIX group observer. A killed/uncertain tree remains
-      // marked rather than being inferred dead from its former cmd PID.
-      if (process.platform === 'win32' && (result.terminationReason === 'spawn-error' || result.treeTerminated)) {
+      // marked rather than being inferred dead from its former cmd PID, with
+      // one proven exception: runProcess resolves only after the guardian's
+      // own exit, and a job proof that is absent or incomplete means it ended
+      // before every 'assigned' proof was written. The driver is created
+      // suspended inside the guardian's kill-on-close job (whose only handle
+      // the guardian held) and resumed only after those proofs, so no driver
+      // ran. The guardian's own compiler is not a job member: a tree kill ends
+      // it with the guardian, and one that outlives a guardian ended otherwise
+      // writes only under the owned root, where it makes disposal fail visibly.
+      if (process.platform === 'win32' && (result.terminationReason === 'spawn-error' || result.treeTerminated
+        || jobProofIncomplete(tickets, windowsJobId))) {
         for (const ticket of [message.ticket].flat()) recordOwnedProcess(ticket, process.pid, { finished: true });
       }
       // A large result can still be queued after send() returns. Disconnecting
