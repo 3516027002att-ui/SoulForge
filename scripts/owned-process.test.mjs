@@ -1284,3 +1284,46 @@ test('Windows guardian keeps PowerShell progress records off its redirected stde
       await rm(root, { recursive: true, force: true });
     }
   });
+
+test('Windows guardian that ends before writing any job proof releases its tree',
+  { skip: process.platform !== 'win32' && 'Windows job API unavailable', timeout: 60_000 }, async () => {
+    // The guardian fails at Get-Command, before any driver can exist: the same
+    // "no job proof at all" state as a guardian killed during its startup.
+    const root = await mkdtemp(join(tmpdir(), 'sf-owned-windows-no-proof-'));
+    try {
+      const owner = await createOwnedTemporaryDirectory('windows-no-proof', { parent: root });
+      const result = await runProcess({ command: 'soulforge-missing-program-for-guardian-test', args: [],
+        cwd: owner.root, env: process.env, owner, timeoutMs: 30_000 });
+      assert.notEqual(result.code, 0, 'the operation itself still fails');
+      // The guardian really ran and failed at its command lookup; a guardian
+      // that never spawned (spawn-error) would release the tree for another reason.
+      assert.notEqual(result.terminationReason, 'spawn-error', result.stderr);
+      assert.match(result.stderr, /soulforge-missing-program-for-guardian-test/u);
+      const marker = JSON.parse(await readFile(join(owner.root, '.soulforge-temporary-owner.json'), 'utf8'));
+      assert.equal(marker.windowsJobs.length, 1);
+      const proof = join(owner.root, `.soulforge-windows-job.${marker.windowsJobs[0].id}.json`);
+      await assert.rejects(readFile(proof, 'utf8'), { code: 'ENOENT' }, 'the guardian ended before any job proof');
+      assert.deepEqual(marker.uncertainTrees, [], 'the observed guardian exit without any job proof releases the tree');
+      await owner.dispose({ stopProofWaitMs: 0 });
+      await assert.rejects(lstat(owner.root), { code: 'ENOENT' });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+test('Windows driver keeps its own TEMP/TMP while the guardian compiles outside the owned root',
+  { skip: process.platform !== 'win32' && 'Windows job API unavailable', timeout: 60_000 }, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sf-owned-windows-temp-'));
+    try {
+      const owner = await createOwnedTemporaryDirectory('windows-temp', { parent: root });
+      const driverTemp = join(owner.root, 'tmp'); await mkdir(driverTemp);
+      const result = await runProcess({ command: process.execPath,
+        args: ['-e', 'process.stdout.write(JSON.stringify([process.env.TEMP, process.env.TMP]))'],
+        cwd: owner.root, env: { ...process.env, TEMP: driverTemp, TMP: driverTemp }, owner, timeoutMs: 30_000 });
+      assert.equal(result.code, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), [driverTemp, driverTemp]);
+      await owner.dispose();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
