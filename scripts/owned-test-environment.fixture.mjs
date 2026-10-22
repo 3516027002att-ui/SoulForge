@@ -207,13 +207,20 @@ test('actual check to root npm test to owned fixture does not recursively length
     } }));
     await writeFile(join(root, 'child.mjs'), `import {createOwnedTemporaryDirectory} from ${JSON.stringify(temporaryHelper)};
       import {mkdtempSync} from 'node:fs';import {tmpdir} from 'node:os';import {join} from 'node:path';
-      const owner=await createOwnedTemporaryDirectory('nested-fixture-${'x'.repeat(35)}');
+      const owner=await createOwnedTemporaryDirectory('nested-fixture');
       try{const path=mkdtempSync(join(owner.root,'leaf-'));console.log('OWNED_TEMP_META:'+Buffer.from(JSON.stringify({path,temp:tmpdir()})).toString('base64'));console.log(JSON.stringify({ok:true,assertions:1}));}
       finally{await owner.dispose();}`);
     const result = await runSuite({ repoRoot, scriptName: 'test', injectEnv: false, timeoutMs: 30_000, env,
       operation: { command: 'npm', args: ['run', 'test', '--silent'], cwd: root, validation: true } });
     assert.equal(result.outcome, OUTCOME.PASSED, result.stderr);
     const written = metadata(result.stdout);
+    // Two wrappers sit between the fixture and the child; the inner one allocates a sibling,
+    // so the child's TEMP is one compact owner below the fixture's, not a chain. Asserted on the
+    // path itself: a length probe near MAX_PATH passes or fails with the machine's TEMP length.
+    const layers = relative(temporaryParent, written.temp).split(sep);
+    assert.equal(layers.length, 2, `child TEMP ${written.temp}`);
+    assert.match(layers[0], /^sft-[0-9a-f]+-/u);
+    assert.equal(layers[1], 'tmp');
     assert.ok(inside(temporaryParent, written.path));
     assert.equal(existsSync(written.path), false);
     assert.deepEqual(await readdir(temporaryParent), []);
