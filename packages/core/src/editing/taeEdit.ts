@@ -27,8 +27,10 @@ import {
 import type { NativeEditSession } from './nativeEditSession.js';
 import { readTaeBrowse } from './taeBrowse.js';
 import type { TaeBrowseAction } from './taeBrowse.js';
+import { TAE_COMPACT_PAGE_SIZE } from './taeCompactEvent.js';
 
 export const TAE_FPS = 30;
+const TAE_COMPACT_SCOPE_PREFIX = 'tae-events:compact:';
 
 export interface TaeEventSnapshot {
   chrId: string;
@@ -186,6 +188,8 @@ export type TaeReadResult =
         pageNumber?: number;
         totalPages?: number | null;
       };
+      /** Set when the page was read for the compact projection (requested, or carried by the cursor). */
+      projection?: 'compact';
       diagnostics: Diagnostic[];
   }
   | { ok: false; error: TaeEditFailure; diagnostics: Diagnostic[] };
@@ -250,6 +254,8 @@ export async function readTaeEvents(input: {
   cursor?: string;
   offset?: number;
   pageSize?: number;
+  /** Fixed pages of up to TAE_COMPACT_PAGE_SIZE events, numbered like search_tae_events previews (#52). */
+  projection?: 'compact';
   expectedSourceHash?: string;
   expectedReaderSchemaRevision?: number;
 }): Promise<TaeReadResult> {
@@ -264,6 +270,8 @@ export async function readTaeEvents(input: {
     };
   }
   if (wanted.every(address => address!.animId === undefined)) {
+    if (input.projection === 'compact') return { ok: false, error: { code: 'TAE_PROJECTION_REQUIRES_ACTION',
+      message: 'projection "compact" 需要动作或词条地址；文件预览不支持。' }, diagnostics: [] };
     const chrId = extractChrId(resolved.path);
     if (wanted.some(address => address!.chr.toLowerCase() !== chrId)) return {
       ok: false, error: { code: 'TAE_EVENT_NOT_FOUND', message: '请求的角色地址与 TAE 来源不匹配。' }, diagnostics: []
@@ -316,13 +324,23 @@ export async function readTaeEvents(input: {
     error: { code: 'TAE_CURSOR_SCOPE_MISMATCH', message: '续页只传 cursor，不同时传 offset。' }, diagnostics: [] };
   if (input.offset !== undefined && (!Number.isSafeInteger(input.offset) || input.offset < 0)) return { ok: false,
     error: { code: 'TAE_CURSOR_INVALID', message: 'offset 必须是非负安全整数。' }, diagnostics: [] };
+  // A cursor keeps the projection it was created with when the caller omits it; an explicit different projection
+  // changes queryScope and is rejected below. A malformed cursor is reported by the paging block.
+  let projection = input.projection;
+  if (projection === undefined && input.cursor) {
+    try { if (parseOpaqueCursor(input.cursor).scope.startsWith(TAE_COMPACT_SCOPE_PREFIX)) projection = 'compact'; } catch { /* reported below */ }
+  }
   const maximumEventBytes = Math.max(1, ...selected.map((event) => Buffer.byteLength(JSON.stringify(event), 'utf8')));
-  const pageSize = Math.max(1, Math.min(normalizeTaePageSize(input.pageSize), Math.floor(24000 / maximumEventBytes)));
+  // Compact pages hold a fixed number of events, so their numbering matches the search preview that led here;
+  // full pages shrink to the largest full event.
+  const pageSize = projection === 'compact'
+    ? Math.max(1, Math.min(input.pageSize !== undefined && Number.isSafeInteger(input.pageSize) ? input.pageSize : TAE_COMPACT_PAGE_SIZE, TAE_COMPACT_PAGE_SIZE))
+    : Math.max(1, Math.min(normalizeTaePageSize(input.pageSize), Math.floor(24000 / maximumEventBytes)));
   const sourceHash = envelope.outerFileHash ?? envelope.containerSourceHash ?? envelope.sourceHash ?? await sha256Of(resolved.path);
   // queryScope 只做续页时的相等性校验；用工作区相对逻辑 URI，避免把本机
   // 绝对路径编进发往模型的 opaque cursor（base64 可解码，不是脱敏）。
   const overlayRoot = input.edit.session.layers.overlayRoot;
-  const queryScope = `tae-events:${makeFileResourceUri(makeWorkspaceRelativePath(overlayRoot, resolved.path))}:${JSON.stringify([...(input.addresses ?? [])].sort())}`;
+  const queryScope = `${projection === 'compact' ? TAE_COMPACT_SCOPE_PREFIX : 'tae-events:'}${makeFileResourceUri(makeWorkspaceRelativePath(overlayRoot, resolved.path))}:${JSON.stringify([...(input.addresses ?? [])].sort())}`;
   let pagination = {
     returnedCount: selected.length,
     totalCount: selected.length,
@@ -401,6 +419,7 @@ export async function readTaeEvents(input: {
       || wanted.some(address => address!.eventIndex === undefined && matchesAddress(address!, { ...action, eventIndex: 0 }))),
     events: selected,
     pagination,
+    ...(projection === 'compact' ? { projection } : {}),
     diagnostics: envelope.diagnostics
   };
 }

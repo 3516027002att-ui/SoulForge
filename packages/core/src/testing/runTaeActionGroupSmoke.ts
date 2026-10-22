@@ -12,6 +12,7 @@ import type { TaeExport } from '@soulforge/shared';
 import { createOpaqueCursor, defaultReadSessionManager, parseOpaqueCursor } from '@soulforge/shared';
 import { pathToFileURL } from 'node:url';
 import { assertCursorPrivacy } from './harness/assertCursorPrivacy.js';
+import { TAE_COMPACT_PAGE_SIZE } from '../editing/taeCompactEvent.js';
 
 const sourceUri = 'file://chr/c0000.anibnd.dcx';
 const events = Array.from({ length: 160 }, (_, index) => ({
@@ -46,8 +47,11 @@ assert.equal(data.matches[0].item.pagination.totalCount, 160);
 assert.equal(data.matches[0].item.eventsComplete, false);
 assert.equal(data.matches[0].item.indexedEventsComplete, true);
 assert.equal(data.matches[0].item.eventsTruncated, true);
-assert.equal(data.matches[0].item.pagination.totalPages, 2);
+// pageSize 128 is clamped to the fixed compact page, so 160 events are three pages and page 1 is whole.
+assert.equal(data.matches[0].item.events.length, TAE_COMPACT_PAGE_SIZE);
+assert.equal(data.matches[0].item.pagination.totalPages, Math.ceil(160 / TAE_COMPACT_PAGE_SIZE));
 assert.equal(data.matches[0].item.pagination.nextRead.args.offset, data.matches[0].item.events.length);
+assert.equal(data.matches[0].item.pagination.nextRead.args.projection, 'compact');
 const model = await createAgentToolBridge({ registry, context: { workspaceIndex: index, mode: 'plan' } }).executeTool({ id: 'group', name: 'search_tae_events', argumentsJson: JSON.stringify({ query: 'UniqueNeedle', limit: 1, pageSize: 7 }) });
 assert.equal(model.ok, true);
 assert.equal(JSON.parse(model.content).data.record.matches[0].item.events.length, 7, 'Agent transport must preserve every delivered sibling');
