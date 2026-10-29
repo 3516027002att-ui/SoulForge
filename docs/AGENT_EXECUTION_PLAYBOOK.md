@@ -488,6 +488,10 @@ if ($read.data.record.nextCursor) {
 
 结果 envelope 中 `pagination.truncated` 表示逻辑结果有后页，`pagination.deliveryTruncated` 表示字节预算导致摘要省略细节，后者不承诺存在分页游标；按 `nextActions/nextReadPlan` 恢复细节。`resolve_entity` 摘要保留候选身份，但不能把摘要中的候选升级为修改授权。字段/结构页若单项超预算会明确失败，不返回缺项的“完整”结果。
 
+取候选时按 `data.itemsKey` 读：数组结果的候选在 `data.items`，对象结果整份进 `data.record`，本页数组是 `data.record[data.itemsKey]`；此时 `data.items` 恒为空，直接读它会把“有候选”误判成“零结果”。只要工具返回了 `nextCursor`（或 `hasMore`），`pagination.truncated` 就必须为 `true`——拿到游标却被告知没有后页是自相矛盾的信封。
+
+发现类结果当前逻辑页超预算时按可行动性分两种：能推出更小 `limit` 可无损重读本页（`error.details.retry.limit`）就按 `RESULT_DISCOVERY_WINDOW_TOO_LARGE` 明确失败，且**不能**改用 `nextPageCursor` 跳过未交付候选；生产者根本不提供页窗口时，改为交付有界前缀并标 `truncated:true`，同时给出“本页其余候选未交付、用同一查询和更小 limit 重读本页”的提示。两种情况都不能把交付过的前缀当成整页读完。
+
 1. 关联结果 `record.page.nextCursor` → `find_references` 的 `cursor`：当前锁定结果集下一页。
 2. `record.scan.sourceCursor` / `scan.nextAction` → 带原查询条件的来源扫描：补齐尚未扫描的来源，再刷新关系。**先读完当前结果页再续扫**，新增来源可能使旧结果快照失效。
 3. 原文工具自己的游标 → 同一原文工具：脚本/FMG 正文窗口等，不能传给 `find_references`。
