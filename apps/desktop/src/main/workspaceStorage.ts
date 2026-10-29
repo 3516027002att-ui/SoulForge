@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { app } from 'electron';
@@ -7,6 +7,7 @@ import {
   planWorkspaceDatabaseMigration,
   type WorkspaceDatabaseMigrationPlan
 } from './workspaceDatabaseMigration.js';
+import { sweepStaleStorageProbes, verifyDirectoryWritable } from './workspaceStorageProbe.js';
 
 export interface WorkspaceStoragePaths {
   root: string;
@@ -89,9 +90,9 @@ export function resolveWorkspaceStoragePaths(
       mkdirSync(join(companionRoot, 'recovery'), { recursive: true });
       mkdirSync(join(companionRoot, 'staging'), { recursive: true });
 
-      const probeFile = join(companionRoot, `.probe_${process.pid}_${Date.now()}`);
-      writeFileSync(probeFile, 'ok', 'utf8');
-      unlinkSync(probeFile);
+      verifyDirectoryWritable(companionRoot);
+      // 上一次运行在写探针前后被杀会留下 .probe_*：每次创建目录顺手清过期的。
+      sweepStaleStorageProbes(companionRoot);
 
       // 伴随库还没有、但 fallback 库存在：声明迁移来源，由数据库 utility 进程
       // 用一致性快照完成。分文件 copyFileSync 在 WAL 库上会撕开事务（#40），
