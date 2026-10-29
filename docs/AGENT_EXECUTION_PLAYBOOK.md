@@ -492,6 +492,10 @@ if ($read.data.record.nextCursor) {
 
 发现类结果当前逻辑页超预算时按可行动性分两种：能推出更小 `limit` 可无损重读本页（`error.details.retry.limit`）就按 `RESULT_DISCOVERY_WINDOW_TOO_LARGE` 明确失败，且**不能**改用 `nextPageCursor` 跳过未交付候选；生产者根本不提供页窗口时，改为交付有界前缀并标 `truncated:true`，同时给出“本页其余候选未交付、用同一查询和更小 limit 重读本页”的提示。两种情况都不能把交付过的前缀当成整页读完。
 
+容器级候选要落到成员再读：`list_container_entries` 接受 `relativePath`、`sourcePath` 或 `sourceUri`，返回 `entryCount`、`extensions` 和按页的 `entries`（`index/id/name/size`）。`name` 是容器根之后的相对路径（打包机的 `N:\…\INTERROOT_win64\` 前缀已折算，避免宿主路径脱敏后只剩占位符）；`entries` 未读满 `entryCount` 时按 `nextCursor` 续读，游标绑定容器与目录快照，换容器或容器内容变化会让旧游标失效。列目录只给成员身份，读负载仍需对应格式的读取工具。单文件超过 Bridge 的 512 MiB DCX 上限时（本机语料里的 `sfx/sfxbnd_commoneffects.ffxbnd.dcx`）会明确失败并给结构化诊断，不会返回残缺清单。
+
+容器成员口径可用 `node tools/soulforge-cli/cross-check-containers.mjs --workspace <mods> --base <gameRoot>` 与参考 CLI 对拍：逐容器比较成员数量、`id`、`size`，并把参考原始全名折算成同样的相对尾部再比名字归属；结果写 `output/cross-check/containers/`。
+
 1. 关联结果 `record.page.nextCursor` → `find_references` 的 `cursor`：当前锁定结果集下一页。
 2. `record.scan.sourceCursor` / `scan.nextAction` → 带原查询条件的来源扫描：补齐尚未扫描的来源，再刷新关系。**先读完当前结果页再续扫**，新增来源可能使旧结果快照失效。
 3. 原文工具自己的游标 → 同一原文工具：脚本/FMG 正文窗口等，不能传给 `find_references`。

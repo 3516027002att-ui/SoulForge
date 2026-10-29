@@ -54,6 +54,7 @@ import { readFmgEntries, setFmgEntries, type FmgEntryEdit } from '../editing/fmg
 import * as emevdEdit from '../editing/emevdEdit.js';
 import { readTaeEvents, setTaeEventFields, setTaeEventTimes } from '../editing/taeEdit.js';
 import { listLuabndScripts, readLuabndScript, setLuabndScript } from '../editing/luabndEdit.js';
+import { containerCatalogHash, listContainerEntries } from '../editing/containerEntries.js';
 import { readMsbParts, type MsbPartTransformEdit } from '../editing/msbEdit.js';
 import {
   batchTransformMapParts,
@@ -3095,6 +3096,128 @@ export function createDefaultToolRegistry(): ToolRegistry {
   });
 
   registry.register({
+    name: 'list_container_entries',
+    description: 'List every member stored inside a native BND container (.anibnd, .chrbnd, .behbnd, .objbnd, .parambnd, .msgbnd, .texbnd, .talkesdbnd, .sblytbnd, .anibnd.dcx, .ffxbnd). '
+      + 'Use it to go from a container-level search_resources hit (or a mod file path) to a concrete member before reading it. '
+      + 'file: workspace-relative path, sourcePath or file:// URI of the container. '
+      + 'Returns entryCount, extension histogram and per-entry index/id/name/size; page with nextCursor and never treat the first page as the whole container. '
+      + 'Reading a member still needs the format-specific reader; this tool does not decode member payloads.',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: {
+      file: 'string',
+      cursor: 'string?',
+      pageSize: 'safe-integer?',
+      includeContentHashes: 'boolean?'
+    },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'read');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const file = asString(value.file);
+      if (!file) return fail('INVALID_INPUT', 'list_container_entries 需要 file（容器相对路径或 sourceUri）。');
+      const cursor = asOptionalString(value.cursor)?.trim();
+      const pageSize = Math.max(1, Math.min(400, Math.trunc(asNumber(value.pageSize, 64))));
+      const resolved = resolveContainerReference(context, file);
+      if (!resolved) {
+        return fail(
+          'CONTAINER_NOT_IN_WORKSPACE',
+          `工作区里找不到容器 ${file}；先用 search_resources 拿到容器级候选（relativePath/sourceUri），或传工作区内的相对路径。`
+        );
+      }
+      const result = await listContainerEntries({
+        edit: edit.session,
+        file: resolved.absolutePath,
+        includeContentHashes: value.includeContentHashes === true,
+        ...(context.signal ? { signal: context.signal } : {})
+      });
+      if (!result.ok) return fail(result.error.code, result.error.message, result.diagnostics);
+
+      const sourceUri = resolved.sourceUri;
+      const relativePath = resolved.relativePath;
+      const catalogHash = containerCatalogHash(sourceUri, result.sourceHash, result.entries);
+      const catalogScope = `container-entries:${sourceUri}`;
+      /**
+       * 容器目录没有对应的 edit domain（CursorPayload.domain 是写域词汇），这里沿用
+       * 只读目录已经在用的 'script' 桶，靠 sessionId + scope + catalogHash 三重绑定
+       * 区分：换容器、换工作区、容器内容变化都会让旧 cursor 失效。
+       */
+      const CURSOR_DOMAIN = 'script' as const;
+      const CURSOR_SESSION = 'container-entries-v1';
+      let page;
+      if (cursor) {
+        let payload;
+        try {
+          payload = parseOpaqueCursor(cursor);
+        } catch (error) {
+          return fail(
+            typeof (error as { code?: unknown }).code === 'string'
+              ? (error as { code: string }).code
+              : 'INVALID_READ_CURSOR',
+            error instanceof Error ? error.message : '容器目录 cursor 无效。'
+          );
+        }
+        if (payload.sessionId !== CURSOR_SESSION
+          || payload.domain !== CURSOR_DOMAIN
+          || sanitizeCursorScope(payload.scope) !== sanitizeCursorScope(catalogScope)) {
+          return fail('CONTAINER_CURSOR_SCOPE_MISMATCH', '容器目录 cursor 与当前容器不匹配，请重新列出条目。');
+        }
+        try {
+          page = resolveStatelessCursorPage(payload, catalogHash, result.entries, pageSize, CURSOR_DOMAIN, catalogScope);
+        } catch (error) {
+          const code = typeof (error as { code?: unknown }).code === 'string'
+            ? (error as { code: string }).code
+            : 'INVALID_READ_CURSOR';
+          return fail(code, error instanceof Error ? error.message : '容器目录 cursor 无法续页。');
+        }
+      } else {
+        page = {
+          items: result.entries.slice(0, pageSize),
+          offset: 0,
+          total: result.entries.length,
+          hasMore: result.entries.length > pageSize,
+          nextCursor: result.entries.length > pageSize
+            ? createOpaqueCursor({
+                sessionId: CURSOR_SESSION,
+                offset: pageSize,
+                sourceHash: catalogHash,
+                domain: CURSOR_DOMAIN,
+                scope: catalogScope
+              })
+            : null
+        };
+      }
+
+      return ok({
+        sourceUri,
+        ...(relativePath ? { relativePath } : {}),
+        containerFormat: result.format,
+        compressionFormat: result.compressionFormat,
+        containerVariant: result.variant,
+        sourceHash: result.sourceHash,
+        sourceSize: result.sourceSize,
+        entryCount: result.entryCount,
+        extensions: result.extensions,
+        entries: page.items,
+        entriesTotalCount: page.total,
+        entriesReturnedCount: page.items.length,
+        entriesTruncated: page.hasMore,
+        total: page.total,
+        totalCount: page.total,
+        offset: page.offset,
+        limit: pageSize,
+        returned: page.items.length,
+        returnedCount: page.items.length,
+        truncated: page.hasMore,
+        hasMore: page.hasMore,
+        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+        authority: result.authority,
+        diagnostics: result.diagnostics
+      });
+    }
+  });
+
+  registry.register({
     name: 'read_luabnd_script',
     description: 'Read a native Lua AI script inside a *.luabnd.dcx container (such as script/m11_01_00_00.luabnd.dcx or aicommon.luabnd.dcx). '
       + 'file: relative or absolute path (e.g. script/m11_01_00_00.luabnd.dcx); childPath: script name (e.g. 540000_battle.lua; omit to list scripts). '
@@ -4148,6 +4271,52 @@ function canonicalScriptSourceUri(context: ToolContext, containerPath: string, f
     if (match) return match.sourceUri;
   }
   return fallback && !/^[A-Za-z]:[\\/]/u.test(fallback) ? fallback : pathToFileURL(containerPath).href;
+}
+
+/**
+ * 把模型给的容器引用（relativePath / sourcePath / sourceUri / 绝对路径）落到
+ * 工作区里的一个真实文件。只接受工作区内已索引文件或显式 file:// URI，
+ * 不让模型凭空指定宿主路径。
+ */
+function resolveContainerReference(
+  context: ToolContext,
+  reference: string
+): { absolutePath: string; sourceUri: string; relativePath: string | null } | null {
+  const token = reference.trim();
+  if (!token) return null;
+  const normalized = normalizeFileToken(token);
+  const index = context.workspaceIndex;
+  if (index) {
+    const match = index.getFiles().find((file) => [
+      file.absolutePath,
+      file.sourcePath,
+      file.relativePath,
+      file.sourceUri
+    ].some((candidate) => normalizeFileToken(candidate) === normalized));
+    if (match) {
+      return {
+        absolutePath: match.absolutePath,
+        sourceUri: match.sourceUri,
+        relativePath: match.relativePath
+      };
+    }
+  }
+  let absolutePath: string | null = null;
+  if (token.startsWith('file://')) {
+    try {
+      absolutePath = fileURLToPath(token);
+    } catch {
+      return null;
+    }
+  } else if (isAbsolute(token)) {
+    absolutePath = token;
+  }
+  if (!absolutePath) return null;
+  return {
+    absolutePath,
+    sourceUri: pathToFileURL(absolutePath).href,
+    relativePath: null
+  };
 }
 
 function ambiguousIndexedFiles(

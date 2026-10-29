@@ -98,6 +98,7 @@ const DISCOVERY_TOOLS = new Set([
   'search_event_reference',
   'retrieve_evidence',
   'list_luabnd_scripts',
+  'list_container_entries',
   'lookup_text_id',
   'resolve_entity',
   'analyze_luabnd_script',
@@ -127,7 +128,8 @@ const DISCOVERY_QUERY_TOOLS = new Set([
   'search_hks_script',
   'search_event_reference',
   'retrieve_evidence',
-  'list_luabnd_scripts'
+  'list_luabnd_scripts',
+  'list_container_entries'
 ]);
 // Reference-query cursors are owned by referenceQueryService (for example
 // `rf1:...`).  They are deliberately outside the generic native cursor
@@ -520,6 +522,29 @@ function projectParamDiscoverySymbol(value: unknown, context?: ToolContext): Rec
     output.recovery = '当前候选没有足够的真实字段身份；先使用返回的 table、rowId、sourceUri 调用 search_param_fields 获取真实 fieldId，再调用 read_param_fields。';
   }
   return output;
+}
+
+/**
+ * 诊断条目走自己的投影：`severity/code/message` 是排查入口，`sourceUri` 是定位，
+ * `details` 只做有界摘要。绝不能套用候选投影（那会把一条诊断压成单个身份键）。
+ */
+function projectDiagnosticItem(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return compactDiscoveryScalar(value);
+  const record = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const key of ['severity', 'code', 'message']) {
+    const child = record[key];
+    if (typeof child === 'string' && child.trim() !== '') output[key] = compactDiscoveryScalar(child);
+  }
+  const sourceUri = modelFacingSourceUri(record.sourceUri);
+  if (sourceUri) output.sourceUri = sourceUri;
+  else {
+    // 诊断可能只带本机路径；折算成工作区相对路径，而不是整条定位信息消失。
+    const relative = modelFacingRelativePath(record.sourceUri);
+    if (relative) output.file = relative;
+  }
+  if (record.details !== undefined) output.details = summarizeToolValue(record.details, 1);
+  return Object.keys(output).length > 0 ? output : summarizeDiscoveryItem(value);
 }
 
 function projectDiscoveryMatch(value: unknown, context?: ToolContext, discoveryToolName?: string): unknown {
@@ -1013,7 +1038,12 @@ function projectDiscoveryForAgent(name: string, value: unknown, context?: ToolCo
           ? child.map((item) => projectDiscoveryMatch(item, context, name))
           : child.slice(0, DISCOVERY_ITEM_LIMIT).map((item) => key === 'nextActions'
             ? projectDiscoveryAction(item)
-            : projectDiscoveryMatch(item, context, name));
+            : key === 'diagnostics'
+              // 诊断不是候选：`projectDiscoveryMatch` 会把它当候选身份压成单个键，
+              // 于是 severity/code/message 全被丢掉，模型只看到 sourceUri。诊断必须
+              // 原样保留语义（ADenda: 结构化诊断不能吞）。
+              ? projectDiagnosticItem(item)
+              : projectDiscoveryMatch(item, context, name));
         output[key] = projected;
         output[`${key}ReturnedCount`] = primaryPage ? child.length : Math.min(child.length, DISCOVERY_ITEM_LIMIT);
         output[`${key}TotalCount`] = child.length;
