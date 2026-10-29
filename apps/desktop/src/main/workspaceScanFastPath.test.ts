@@ -1,12 +1,21 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const workspaceIpcSource = readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), 'ipc', 'workspace.ts'),
-  'utf8'
-);
+/**
+ * 本用例靠读同目录的生产源码断言结构。`scripts/run-renderer-unit-tests.mjs`
+ * 用 esbuild 把测试打进 node_modules/.cache，`import.meta.url` 就指向缓存目录，
+ * 直接 join 会 ENOENT（整条 test:renderer-unit 因此长期是红的）。先按模块位置
+ * 找，找不到再按仓库根定位源码树。
+ */
+function mainSource(relative: string): string {
+  const fromModule = join(dirname(fileURLToPath(import.meta.url)), relative);
+  if (existsSync(fromModule)) return fromModule;
+  return resolve(process.cwd(), 'apps', 'desktop', 'src', 'main', relative);
+}
+
+const workspaceIpcSource = readFileSync(mainSource(join('ipc', 'workspace.ts')), 'utf8');
 const scanStart = workspaceIpcSource.indexOf("handle('workspace.scan'");
 const scanEnd = workspaceIpcSource.indexOf("\n  handle('workspace.remountBase'", scanStart);
 assert.ok(scanStart >= 0, 'workspace.scan handler must exist');

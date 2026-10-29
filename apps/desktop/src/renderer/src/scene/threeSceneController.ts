@@ -546,14 +546,21 @@ interface InstanceBatch {
 const HIGHLIGHT_COLOR = 0x4fa8ff;
 
 /**
- * Deterministic backend resolution: explicit override wins; otherwise WebGPU
- * when the adapter is available, WebGL2 as the compatible fallback.
+ * Deterministic backend resolution.
+ *
+ * An explicit override wins. Otherwise the default stays WebGL2 even when the
+ * adapter is usable: the native second-layer diffuse mixing is injected via
+ * `onBeforeCompile`, which only `WebGLRenderer` calls, so flipping the default
+ * before #34 lands would silently drop that layer. WebGPU opt-in is therefore
+ * separate from the probe result (#32).
  */
 export function resolveRendererBackend(
   override: RendererBackend | undefined,
-  gpuAvailable: boolean
+  gpuAvailable: boolean,
+  options: { webgpuEnabled?: boolean } = {}
 ): RendererBackend {
-  return override ?? (gpuAvailable ? 'webgpu' : 'webgl2');
+  if (override) return override;
+  return options.webgpuEnabled === true && gpuAvailable ? 'webgpu' : 'webgl2';
 }
 
 /**
