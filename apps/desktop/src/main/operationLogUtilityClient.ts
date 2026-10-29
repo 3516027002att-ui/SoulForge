@@ -606,7 +606,16 @@ export class OperationLogUtilityClient implements OperationLogStore {
           timeoutMs: timeout,
           outcome: 'timeout'
         });
-        reject(new Error(`数据库后台请求超时：${method}`));
+        // 超时是"结果未确认"，不是"没有执行"：请求可能已经被后台落地（或正在
+        // 落地），调用方不能据此断言失败。requestId 与 --diagnostics 的
+        // timeout/late-completion 轨迹对齐，便于按操作 ID 复查结果（#42）。
+        reject(Object.assign(new Error(`数据库后台请求超时：${method}（结果未确认）`), {
+          code: 'DATABASE_UTILITY_TIMEOUT_UNCONFIRMED',
+          requestId,
+          method,
+          timeoutMs: timeout,
+          unconfirmed: true
+        }));
         this.drainDispatchQueue();
       }, timeout);
       this.pending.set(requestId, {

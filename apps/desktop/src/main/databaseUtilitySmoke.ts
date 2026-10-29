@@ -496,10 +496,34 @@ app.whenReady().then(async () => {
       throw new Error('Database utility restart did not reopen durable state.');
     }
 
+    // #42：调用侧超时不得被当成"没有执行"。错误必须带 code/requestId/
+    // unconfirmed，调用方才能区分"后台没收到"与"可能已经落地"。
+    const nativeBinding = resolve(here, '../../.native/better_sqlite3.node');
+    const timeoutClient = new OperationLogUtilityClient(join(here, 'databaseUtility.js'), 1, nativeBinding);
+    let timeoutError: (Error & { code?: string; requestId?: string; unconfirmed?: boolean }) | null = null;
+    try {
+      // 1ms 超时下任何真实请求都会先超时；这一次调用同时负责拉起后台进程。
+      await timeoutClient.openAppDatabase(join(root, 'timeout', 'app.db'));
+    } catch (error) {
+      timeoutError = error as Error & { code?: string; requestId?: string; unconfirmed?: boolean };
+    } finally {
+      await timeoutClient.dispose();
+    }
+    if (timeoutError?.code !== 'DATABASE_UTILITY_TIMEOUT_UNCONFIRMED'
+      || timeoutError.unconfirmed !== true
+      || typeof timeoutError.requestId !== 'string'
+      || timeoutError.requestId.length === 0) {
+      throw new Error(`Database utility timeout is not reported as unconfirmed: ${JSON.stringify({
+        code: timeoutError?.code,
+        unconfirmed: timeoutError?.unconfirmed,
+        requestId: timeoutError?.requestId,
+        message: timeoutError?.message
+      })}`);
+    }
+
     // #40：fallback -> 伴随库必须经 utility 进程的一致性快照完成（主进程不做
     // SQLite 同步 I/O，也不能分文件复制 WAL 库）。这里跑真实 Electron 链：
     // 造一个带标记表的 fallback 库，让 openWorkspace 带着 migrateFrom* 打开。
-    const nativeBinding = resolve(here, '../../.native/better_sqlite3.node');
     const migrationRoot = join(root, 'migration');
     const fallbackDirectory = join(migrationRoot, 'fallback');
     const companionDirectory = join(migrationRoot, 'companion');
@@ -570,6 +594,7 @@ app.whenReady().then(async () => {
       indexRepositories: true,
       providerUsage: usage,
       forcedRestart: true,
+      timeoutIsUnconfirmed: true,
       workspaceDatabaseMigration: { first: migration, revisit: revisitMigration }
     }, null, 2)}\n`);
     await client.dispose();
