@@ -95,54 +95,71 @@ const violations = [];
 const clean = [];
 const remainingDebt = [];
 
-for (const fileName of readdirSync(TESTING_DIR)) {
-  if (!/^run.*Smoke\.ts$/.test(fileName)) continue;
-  const source = readFileSync(join(TESTING_DIR, fileName), 'utf8');
+/**
+ * 扫描目标。原先只扫 `packages/core/src/testing/run*Smoke.ts`——#36 复盘指出
+ * 「泄漏最多的 229 个目录来自 apps/desktop/e2e，不在扫描范围内」。这里把主进程侧
+ * 的 `*Smoke*.ts` 也纳入：漏扫的套件即使漏清理，也不会有人发现。
+ */
+const SCAN_TARGETS = Object.freeze([
+  { directory: TESTING_DIR, pattern: /^run.*Smoke\.ts$/, label: 'packages/core/src/testing' },
+  {
+    directory: join(repoRoot, 'apps', 'desktop', 'src', 'main'),
+    pattern: /Smoke\.ts$/,
+    label: 'apps/desktop/src/main'
+  }
+]);
 
-  // 经 harness 建的目录由 harness 自己 dispose；只有 smoke 自己调 mkdtemp 才需要
-  // 就地清理证据。两者都可能出现在同一文件（harness 建外层 + 自己再建一个），
-  // 所以判「有裸调用且无就地清理」，而不是「文件里有没有 harness 字样」。
-  const bareMkdtempCalls = countBareMkdtempCalls(source);
-  const hasInlineCleanup = INLINE_CLEANUP_MARKERS.some((marker) => source.includes(marker));
-  const leaksTempDir = bareMkdtempCalls > 0 && !hasInlineCleanup;
-  const leaksBackupDir = BACKUP_PRODUCING_APIS.some((api) => source.includes(`${api}(`))
-    && !BACKUP_DIR_MARKERS.some((marker) => source.includes(marker));
+for (const target of SCAN_TARGETS) {
+  for (const fileName of readdirSync(target.directory)) {
+    if (!target.pattern.test(fileName)) continue;
+    const relativeFile = `${target.label}/${fileName}`;
+    const source = readFileSync(join(target.directory, fileName), 'utf8');
 
-  if (!leaksTempDir && !leaksBackupDir) {
-    // clean 只统计「确实建了临时目录或走了写路径」的 smoke。经 harness 的算在内，
-    // 否则改造反而让 cleanSmokes 变小，看起来像覆盖退化。
-    const usesTempDir = bareMkdtempCalls > 0
-      || HARNESS_ENTRIES.some((entry) => source.includes(entry));
-    if (usesTempDir || BACKUP_PRODUCING_APIS.some((api) => source.includes(`${api}(`))) {
-      clean.push(fileName);
+    // 经 harness 建的目录由 harness 自己 dispose；只有 smoke 自己调 mkdtemp 才需要
+    // 就地清理证据。两者都可能出现在同一文件（harness 建外层 + 自己再建一个），
+    // 所以判「有裸调用且无就地清理」，而不是「文件里有没有 harness 字样」。
+    const bareMkdtempCalls = countBareMkdtempCalls(source);
+    const hasInlineCleanup = INLINE_CLEANUP_MARKERS.some((marker) => source.includes(marker));
+    const leaksTempDir = bareMkdtempCalls > 0 && !hasInlineCleanup;
+    const leaksBackupDir = BACKUP_PRODUCING_APIS.some((api) => source.includes(`${api}(`))
+      && !BACKUP_DIR_MARKERS.some((marker) => source.includes(marker));
+
+    if (!leaksTempDir && !leaksBackupDir) {
+      // clean 只统计「确实建了临时目录或走了写路径」的 smoke。经 harness 的算在内，
+      // 否则改造反而让 cleanSmokes 变小，看起来像覆盖退化。
+      const usesTempDir = bareMkdtempCalls > 0
+        || HARNESS_ENTRIES.some((entry) => source.includes(entry));
+      if (usesTempDir || BACKUP_PRODUCING_APIS.some((api) => source.includes(`${api}(`))) {
+        clean.push(relativeFile);
+      }
+      continue;
     }
-    continue;
-  }
-  if (KNOWN_DEBT.has(fileName)) {
-    remainingDebt.push(fileName);
-    continue;
-  }
-  if (leaksTempDir) {
-    violations.push({
-      file: `packages/core/src/testing/${fileName}`,
-      code: 'SMOKE_TEMP_DIR_LEAK',
-      message: `该 smoke 自己调了 ${bareMkdtempCalls} 处 mkdtemp( 但没有就地清理证据。`
-        + ' 请改用 packages/core/src/testing/harness/smokeWorkspace.ts 的 withSmokeWorkspace，'
-        + ' 或在 finally 中 rm(root, { recursive: true, force: true })。'
-        + (HARNESS_ENTRIES.some((entry) => source.includes(entry))
-          ? ' 注意：本文件已经在用 harness，但仍有裸 mkdtemp 调用——'
-            + 'harness 只清理它自己建的目录，另开的那个不在其中。'
-          : '')
-    });
-  }
-  if (leaksBackupDir) {
-    violations.push({
-      file: `packages/core/src/testing/${fileName}`,
-      code: 'SMOKE_BACKUP_DIR_LEAK',
-      message: '该 smoke 调用了会建还原点的写路径 API 但没传备份目录。'
-        + ' 不传时备份落系统临时目录且有意保留，无人清理。'
-        + ' 请传 backupBaseDir / backupRoot 指向本次临时工作区内的子目录。'
-    });
+    if (KNOWN_DEBT.has(relativeFile)) {
+      remainingDebt.push(relativeFile);
+      continue;
+    }
+    if (leaksTempDir) {
+      violations.push({
+        file: relativeFile,
+        code: 'SMOKE_TEMP_DIR_LEAK',
+        message: `该 smoke 自己调了 ${bareMkdtempCalls} 处 mkdtemp( 但没有就地清理证据。`
+          + ' 请改用 packages/core/src/testing/harness/smokeWorkspace.ts 的 withSmokeWorkspace，'
+          + ' 或在 finally 中 rm(root, { recursive: true, force: true })。'
+          + (HARNESS_ENTRIES.some((entry) => source.includes(entry))
+            ? ' 注意：本文件已经在用 harness，但仍有裸 mkdtemp 调用——'
+              + 'harness 只清理它自己建的目录，另开的那个不在其中。'
+            : '')
+      });
+    }
+    if (leaksBackupDir) {
+      violations.push({
+        file: relativeFile,
+        code: 'SMOKE_BACKUP_DIR_LEAK',
+        message: '该 smoke 调用了会建还原点的写路径 API 但没传备份目录。'
+          + ' 不传时备份落系统临时目录且有意保留，无人清理。'
+          + ' 请传 backupBaseDir / backupRoot 指向本次临时工作区内的子目录。'
+      });
+    }
   }
 }
 
