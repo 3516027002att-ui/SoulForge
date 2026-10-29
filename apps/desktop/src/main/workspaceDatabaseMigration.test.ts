@@ -58,10 +58,13 @@ function workspace(): string {
 }
 
 function cleanup(directory: string): void {
+  // Windows 上刚关闭的 SQLite 句柄可能还占着 -wal/-shm 一小会儿：先短重试，
+  // 仍失败就抛出来。吞掉会让每次运行都在系统临时目录里多一个残留（#36 的
+  // 典型成因），也让"测试自己清理干净"这条约束永远无法被证伪。
   try {
-    rmSync(directory, { recursive: true, force: true, maxRetries: 3 });
-  } catch {
-    // Windows 上偶尔会因句柄未释放而 EPERM；临时目录残留不影响断言结论。
+    rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+  } catch (error) {
+    throw new Error(`测试临时目录清理失败（不应残留）：${directory}：${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

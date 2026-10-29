@@ -1,5 +1,5 @@
 import { app } from 'electron';
-import { access, mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -205,7 +205,7 @@ app.whenReady().then(async () => {
         validatorRequirements: [{ validatorId: 'text_non_empty', scope: 'staged_output', required: true }],
         riskLevel: 'low'
       }]
-    }), { session, operationLog: client });
+    }), { session, operationLog: client, backupBaseDir: join(root, 'restore-points') });
     if (!committed.operation) throw new Error(`Journaled commit failed: ${JSON.stringify(committed.diagnostics)}`);
     const now = new Date().toISOString();
     await client.createTransaction({
@@ -598,9 +598,13 @@ app.whenReady().then(async () => {
       workspaceDatabaseMigration: { first: migration, revisit: revisitMigration }
     }, null, 2)}\n`);
     await client.dispose();
+    // 自己建的临时根自己清：每跑一次就在系统临时目录留一份 workspace.db、
+    // 迁移快照和 restore-points，正是 #36 记的泄漏形态（实测每轮 2 个目录）。
+    await removeSmokeRoot(root);
     app.exit(0);
   } catch (error) {
     await client.dispose();
+    await removeSmokeRoot(root);
     process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
     app.exit(1);
   }
@@ -608,6 +612,18 @@ app.whenReady().then(async () => {
   process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
   app.exit(1);
 });
+
+async function removeSmokeRoot(root: string): Promise<void> {
+  // 刚 dispose 的 utility 进程可能还没完全退出，仍持有 app.db-shm：短重试即可。
+  // 这里不能等太久——Electron 主进程要等清理返回才 exit，长等待会把 smoke 挂住；
+  // 确实删不掉的残留由下一次运行开头的清扫兜底（见 run-database-utility-smoke.mjs）。
+  try {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  } catch (error) {
+    // 清理失败只报告、不改判定：Electron 退出瞬间可能仍持有 profile 句柄。
+    process.stderr.write(`[SoulForge database utility smoke] 临时目录清理失败：${root}：${error instanceof Error ? error.message : String(error)}\n`);
+  }
+}
 
 function makeRecord(workspaceId: string, opId: string): OperationLogRecord {
   const now = new Date().toISOString();
