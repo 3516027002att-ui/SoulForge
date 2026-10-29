@@ -64,6 +64,11 @@ mission/
 # One-off local generation scratch files.
 scripts/_tmp_*
 scripts/_gen_*.py
+
+# WebGPU 探测脚本的生成物（打包产物 + 上次运行结果），由
+# `node scripts/probe-webgpu-detect.mjs` 重建。
+scripts/webgpu-probe/probe.bundle.js
+scripts/webgpu-probe/last-result.json
 packages/core/src/scene/_inventory_ext.ts.txt
 
 # Mis-compiled TypeScript output landing inside src/. Every package compiles with
