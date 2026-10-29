@@ -6,6 +6,7 @@ import type {
   RagChunk,
   ReferenceEdge
 } from '@soulforge/shared';
+import type { WorkspaceDatabaseMigrationOutcome } from './workspaceDatabaseMigration.js';
 import type {
   AuditEventRecord,
   RecoveryPointRecord,
@@ -77,6 +78,14 @@ export interface OpenWorkspaceDatabasePayload {
   legacyBackupDirectory: string;
   legacySemanticSnapshotPath: string;
   legacySemanticBackupDirectory: string;
+  /**
+   * 伴随库缺失时的一次性迁移来源（LocalAppData 下的 fallback `workspace.db`）。
+   * 只有主进程判定"目标缺失 + 源存在"时才传；迁移在 utility 进程里用
+   * `VACUUM INTO` 一致性快照完成（#40），主进程不做 SQLite 同步 I/O。
+   */
+  migrateFromDatabasePath?: string;
+  /** fallback 的 fingerprint-store.json；快照提交成功后才复制。 */
+  migrateFingerprintFromPath?: string;
 }
 
 export interface OperationLogUtilityPayloadMap {
@@ -178,6 +187,8 @@ export interface OperationLogUtilityResultMap {
   openAppDatabase: { appReady: true };
   openWorkspace: {
     workspaceId: string;
+    /** 本次打开是否顺带把 fallback 库迁移成了伴随库（含失败原因）。 */
+    migration?: WorkspaceDatabaseMigrationOutcome;
     legacyImport: {
       status: 'imported' | 'already_imported' | 'source_missing';
       recordCount: number;

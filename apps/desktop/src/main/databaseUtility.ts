@@ -21,7 +21,9 @@ import {
   type ProviderUsageSummary
 } from './operationLogUtilityProtocol.js';
 import { performance } from 'node:perf_hooks';
+import { dirname, join } from 'node:path';
 import { createQueueObservationWriter } from './databaseUtilityTelemetry.js';
+import { migrateWorkspaceDatabaseSnapshot } from './workspaceDatabaseMigration.js';
 
 let store: SqliteOperationLogStore | null = null;
 let appDatabase: SqliteDatabase | null = null;
@@ -314,6 +316,24 @@ async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
   let nextAppDatabase: SqliteDatabase | null = null;
   let next: SqliteOperationLogStore | null = null;
   try {
+    // fallback -> 伴随库的一次性迁移：在打开目标库之前用一致性快照完成。
+    // 失败不阻塞打开（目标仍然缺失，下次启动会重试），但必须把结构化原因
+    // 带回主进程，不能再像旧实现那样吞掉异常（#40）。
+    const migration = payload.migrateFromDatabasePath
+      ? migrateWorkspaceDatabaseSnapshot({
+          sourceDatabasePath: payload.migrateFromDatabasePath,
+          targetDatabasePath: payload.databasePath,
+          ...(payload.migrateFingerprintFromPath
+            ? {
+                fingerprintSourcePath: payload.migrateFingerprintFromPath,
+                fingerprintTargetPath: join(dirname(payload.databasePath), 'fingerprint-store.json')
+              }
+            : {}),
+          ...(process.env.SOULFORGE_SQLITE_NATIVE_BINDING
+            ? { nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING }
+            : {})
+        })
+      : undefined;
     nextAppDatabase = openAppDatabase(payload.appDatabasePath, {
       ...(process.env.SOULFORGE_SQLITE_NATIVE_BINDING
         ? { nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING }
@@ -349,6 +369,7 @@ async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
     workspaceGame = payload.game;
     return {
       workspaceId,
+      ...(migration ? { migration } : {}),
       legacyImport: {
         status: legacyImport.status,
         recordCount: legacyImport.recordCount,

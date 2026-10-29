@@ -854,7 +854,7 @@ async function ensureActiveOperationLog(session: WorkspaceSession): Promise<Oper
     }
 
     const storage = workspaceStoragePaths(workspaceId, session.layers.overlayRoot);
-    await operationLogUtility.openWorkspace({
+    const opened = await operationLogUtility.openWorkspace({
       appDatabasePath: join(app.getPath('userData'), 'app.db'),
       databasePath: join(storage.root, 'workspace.db'),
       workspaceId,
@@ -863,8 +863,19 @@ async function ensureActiveOperationLog(session: WorkspaceSession): Promise<Oper
       legacyOperationLogPath: legacyOperationLogPathForWorkspace(workspaceId),
       legacyBackupDirectory: join(storage.root, 'legacy-operation-logs'),
       legacySemanticSnapshotPath: join(session.layers.overlayRoot, 'semantic-snapshot.json'),
-      legacySemanticBackupDirectory: join(storage.root, 'legacy-semantic-snapshots')
+      legacySemanticBackupDirectory: join(storage.root, 'legacy-semantic-snapshots'),
+      ...(storage.migration ?? {})
     });
+    // 迁移失败不再是静默的：目标库仍缺失，下次启动会重试；这里写出结构化诊断。
+    if (opened?.migration?.status === 'failed') {
+      process.stderr.write(`[SoulForge workspace migration] ${JSON.stringify({
+        workspaceId,
+        code: opened.migration.code,
+        message: opened.migration.message,
+        target: join(storage.root, 'workspace.db'),
+        source: storage.migration?.migrateFromDatabasePath ?? null
+      })}\n`);
+    }
     assertCurrentSession();
 
     const cleanupPlan = await operationLogUtility.planRecoveryCleanup();

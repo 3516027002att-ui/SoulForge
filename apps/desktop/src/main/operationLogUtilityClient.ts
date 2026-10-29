@@ -142,12 +142,15 @@ export class OperationLogUtilityClient implements OperationLogStore {
     private readonly nativeBindingPath?: string
   ) {}
 
-  async openWorkspace(payload: OpenWorkspaceDatabasePayload): Promise<void> {
+  async openWorkspace(
+    payload: OpenWorkspaceDatabasePayload
+  ): Promise<OperationLogUtilityResultMap['openWorkspace'] | undefined> {
     if (this.opening) await this.opening;
-    if (this.process && sameWorkspace(this.activeWorkspace, payload)) return;
-    this.opening = this.openWorkspaceInternal(payload);
+    if (this.process && sameWorkspace(this.activeWorkspace, payload)) return undefined;
+    const opening = this.openWorkspaceInternal(payload);
+    this.opening = opening.then(() => undefined);
     try {
-      await this.opening;
+      return await opening;
     } finally {
       this.opening = null;
     }
@@ -463,12 +466,15 @@ export class OperationLogUtilityClient implements OperationLogStore {
     this.rejectAll(new Error('数据库后台进程已关闭。'));
   }
 
-  private async openWorkspaceInternal(payload: OpenWorkspaceDatabasePayload): Promise<void> {
+  private async openWorkspaceInternal(
+    payload: OpenWorkspaceDatabasePayload
+  ): Promise<OperationLogUtilityResultMap['openWorkspace'] | undefined> {
     if (!this.process) this.spawn();
     try {
-      await this.request('openWorkspace', payload);
+      const opened = await this.request('openWorkspace', payload);
       this.activeWorkspace = { ...payload };
       this.activeAppDatabasePath = payload.appDatabasePath;
+      return opened;
     } catch (error) {
       this.process?.kill();
       this.process = null;

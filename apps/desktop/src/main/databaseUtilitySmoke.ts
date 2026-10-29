@@ -495,6 +495,72 @@ app.whenReady().then(async () => {
       || (await client.listJobs()).length !== 1) {
       throw new Error('Database utility restart did not reopen durable state.');
     }
+
+    // #40：fallback -> 伴随库必须经 utility 进程的一致性快照完成（主进程不做
+    // SQLite 同步 I/O，也不能分文件复制 WAL 库）。这里跑真实 Electron 链：
+    // 造一个带标记表的 fallback 库，让 openWorkspace 带着 migrateFrom* 打开。
+    const nativeBinding = resolve(here, '../../.native/better_sqlite3.node');
+    const migrationRoot = join(root, 'migration');
+    const fallbackDirectory = join(migrationRoot, 'fallback');
+    const companionDirectory = join(migrationRoot, 'companion');
+    await mkdir(fallbackDirectory, { recursive: true });
+    await mkdir(companionDirectory, { recursive: true });
+    const fallbackDatabasePath = join(fallbackDirectory, 'workspace.db');
+    const companionDatabasePath = join(companionDirectory, 'workspace.db');
+    const fallbackDatabase = openWorkspaceDatabase(fallbackDatabasePath, { nativeBinding });
+    try {
+      fallbackDatabase.exec('CREATE TABLE migration_probe (value TEXT NOT NULL);');
+      fallbackDatabase.prepare('INSERT INTO migration_probe VALUES (?)').run('fallback-only-row');
+    } finally {
+      fallbackDatabase.close();
+    }
+    const migrationPayload = {
+      appDatabasePath: join(migrationRoot, 'app.db'),
+      databasePath: companionDatabasePath,
+      workspaceId: 'migration-workspace',
+      rootPath: overlayRoot,
+      game: 'sekiro',
+      legacyOperationLogPath: join(migrationRoot, 'legacy-missing.json'),
+      legacyBackupDirectory: join(migrationRoot, 'legacy-backups'),
+      legacySemanticSnapshotPath: join(migrationRoot, 'semantic-missing.json'),
+      legacySemanticBackupDirectory: join(migrationRoot, 'semantic-backups'),
+      migrateFromDatabasePath: fallbackDatabasePath,
+      migrateFingerprintFromPath: join(fallbackDirectory, 'fingerprint-store.json')
+    };
+    const migrationClient = new OperationLogUtilityClient(join(here, 'databaseUtility.js'), 30_000, nativeBinding);
+    let migration: unknown;
+    try {
+      const opened = await migrationClient.openWorkspace(migrationPayload);
+      migration = opened?.migration;
+      if (opened?.migration?.status !== 'migrated' || opened.migration.bytes <= 0) {
+        throw new Error(`Database utility did not migrate the fallback workspace database: ${JSON.stringify(opened?.migration)}`);
+      }
+      const migratedProbe = openWorkspaceDatabase(companionDatabasePath, {
+        readonly: true, fileMustExist: true, nativeBinding
+      });
+      try {
+        const probe = migratedProbe.prepare('SELECT value FROM migration_probe').get() as { value?: string } | undefined;
+        if (probe?.value !== 'fallback-only-row') {
+          throw new Error(`Migrated companion database lost fallback rows: ${JSON.stringify(probe)}`);
+        }
+      } finally {
+        migratedProbe.close();
+      }
+    } finally {
+      await migrationClient.dispose();
+    }
+    // 目标已在第二次打开时不再迁移：迁移是一次性的，已存在的伴随库绝不被覆盖。
+    const revisitClient = new OperationLogUtilityClient(join(here, 'databaseUtility.js'), 30_000, nativeBinding);
+    let revisitMigration: unknown;
+    try {
+      const reopened = await revisitClient.openWorkspace(migrationPayload);
+      revisitMigration = reopened?.migration;
+      if (reopened?.migration?.status !== 'skipped' || reopened.migration.reason !== 'target-exists') {
+        throw new Error(`Database utility re-ran a completed migration: ${JSON.stringify(reopened?.migration)}`);
+      }
+    } finally {
+      await revisitClient.dispose();
+    }
     process.stdout.write(`${JSON.stringify({
       ok: true,
       message: 'Electron utility process SQLite smoke passed',
@@ -503,7 +569,8 @@ app.whenReady().then(async () => {
       durableRepositories: true,
       indexRepositories: true,
       providerUsage: usage,
-      forcedRestart: true
+      forcedRestart: true,
+      workspaceDatabaseMigration: { first: migration, revisit: revisitMigration }
     }, null, 2)}\n`);
     await client.dispose();
     app.exit(0);
