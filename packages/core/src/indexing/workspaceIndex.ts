@@ -85,8 +85,16 @@ export interface SearchResourcesPage {
   hasMore: boolean;
   truncated: boolean;
   nextCursor?: string;
-  nextActions: Array<{ tool: 'search_resources'; args: { query: string; cursor: string }; reason: string }>;
+  /**
+   * 下一步动作。资源命中容器（BND）时除了续页，还要给出"列成员"入口：
+   * 容器级候选本身不是可读资源，成员清单才是。
+   */
+  nextActions: ResourceSearchNextAction[];
 }
+
+export type ResourceSearchNextAction =
+  | { tool: 'search_resources'; args: { query: string; cursor: string }; reason: string }
+  | { tool: 'list_container_entries'; args: { file: string }; reason: string };
 
 export interface SearchResult<T> {
   item: T;
@@ -1167,11 +1175,21 @@ export class WorkspaceIndex {
       sourceHash,
       offset: nextOffset
     }) : undefined;
-    const nextActions = nextCursor ? [{
+    const nextActions: ResourceSearchNextAction[] = nextCursor ? [{
       tool: 'search_resources' as const,
       args: { query: scope.query, cursor: nextCursor },
       reason: '继续读取后续资源搜索结果'
     }] : [];
+    // 容器级命中要能走到成员：否则模型看到 bnd 候选也没有下一步入口。
+    for (const match of items) {
+      if (nextActions.length >= 4) break;
+      if (!isBinderResource(match.item)) continue;
+      nextActions.push({
+        tool: 'list_container_entries',
+        args: { file: match.item.relativePath },
+        reason: '这是容器候选；先列出容器成员，再按成员读取具体条目'
+      });
+    }
     return {
       items,
       matches: items,
@@ -1188,8 +1206,7 @@ export class WorkspaceIndex {
     };
   }
 
-  private searchResourceResults(scope: ResourceSearchCursorScope): Array<SearchResult<IndexedFile>> {
-    const kinds = scope.kinds.length > 0 ? new Set<ResourceKind>(scope.kinds) : null;
+  private searchResourceResults(scope: ResourceSearchCursorScope): Array<SearchResult<IndexedFile>> {    const kinds = scope.kinds.length > 0 ? new Set<ResourceKind>(scope.kinds) : null;
     const results: Array<SearchResult<IndexedFile>> = [];
     for (const file of this.filesByUri.values()) {
       const active = isActiveSemanticSource(file);
@@ -2180,6 +2197,17 @@ function scoreResource(file: IndexedFile, text: string, query: string): number {
   if (normalizedRelativePath === normalizedQuery) return score + 10_000;
   if (normalizedName === normalizedQuery) return score + 9_000;
   return score;
+}
+
+/**
+ * 容器（BND/BND3/BND4/带 .dcx 的 binder）不能当可读资源直接打开，必须先进
+ * `list_container_entries` 拿成员清单。判定同时看索引格式分类和复合扩展名，
+ * 因为部分 DCX 包在索引里只标成 dcx。
+ */
+function isBinderResource(file: IndexedFile): boolean {
+  if (file.formatKind === 'bnd') return true;
+  const compound = (file.compoundExtension ?? '').toLowerCase();
+  return compound.includes('.bnd') || compound.includes('bnd.dcx');
 }
 
 function makeHighlights(text: string, profile: SearchQueryProfile): string[] {

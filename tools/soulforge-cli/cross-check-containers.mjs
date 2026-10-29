@@ -39,7 +39,7 @@ const BINDER_HINTS = [
 ];
 
 function parseArgs(argv) {
-  const options = { workspace: null, base: null, out: 'output/cross-check/containers', limit: null, filter: null, reference: true };
+  const options = { workspace: null, base: null, out: 'output/cross-check/containers', limit: null, filter: null, reference: true, hashes: false };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     const next = () => {
@@ -54,6 +54,7 @@ function parseArgs(argv) {
     else if (arg === '--limit') options.limit = Number.parseInt(next(), 10);
     else if (arg === '--filter') options.filter = next();
     else if (arg === '--no-reference') options.reference = false;
+    else if (arg === '--hashes') options.hashes = true;
     else if (arg === '--help' || arg === '-h') {
       process.stdout.write('见文件头注释。\n');
       process.exit(0);
@@ -157,7 +158,7 @@ async function main() {
   const rows = [];
   for (const filePath of binders) {
     const relPath = toRelative(workspace, filePath);
-    const soulforge = await listContainerEntries({ edit, file: filePath });
+    const soulforge = await listContainerEntries({ edit, file: filePath, includeContentHashes: options.hashes });
     if (!soulforge.ok) {
       rows.push({ relativePath: relPath, verdict: 'soulforge-error', error: soulforge.error });
       continue;
@@ -181,6 +182,8 @@ async function main() {
       problems.push({ kind: 'count', soulforge: soulforge.entries.length, reference: reference.entries.length });
     }
     const limit = Math.min(reference.entries.length, soulforge.entries.length);
+    let hashMatches = 0;
+    let hashMissing = 0;
     for (let index = 0; index < limit; index += 1) {
       const left = soulforge.entries[index];
       const right = reference.entries[index];
@@ -197,6 +200,14 @@ async function main() {
       if (tail !== left.name && !tail.endsWith(`/${left.name}`) && !tail.endsWith(left.name)) {
         problems.push({ kind: 'name', index, soulforge: left.name, referenceTail: tail });
       }
+      // 成员字节身份：Bridge 的 contentHash 必须是条目解压后内容的 SHA-256，
+      // 与参考 CLI 逐条相同才算"读到的成员就是这一个"。
+      if (options.hashes && typeof right.sha256 === 'string') {
+        if (left.contentHash === null) hashMissing += 1;
+        else if (left.contentHash !== right.sha256) {
+          problems.push({ kind: 'contentHash', index, soulforge: left.contentHash, reference: right.sha256 });
+        } else hashMatches += 1;
+      }
       if (problems.length >= 8) break;
     }
     rows.push({
@@ -210,6 +221,7 @@ async function main() {
         extensions: soulforge.extensions.slice(0, 8)
       },
       reference: { entryCount: reference.entries.length },
+      ...(options.hashes ? { hashMatches, hashMissing } : {}),
       ...(problems.length > 0 ? { problems } : {})
     });
   }
@@ -217,12 +229,15 @@ async function main() {
   const counts = {};
   for (const row of rows) counts[row.verdict] = (counts[row.verdict] ?? 0) + 1;
   const totalEntries = rows.reduce((sum, row) => sum + (row.soulforge?.entryCount ?? 0), 0);
+  const hashMatches = rows.reduce((sum, row) => sum + (row.hashMatches ?? 0), 0);
+  const hashMissing = rows.reduce((sum, row) => sum + (row.hashMissing ?? 0), 0);
   const summary = {
     generatedAt: new Date().toISOString(),
     workspace,
     base,
     containers: rows.length,
     members: totalEntries,
+    ...(options.hashes ? { hashMatches, hashMissing } : {}),
     verdicts: counts,
     mismatch: counts.mismatch ?? 0
   };
@@ -238,6 +253,7 @@ async function main() {
     `- 工作区：\`${workspace}\``,
     `- 容器数：${summary.containers}`,
     `- 成员总数：${summary.members}`,
+    ...(options.hashes ? [`- 成员 SHA-256：一致 ${hashMatches}，缺失 ${hashMissing}`] : []),
     `- 判定：${Object.entries(counts).map(([key, value]) => `${key}=${value}`).join('，') || '无'}`,
     '',
     '| 容器 | 判定 | SoulForge 成员 | 参考成员 |',

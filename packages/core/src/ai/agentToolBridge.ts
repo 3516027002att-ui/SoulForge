@@ -304,6 +304,9 @@ const DISCOVERY_DETAIL_KEYS = new Set([
   // and to detect staleness between a search and a later read; the reference
   // CLI reports the same two fields for every binder entry.
   'sha256', 'size',
+  // 条目级字节身份：`list_container_entries` 的 includeContentHashes 打开后
+  // 模型必须能看到结果，否则等于声明了开关却吞掉输出。
+  'contentHash', 'duplicateOrdinal',
   'sourceOffset', 'matchOffset', 'snippet', 'readAction',
   'file', 'model', 'score', 'vectorScore', 'reasons', 'highlights', 'fieldId',
   'fieldIds', 'value', 'valueType', 'description', 'nextCursor', 'cursor',

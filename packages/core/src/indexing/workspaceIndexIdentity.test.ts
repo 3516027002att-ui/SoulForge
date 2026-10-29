@@ -88,7 +88,10 @@ describe('WorkspaceIndex identity and resource search boundaries', () => {
     assert.equal(first.truncated, true);
     assert.ok(first.nextCursor);
     const firstCursor = first.nextCursor;
-    assert.equal(first.nextActions[0]?.args.cursor, firstCursor);
+    const [pagingAction] = first.nextActions;
+    assert.equal(pagingAction?.tool, 'search_resources');
+    assert.ok(pagingAction && 'cursor' in pagingAction.args);
+    assert.equal(pagingAction.args.cursor, firstCursor);
     assert.ok(first.items.every((item) => !item.item.relativePath.endsWith('.bak')));
 
     const second = index.searchResourcesPage({ query: '', limit: 2, cursor: firstCursor });
@@ -118,6 +121,28 @@ describe('WorkspaceIndex identity and resource search boundaries', () => {
     const artifacts = index.searchResourcesPage({ query: '', limit: 10, sourceFilter: 'artifacts' });
     assert.equal(artifacts.total, 1);
     assert.equal(artifacts.items[0]?.item.relativePath, 'event/a.emevd.dcx.bak');
+  });
+
+  it('resource search nudges container hits toward the member list', () => {
+    const index = new WorkspaceIndex('fixture-container');
+    const binder = file('file:///chr/c0000.anibnd.dcx', 'chr/c0000.anibnd.dcx', 'chr');
+    index.setFiles([
+      { ...binder, extension: '.dcx', compoundExtension: '.anibnd.dcx', formatKind: 'bnd', formatLabel: 'Animation BND DCX' },
+      file('file:///event/a.emevd.dcx', 'event/a.emevd.dcx', 'event')
+    ]);
+
+    const containerHits = index.searchResourcesPage({ query: 'anibnd', limit: 5 });
+    assert.equal(containerHits.matches.length, 1);
+    assert.deepEqual(containerHits.nextActions, [{
+      tool: 'list_container_entries',
+      args: { file: 'chr/c0000.anibnd.dcx' },
+      reason: '这是容器候选；先列出容器成员，再按成员读取具体条目'
+    }]);
+
+    // 非容器命中不得凭空多出列成员动作：那会让模型以为 emevd 也有成员清单。
+    const eventHits = index.searchResourcesPage({ query: 'a.emevd', limit: 5 });
+    assert.equal(eventHits.matches.length, 1);
+    assert.deepEqual(eventHits.nextActions, []);
   });
 
   it('semantic map search excludes backup projections while keeping them catalog-visible', () => {
