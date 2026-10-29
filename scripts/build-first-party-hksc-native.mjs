@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -75,6 +75,13 @@ async function main() {
   try {
     const responseFile = join(temp, 'cl.rsp');
     const commandFile = join(temp, 'build.cmd');
+    // cl 的 /Fo 必须带尾部分隔符才被当成目录；不指定时目标文件落在工作目录
+    // （这里就是仓库根），于是每次构建在根目录留下一批 .obj（#36）。
+    const objectDir = join(temp, 'obj');
+    await mkdir(objectDir, { recursive: true });
+    // cl 的 /Fo 目录形式要求尾部分隔符，且多个源文件只能写到目录。含空格的路径
+    // 必须在引号内把尾部反斜杠写成双写，否则引号会被反斜杠转义（D8036）。
+    const objectArg = /\s/.test(objectDir) ? `/Fo"${objectDir}\\\\"` : `/Fo${objectDir}${sep}`;
     const args = [
       '/nologo',
       '/LD',
@@ -84,6 +91,8 @@ async function main() {
       '/DLUA_CORE',
       `/I"${sourceRoot}"`,
       `/Fe:"${join(outputDir, 'SoulForge.Hksc.Native.dll')}"`,
+      objectArg,
+      `/Fd:"${join(temp, 'SoulForge.Hksc.Native.pdb')}"`,
       ...sourceFiles.map((file) => `"${join(sourceRoot, file)}"`)
     ];
     await writeFile(responseFile, `${args.join('\r\n')}\r\n`, 'ascii');
