@@ -23,6 +23,7 @@ import {
   createOpaqueCursor,
   parseOpaqueCursor,
   parseParamFieldRefs,
+  sanitizeCursorScope,
   decodeReferenceQueryInput
 } from '@soulforge/shared';
 import { basename, isAbsolute, join } from 'node:path';
@@ -1011,12 +1012,21 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
       const kinds = asResourceKinds(value.kinds);
+      // 声明的枚举必须真的校验：此前这里直接 `as` 强转，拼错的值（例如
+      // artifact）会被静默当成默认视图，模型拿到的是另一份结果却看不出区别。
+      const sourceFilter = asResourceSearchSourceFilter(value.sourceFilter);
+      if (value.sourceFilter !== undefined && sourceFilter === null) {
+        return fail(
+          'INVALID_INPUT',
+          `search_resources.sourceFilter 只接受 active|all|artifacts，收到 ${JSON.stringify(value.sourceFilter)}。`
+        );
+      }
       try {
         const { items: _items, ...page } = ws.searchResourcesPage({
           ...(typeof value.query === 'string' ? { query: value.query } : {}),
           ...(typeof value.limit === 'number' ? { limit: value.limit } : {}),
           ...(typeof value.cursor === 'string' ? { cursor: value.cursor } : {}),
-          ...(typeof value.sourceFilter === 'string' ? { sourceFilter: value.sourceFilter as 'active' | 'all' | 'artifacts' } : {}),
+          ...(sourceFilter ? { sourceFilter } : {}),
           ...(kinds ? { kinds } : {})
         });
         return ok(page);
@@ -2999,7 +3009,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
             error instanceof Error ? error.message : 'LuaBND 目录 cursor 无效。'
           );
         }
-        if (payload.domain !== 'script' || payload.scope !== catalogScope) {
+        if (payload.domain !== 'script'
+          || sanitizeCursorScope(payload.scope) !== sanitizeCursorScope(catalogScope)) {
           return fail('LUABND_CURSOR_SCOPE_MISMATCH', 'LuaBND 目录 cursor 与当前容器不匹配，请重新列出脚本。');
         }
         try {
@@ -4529,7 +4540,9 @@ function resolveStatelessCursorPage<T>(
   domain: 'emevd' | 'script',
   scope: string
 ): { items: T[]; offset: number; total: number; hasMore: boolean; nextCursor: string | null } {
-  if (payload.domain !== domain || payload.scope !== scope || payload.sourceHash !== currentSourceHash) {
+  if (payload.domain !== domain
+    || sanitizeCursorScope(payload.scope) !== sanitizeCursorScope(scope)
+    || payload.sourceHash !== currentSourceHash) {
     throw Object.assign(new Error('Source document changed since cursor was minted (STALE_READ_CURSOR). Please re-read from start.'), {
       code: 'STALE_READ_CURSOR'
     });
@@ -4551,6 +4564,16 @@ function resolveStatelessCursorPage<T>(
       })
     : null;
   return { items: pageItems, offset: payload.offset, total: items.length, hasMore, nextCursor };
+}
+
+/**
+ * `search_resources.sourceFilter` 的声明取值。返回 undefined 表示调用方没给，
+ * 返回 null 表示给了但不合法（调用方必须报错，不能当成默认视图）。
+ */
+function asResourceSearchSourceFilter(value: unknown): 'active' | 'all' | 'artifacts' | null | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (value === 'active' || value === 'all' || value === 'artifacts') return value;
+  return null;
 }
 
 function asResourceKinds(value: unknown): ResourceKind[] | undefined {
@@ -4912,5 +4935,9 @@ export const ENUM_FIELD_NORMALIZERS: Record<string, (value: string) => string> =
   // is the safe direction. assessEditRisk itself only branches on
   // 'unsupported' / 'failed' (writerContract.ts:273).
   'assess_edit_risk.parseStatus': (value) => value,
-  'assess_edit_risk.changeKind': (value) => (value === 'structured' || value === 'binary' ? value : 'text')
+  'assess_edit_risk.changeKind': (value) => (value === 'structured' || value === 'binary' ? value : 'text'),
+  // Handler 现在真的校验这三个值（其它值返回 INVALID_INPUT），所以未知值必须
+  // 归一到哨兵，才能把"接受"与"报错"区分开。
+  'search_resources.sourceFilter': (value) =>
+    (value === 'active' || value === 'all' || value === 'artifacts' ? value : '__unaccepted__')
 };

@@ -165,6 +165,43 @@ export function utf8CodepointPrefix(text: string, maxBytes: number): string {
 }
 
 /**
+ * Stable 64-bit FNV-1a digest kept dependency-free so this module stays usable
+ * from the renderer bundle, where `node:crypto` is unavailable.
+ */
+function cursorScopeDigest(value: string): string {
+  const prime = 0x100000001b3n;
+  const mask = 0xffffffffffffffffn;
+  let hash = 0xcbf29ce484222325n;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    hash = ((hash ^ BigInt(code & 0xff)) * prime) & mask;
+    hash = ((hash ^ BigInt(code >>> 8)) * prime) & mask;
+  }
+  return hash.toString(16).padStart(16, '0');
+}
+
+/**
+ * Replaces absolute filesystem locations inside a cursor scope with a stable
+ * digest. Opaque cursors reach the model and may reach the renderer, so they
+ * must not carry a real workspace path; the digest keeps the scope binding
+ * intact because it is deterministic for the same location.
+ *
+ * Callers that compare a decoded scope against a freshly computed one must run
+ * both sides through this function. It is idempotent, so cursors minted before
+ * this redaction keep working.
+ */
+export function sanitizeCursorScope(scope: string): string {
+  if (typeof scope !== 'string' || scope.length === 0) return scope;
+  return scope.replace(
+    // `file:///…` is a host path; a bare `X:\…` / `X:/…` is one too. The
+    // lookbehind keeps logical URIs such as `file://event/a.emevd` intact: the
+    // `e:` inside the `file:` scheme is preceded by a word character.
+    /file:\/\/\/[^\s"',}]+|(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s"',}]*/gu,
+    (match) => `sfpath:${cursorScopeDigest(match)}`
+  );
+}
+
+/**
  * Opaque cursor encoding and decoding.
  * The model receives a sealed token and must never manually construct native offsets.
  */
@@ -174,7 +211,7 @@ export function createOpaqueCursor(payload: CursorPayload): string {
     o: payload.offset,
     h: payload.sourceHash,
     d: payload.domain,
-    k: payload.scope
+    k: sanitizeCursorScope(payload.scope)
   });
   return `sf_cur_${Buffer.from(json, 'utf8').toString('base64url')}`;
 }

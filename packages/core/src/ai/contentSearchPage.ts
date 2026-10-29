@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
+import { createOpaqueCursor, parseOpaqueCursor, sanitizeCursorScope } from '@soulforge/shared';
 
 type SearchTool = 'search_param_rows' | 'search_text_entries';
 interface SearchScope {
@@ -30,8 +30,12 @@ export function contentSearchPage<T>(options: {
   const paramNames = Array.isArray(input.paramNames)
     ? input.paramNames.filter((value): value is string => typeof value === 'string').map((name) => name.trim()).filter(Boolean).sort()
     : [];
+  // Canonicalize the workspace identity once, before the snapshot hash is
+  // derived from it. The cursor carries the redacted form, so hashing the raw
+  // identity on page 1 and the redacted one on page 2 would report a false
+  // STALE_READ_CURSOR.
   let scope: SearchScope = {
-    workspaceId: options.workspaceId, tool: options.tool,
+    workspaceId: sanitizeCursorScope(options.workspaceId), tool: options.tool,
     query: typeof input.query === 'string' ? input.query : '',
     paramNames, limit: Math.min(6, requestedLimit)
   };
@@ -46,7 +50,13 @@ export function contentSearchPage<T>(options: {
     let parsed: SearchScope;
     try { parsed = JSON.parse(payload.scope) as SearchScope; }
     catch { invalid('搜索游标范围无效。'); }
-    if (!parsed || parsed.workspaceId !== options.workspaceId || parsed.tool !== options.tool
+    // The cursor stores a redacted workspace binding, so accept both the raw
+    // identity and its sanitized form; that keeps cursors minted before the
+    // redaction valid across processes.
+    if (!parsed
+      || (parsed.workspaceId !== options.workspaceId
+        && parsed.workspaceId !== sanitizeCursorScope(options.workspaceId))
+      || parsed.tool !== options.tool
       || typeof parsed.query !== 'string' || !Array.isArray(parsed.paramNames)
       || parsed.paramNames.some((name) => typeof name !== 'string')
       || !Number.isSafeInteger(parsed.limit) || parsed.limit < 1 || parsed.limit > 6) invalid('游标与当前工作区或搜索工具不匹配。');

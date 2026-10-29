@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
+import { createOpaqueCursor, parseOpaqueCursor, sanitizeCursorScope } from '@soulforge/shared';
 import type {
   EventArg,
   EventExport,
@@ -1083,8 +1083,11 @@ export class WorkspaceIndex {
     const requestedQuery = normalizeSearch(options.query ?? '');
     const requestedKinds = normalizeResourceSearchKinds(options.kinds);
     const requestedLimit = normalizeResourceSearchLimit(options.limit, true);
+    // Canonicalize the workspace identity before the page fingerprint is
+    // derived from it: the cursor carries the redacted form, so hashing the raw
+    // identity on page 1 and the redacted one on page 2 would report STALE.
     let scope: ResourceSearchCursorScope = {
-      workspaceId: this.workspaceId,
+      workspaceId: sanitizeCursorScope(this.workspaceId),
       query: requestedQuery,
       kinds: requestedKinds,
       limit: requestedLimit,
@@ -1117,7 +1120,10 @@ export class WorkspaceIndex {
           code: 'RESOURCE_SEARCH_CURSOR_SCOPE_MISMATCH'
         });
       }
-      if (!isResourceSearchCursorScope(parsed) || parsed.workspaceId !== this.workspaceId) {
+      // The cursor redacts absolute paths inside its scope; accept both forms.
+      const workspaceMatches = parsed.workspaceId === this.workspaceId
+        || parsed.workspaceId === sanitizeCursorScope(this.workspaceId);
+      if (!isResourceSearchCursorScope(parsed) || !workspaceMatches) {
         throw Object.assign(new Error('资源搜索 cursor 范围无效。'), {
           code: 'RESOURCE_SEARCH_CURSOR_SCOPE_MISMATCH'
         });

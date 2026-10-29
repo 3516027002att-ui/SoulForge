@@ -369,6 +369,23 @@ function listMatrixTools(registry: ScaffoldToolRegistry): ToolDefinition[] {
   }));
 }
 
+/**
+ * 读取一页候选。envelope 的契约是：数组结果放在 `data.items`；对象结果整份进
+ * `data.record`，由 `data.itemsKey` 指出 record 里哪个键是本页数组
+ * （`data.items` 此时恒为空）。直接读 `data.items` 会把对象形态的发现结果误判成
+ * 「没有候选」，所以两处都必须按 itemsKey 取。
+ */
+function envelopePageItems(envelope: Record<string, unknown>): unknown[] {
+  const data = envelope.data as
+    | { items?: unknown[]; itemsKey?: string | null; record?: Record<string, unknown> | null }
+    | undefined;
+  if (!data) return [];
+  if (Array.isArray(data.items) && data.items.length > 0) return data.items;
+  const key = data.itemsKey;
+  const page = key && data.record ? data.record[key] : undefined;
+  return Array.isArray(page) ? page : [];
+}
+
 function assertStableToolEnvelope(content: string, label: string, truncated: boolean): Record<string, unknown> {
   let parsed: Record<string, unknown>;
   try {
@@ -3216,7 +3233,7 @@ async function main(): Promise<void> {
     });
     if (!exactEvent.ok) throw new Error(`Case 54: exact event lookup must remain available: ${exactEvent.content}`);
     const exactEnvelope = assertStableToolEnvelope(exactEvent.content, 'Case 54 exact event result', false);
-    const exactItems = (exactEnvelope.data as { items?: unknown[] }).items ?? [];
+    const exactItems = envelopePageItems(exactEnvelope);
     if (!exactItems.some((item) => (item as { eventId?: number }).eventId === 1000)) {
       throw new Error(`Case 54: exact event lookup returned no event 1000: ${exactEvent.content}`);
     }
@@ -3229,7 +3246,7 @@ async function main(): Promise<void> {
       throw new Error(`Case 54: fuzzy event discovery must return candidates without a text gate: ${fuzzyEvent.content}`);
     }
     const fuzzyEnvelope = assertStableToolEnvelope(fuzzyEvent.content, 'Case 54 fuzzy event result', false);
-    const fuzzyItems = (fuzzyEnvelope.data as { items?: unknown[] }).items ?? [];
+    const fuzzyItems = envelopePageItems(fuzzyEnvelope);
     if (!fuzzyItems.some((item) => {
       const record = item as { eventId?: number; item?: { eventId?: number } };
       return record.eventId === 1000 || record.item?.eventId === 1000;
@@ -3445,17 +3462,27 @@ async function main(): Promise<void> {
     });
     if (!paramSearch.ok) throw new Error(`Case 54c: PARAM semantic search failed: ${paramSearch.content}`);
     const paramEnvelope = assertStableToolEnvelope(paramSearch.content, 'Case 54c PARAM search', false);
-    const paramData = paramEnvelope.data as { items?: unknown[] };
-    const paramItems = paramData.items as Array<{ item?: {
-      paramName?: string;
-      rowName?: string;
-      fields?: Array<{ fieldId?: string; description?: string }>;
-    } }>;
-    const paramRow = paramItems[0]?.item;
+    const paramData = paramEnvelope.data as { record?: Record<string, unknown> };
+    const paramMatches = Array.isArray(paramData.record?.matches) ? paramData.record.matches : [];
+    // PARAM 发现候选的字段是**有界预览**：`fieldPreview`（≤2 项）+ `fieldCount` +
+    // `fieldsComplete=false`，且有意不带 description（见
+    // agentToolBridgeParamProjection.test.ts 与执行手册 §fieldPreview）。
+    // 描述性语义标签只在 search_param_fields 的字段结果里出现，所以这里断言
+    // 预览字段身份到达模型，不断言被契约裁掉的 description。
+    const paramRow = (paramMatches[0] as {
+      item?: {
+        paramName?: string;
+        rowName?: string;
+        fieldCount?: number;
+        fieldsComplete?: boolean;
+        fieldPreview?: Array<{ fieldId?: string }>;
+      };
+    } | undefined)?.item;
     if (paramRow?.paramName !== 'NpcParam'
       || paramRow.rowName !== '鬼庭形部雅孝'
-      || paramRow.fields?.[0]?.fieldId !== 'hp'
-      || paramRow.fields?.[0]?.description !== '生命值') {
+      || paramRow.fieldPreview?.[0]?.fieldId !== 'hp'
+      || paramRow.fieldCount !== 1
+      || paramRow.fieldsComplete !== false) {
       throw new Error(`Case 54c: PARAM row semantic fields were not searchable/projected: ${paramSearch.content}`);
     }
     const filteredOut = await paramBridge.executeTool({
@@ -4211,7 +4238,7 @@ async function main(): Promise<void> {
         content: JSON.stringify({
           ok: true,
           state: 'completed',
-          data: { items: [], record: null, scalar: null, summary: null },
+          data: { items: [], itemsKey: null, record: null, scalar: null, summary: null },
           pagination: { originalChars: 20, returnedCount: 0, totalCount: 0, cursors: {} },
           truncated: false,
           identifiers: [],

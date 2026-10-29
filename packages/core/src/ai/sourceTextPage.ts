@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { createOpaqueCursor, parseOpaqueCursor, type NativeEditDomain } from '@soulforge/shared';
+import { createOpaqueCursor, parseOpaqueCursor, sanitizeCursorScope, type NativeEditDomain } from '@soulforge/shared';
 
 const DEFAULT_SOURCE_LIMIT = 2400;
 const MAX_SOURCE_LIMIT = 16000;
@@ -34,7 +34,10 @@ export function sourceTextPage(options: SourceTextPageOptions) {
     let scope: { sourceKey?: unknown; limit?: unknown };
     try { scope = JSON.parse(payload.scope) as typeof scope; }
     catch { invalid('正文游标范围无效。'); }
-    if (scope.sourceKey !== sourceKey || !Number.isSafeInteger(scope.limit)) {
+    // The cursor redacts absolute paths inside its scope; accept both forms.
+    const scopedSourceKey = typeof scope.sourceKey === 'string' ? scope.sourceKey : undefined;
+    if ((scopedSourceKey !== sourceKey && scopedSourceKey !== sanitizeCursorScope(sourceKey))
+      || !Number.isSafeInteger(scope.limit)) {
       invalid('游标与当前文件或子项不匹配。', 'SOURCE_CURSOR_SCOPE_MISMATCH');
     }
     if (options.sourceLimit !== undefined && options.sourceLimit !== scope.limit) {

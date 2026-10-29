@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
-import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
+import { createOpaqueCursor, parseOpaqueCursor, sanitizeCursorScope } from '@soulforge/shared';
 
 /** Expose a container only as a workspace-relative URI, never a host path. */
 export function paramContainerRecoveryUri(overlayRoot: string, containerPath: string): string | undefined {
@@ -60,7 +60,11 @@ export function paramReadWindow<T extends { table: string; fieldId: string }, D>
   let offset = 0;
   if (input.cursor) {
     const payload = parseOpaqueCursor(input.cursor);
-    if (payload.domain !== 'param' || (payload.scope !== queryScope && payload.scope !== input.legacyScope)) {
+    // Cursors redact absolute paths inside their scope, so compare through the
+    // idempotent sanitizer; the legacy scope may itself contain a host path.
+    const cursorScope = sanitizeCursorScope(payload.scope);
+    if (payload.domain !== 'param'
+      || (cursorScope !== queryScope && cursorScope !== sanitizeCursorScope(input.legacyScope))) {
       fail('PARAM_CURSOR_SCOPE_MISMATCH', 'PARAM 字段 cursor 与当前工作区、表、行或字段集合不匹配，请重新读取。');
     }
     if (payload.sourceHash !== input.sourceHash) fail('STALE_READ_CURSOR', 'PARAM 来源已改变，请重新读取。');

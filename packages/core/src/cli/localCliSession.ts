@@ -223,8 +223,11 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
         }
       };
     } catch (error) {
+      const cause = error as { message?: unknown; details?: unknown };
+      const reason = typeof cause?.message === 'string' ? cause.message : String(error);
+      const detail = cause?.details ? ` ${JSON.stringify(cause.details)}` : '';
       options.onFallbackWarning?.(
-        `CLI_SEMANTIC_CACHE_UNAVAILABLE: 语义缓存数据库不可用，将执行当前会话的原生分析：${error instanceof Error ? error.message : String(error)}`
+        `CLI_SEMANTIC_CACHE_UNAVAILABLE: 语义缓存数据库不可用，将执行当前会话的原生分析：${reason}${detail}`
       );
       try { semanticDatabase?.close(); } catch { /* ignore */ }
       semanticDatabase = null;
@@ -288,8 +291,13 @@ export async function openLocalCliSession(options: LocalCliSessionOptions): Prom
       throw new Error(`CLI_SQLITE_UNAVAILABLE: 本地审计数据库打不开，写入已失败关闭：${error instanceof Error ? error.message : String(error)}`);
     }
     durableLog = false;
+    // Swallowing the cause here costs hours: a schema that is newer than this
+    // build is indistinguishable from a locked or corrupt file without it.
+    const cause = error as { message?: unknown; details?: unknown };
+    const reason = typeof cause?.message === 'string' ? cause.message : String(error);
+    const detail = cause?.details ? ` ${JSON.stringify(cause.details)}` : '';
     (options.onFallbackWarning ?? (() => undefined))(
-      'CLI_SQLITE_FALLBACK: 本地审计数据库打不开，本次只读命令使用内存日志；写入命令将失败关闭。'
+      `CLI_SQLITE_FALLBACK: 本地审计数据库打不开，本次只读命令使用内存日志；写入命令将失败关闭。原因：${reason}${detail}`
     );
     operationLog = new MemoryOperationLogStore();
   }

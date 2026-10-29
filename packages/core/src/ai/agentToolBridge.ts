@@ -178,7 +178,7 @@ const BOUNDED_DISCOVERY_TOOLS = new Set([
 const SUMMARY_ARRAY_LIMIT = 16;
 const SUMMARY_STRING_LIMIT = 320;
 const RESULT_ENVELOPE_DESCRIPTION =
-  '返回固定结果 envelope：state、data、pagination、truncated、identifiers、evidence；pagination.truncated 仅表示逻辑结果有后页，pagination.deliveryTruncated 表示传输摘要省略了细节而非存在游标；按 nextActions/nextReadPlan 恢复细节。state=committed 表示事务已落盘，verification_failed 表示已落盘但原生复读失败，不能按普通失败重试；大型结果只在 data.summary 中摘要，不能按原始 typed response 解读。evidence 只表示确定性来源状态，不是模型置信度分数。evidence.claimDefaults 是各条 claims 共用的完整字段（identity 按属性合并），单条字段覆盖默认值；省略的 key/resourceKey 可由完整 identity 无损重建。';
+  '返回固定结果 envelope：state、data、pagination、truncated、identifiers、evidence；pagination.truncated 仅表示逻辑结果有后页，pagination.deliveryTruncated 表示传输摘要省略了细节而非存在游标；按 nextActions/nextReadPlan 恢复细节。state=committed 表示事务已落盘，verification_failed 表示已落盘但原生复读失败，不能按普通失败重试；大型结果只在 data.summary 中摘要，不能按原始 typed response 解读。evidence 只表示确定性来源状态，不是模型置信度分数。evidence.claimDefaults 是各条 claims 共用的完整字段（identity 按属性合并），单条字段覆盖默认值；省略的 key/resourceKey 可由完整 identity 无损重建。data.itemsKey 指出 record 中哪一个是本页数组（为空表示没有唯一页数组）；<数组>TotalCount 是该数组的逻辑总数，与本页已交付的 <数组>ReturnedCount 之差才是剩余量，不能用 <数组>TotalCount 与 record 内的 total 互相替代。';
 
 export type AgentEvidenceStatus = 'not_applicable' | 'candidate' | 'native-verified' | 'insufficient_evidence';
 export type AgentEvidenceKind = 'discovery' | 'rag' | 'native-read' | 'proposal' | 'validation' | 'mutation' | 'memory' | 'other';
@@ -206,6 +206,11 @@ export interface AgentToolResultEnvelope {
   state: AgentToolSuccessState;
   data: {
     items: unknown[];
+    /**
+     * Key of the single logical page array carried inside `record`. Without it a
+     * consumer has to guess which of `record`'s arrays is the page.
+     */
+    itemsKey: string | null;
     record: Record<string, unknown> | null;
     scalar: string | number | boolean | null;
     summary: string | null;
@@ -284,12 +289,19 @@ const DISCOVERY_PRIMARY_ARRAY_KEYS = new Set([
   'items', 'hits', 'matches', 'rows', 'entries', 'events', 'parts', 'entities',
   'results', 'topics', 'scripts'
 ]);
+// Arrays whose delivered length is a window over a larger logical set, so the
+// `<array>TotalCount` annotation must describe the set, not the window.
+const DISCOVERY_PAGE_ARRAY_KEYS = new Set([...DISCOVERY_PRIMARY_ARRAY_KEYS, 'fields']);
 const DISCOVERY_DETAIL_KEYS = new Set([
   'id', 'uri', 'sourceUri', 'sourcePath', 'relativePath', 'symbolUri', 'chunkId',
   'searchId',
   'family', 'title', 'body', 'excerpt', 'text', 'name', 'rowId', 'rowName',
   'paramName', 'textId', 'category', 'eventId', 'mapId', 'entityId', 'nativeOffset',
   'entryName', 'entryIndex',
+  // Byte identity is what a caller needs to prove a read really saw this file
+  // and to detect staleness between a search and a later read; the reference
+  // CLI reports the same two fields for every binder entry.
+  'sha256', 'size',
   'sourceOffset', 'matchOffset', 'snippet', 'readAction',
   'file', 'model', 'score', 'vectorScore', 'reasons', 'highlights', 'fieldId',
   'fieldIds', 'value', 'valueType', 'description', 'nextCursor', 'cursor',
@@ -763,6 +775,30 @@ function projectEntityResolutionForAgent(value: unknown, context?: ToolContext):
   return output;
 }
 
+/**
+ * The annotator names `<array>TotalCount`, and a consumer reasonably reads that
+ * as the logical result count. When the enclosing record exposes the real total
+ * for one of its page arrays, the annotation has to agree with it instead of
+ * reporting this page's length; otherwise `matchesTotalCount` says 2 while the
+ * record's own `total` says 12.
+ */
+function reconcileDiscoveryTotals(record: Record<string, unknown>, output: Record<string, unknown>): void {
+  for (const totalKey of ['total', 'totalCount', 'totalHits', 'instructionCount'] as const) {
+    const value = record[totalKey];
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) continue;
+    for (const key of DISCOVERY_PAGE_ARRAY_KEYS) {
+      const child = record[key];
+      if (!Array.isArray(child) || child.length >= value) continue;
+      // Only reconcile arrays this projection already annotated; never invent a
+      // count key for a shape the tool did not describe.
+      if (!(`${key}TotalCount` in output)) continue;
+      output[`${key}TotalCount`] = value;
+      output[`${key}Truncated`] = true;
+    }
+    return;
+  }
+}
+
 function summarizeDiscoveryValue(value: unknown, itemLimit = DISCOVERY_ITEM_LIMIT, depth = 0): unknown {
   if (depth > 4) return summarizeToolValue(value, depth);
   if (Array.isArray(value)) {
@@ -787,6 +823,7 @@ function summarizeDiscoveryValue(value: unknown, itemLimit = DISCOVERY_ITEM_LIMI
     if (!DISCOVERY_DETAIL_KEYS.has(key)) continue;
     output[key] = summarizeDiscoveryChild(child, depth + 1);
   }
+  reconcileDiscoveryTotals(record, output);
   return output;
 }
 
@@ -826,14 +863,19 @@ function compactDiscoveryScalar(value: unknown): unknown {
 
 function modelFacingRelativePath(value: unknown, context?: ToolContext): string | undefined {
   if (typeof value !== 'string' || value.trim() === '') return undefined;
-  const files = context?.workspaceIndex?.getFiles() ?? [];
+  // Projection must never throw: a context without a fully wired index (test
+  // doubles, partial hosts) degrades to the path-shape checks below instead of
+  // failing the whole tool call with a TypeError.
+  const index = context?.workspaceIndex as unknown as
+    { getFiles?: () => Array<{ sourceUri?: string; sourcePath?: string; relativePath?: string; absolutePath?: string }> } | undefined;
+  const files = typeof index?.getFiles === 'function' ? index.getFiles() : [];
   const match = files.find((file) => [
     file.sourceUri,
     file.sourcePath,
     file.relativePath,
     file.absolutePath
   ].includes(value));
-  if (match) return match.relativePath.replaceAll('\\', '/');
+  if (match?.relativePath) return match.relativePath.replaceAll('\\', '/');
   let candidate = value.trim().replaceAll('\\', '/');
   if (candidate.startsWith('file://')) candidate = candidate.slice('file://'.length).replace(/^\/+/, '');
   if (/^[A-Za-z]:(?:\/|$)/u.test(candidate)
@@ -884,6 +926,9 @@ function modelFacingSymbol(value: unknown, context?: ToolContext): Record<string
   }
   for (const key of [
     'resourceKind', 'extension', 'compoundExtension', 'formatKind', 'formatLabel',
+    // Byte identity: without it a caller cannot prove the read saw this exact
+    // file, and the reference CLI reports sha256/bytes for every entry.
+    'sha256', 'size',
     'paramName', 'entryName', 'entryIndex', 'rowId', 'rowIndex', 'rowName', 'dataHash',
     'eventId', 'name', 'mapId', 'entityId', 'internalEntryId', 'kind', 'model', 'modelIndex',
     'textId', 'category', 'language', 'animId', 'eventIndex', 'taeEntryIndex', 'taeEntryName',
@@ -991,6 +1036,7 @@ function projectDiscoveryForAgent(name: string, value: unknown, context?: ToolCo
       }
     }
   }
+  reconcileDiscoveryTotals(record, output);
   return Object.keys(output).length > 0 ? output : summarizeDiscoveryValue(value);
 }
 
@@ -1138,7 +1184,11 @@ function collectStableIdentifiers(value: unknown): { ids: string[]; cursors: Rec
     for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
       if (typeof child === 'string') {
         if (/cursor|nextPage|pageToken/i.test(key)) cursors[key] = child;
-        if (/^(?:id|.*Id|uri|sourceUri|opId|eventId|rowId|textId|tableId)$/i.test(key) && ids.length < 64) {
+        // Entries are `key=value` so a consumer splits on the first `=`; a value
+        // that itself contains `=` would make that split ambiguous. Those values
+        // (sealed cursors, tokens) belong in `cursors`, not in identifiers.
+        if (/^(?:id|.*Id|uri|sourceUri|opId|eventId|rowId|textId|tableId)$/i.test(key)
+          && ids.length < 64 && !child.includes('=')) {
           const candidate = `${key}=${child}`;
           const bytes = Buffer.byteLength(candidate, 'utf8');
           if (identifierBytes + bytes <= maxIdentifierBytes) {
@@ -1167,20 +1217,31 @@ function collectStableIdentifiers(value: unknown): { ids: string[]; cursors: Rec
   return { ids: [...new Set(ids)], cursors };
 }
 
+/**
+ * Names the page array a record carries when exactly one primary array is
+ * present. `data.items` stays empty for record-shaped results so the payload is
+ * never duplicated across the transport budget.
+ */
+function envelopeItemsKey(record: Record<string, unknown>): string | null {
+  const present = [...DISCOVERY_PRIMARY_ARRAY_KEYS].filter((key) => Array.isArray(record[key]));
+  return present.length === 1 ? present[0]! : null;
+}
+
 function normalizeEnvelopeData(
   value: unknown,
   summary: string | null
 ): AgentToolResultEnvelope['data'] {
   if (Array.isArray(value)) {
-    return { items: value, record: null, scalar: null, summary };
+    return { items: value, itemsKey: null, record: null, scalar: null, summary };
   }
   if (value !== null && typeof value === 'object') {
-    return { items: [], record: value as Record<string, unknown>, scalar: null, summary };
+    const record = value as Record<string, unknown>;
+    return { items: [], itemsKey: envelopeItemsKey(record), record, scalar: null, summary };
   }
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-    return { items: [], record: null, scalar: value, summary };
+    return { items: [], itemsKey: null, record: null, scalar: value, summary };
   }
-  return { items: [], record: null, scalar: null, summary };
+  return { items: [], itemsKey: null, record: null, scalar: null, summary };
 }
 
 function collectionCounts(value: unknown): { returnedCount: number | null; totalCount: number | null } {
@@ -1253,18 +1314,32 @@ function resultWindowMetadata(value: unknown): ResultWindowMetadata {
   const inferredTruncated = total !== null && offset !== null && returned !== null
     ? offset + returned < total
     : false;
+  // A returned continuation cursor is itself proof that more pages exist. A
+  // producer that only sets nextCursor (no truncated/hasMore, no total window)
+  // must not be reported as "no more pages" while handing the caller the very
+  // cursor needed to continue — that contradiction is what conformance Case 54
+  // pins down.
+  const nextCursor = typeof record.nextCursor === 'string' && record.nextCursor.length > 0
+    ? record.nextCursor
+    : typeof page?.nextCursor === 'string' && (page.nextCursor as string).length > 0
+      ? page.nextCursor as string
+      : null;
   return {
     total,
     offset,
     limit,
     returned,
-    truncated: typeof record.truncated === 'boolean'
-      ? record.truncated
+    truncated: record.truncated === true
+      ? true
       : record.hasMore === true
         ? true
-        : typeof page?.truncated === 'boolean'
-          ? page.truncated
-          : page?.hasMore === true || inferredTruncated
+        : nextCursor !== null
+          ? true
+          : typeof record.truncated === 'boolean'
+            ? record.truncated
+            : typeof page?.truncated === 'boolean'
+              ? page.truncated
+              : page?.hasMore === true || inferredTruncated
   };
 }
 
@@ -3188,9 +3263,7 @@ function boundedToolContent(
   }
   if (DISCOVERY_QUERY_TOOLS.has(name) && discoveryPrimaryArrayKey(data) !== undefined) {
     // The primary logical page has already been projected with all candidate
-    // identities retained. It may either fit as a successful page or fail
-    // closed; never fall through to summarizeDiscoveryValue, whose generic
-    // six-item cap would pair a shortened array with the producer's cursor.
+    // identities retained. Prefer delivering that complete page.
     const pageEnvelope = createResultEnvelope(
       data,
       rawLength,
@@ -3204,10 +3277,43 @@ function boundedToolContent(
     const encoded = JSON.stringify(pageEnvelope);
     if (Buffer.byteLength(encoded, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES
       && encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
+    const overflowDetails = buildDiscoveryWindowTooLargeDetails(name, originalData, input);
+    // Two different failure modes, told apart by whether the caller can act:
+    // when a smaller `limit` for THIS page is derivable, the page can be
+    // re-read losslessly, so fail closed and say how (no candidate may be
+    // silently dropped). When the producer exposes no page window at all, there
+    // is no narrower re-read to ask for, and an empty failure would hand the
+    // caller nothing — deliver the bounded prefix instead, marked truncated and
+    // labelled as a partial page of this page.
+    const retryLimit = (overflowDetails.retry as Record<string, unknown> | undefined)?.limit;
+    if (typeof retryLimit === 'number') {
+      return boundedFailureContent({
+        code: 'RESULT_DISCOVERY_WINDOW_TOO_LARGE',
+        message: '发现结果当前逻辑页在保留全部候选稳定身份后仍超过输出预算；请用原查询和当前 cursor 重读当前页，不能直接使用下一页 cursor 跳过未交付候选。',
+        details: overflowDetails
+      }, state === 'completed' ? 'failed' : state);
+    }
+    const partialPageText = '当前逻辑页整体超过输出预算：只交付本页前几个候选，并保留本页 cursor 与稳定 ID；'
+      + '本页其余候选未交付，请用同一查询和更小的 limit 重读本页，不能直接用下一页 cursor 跳过它们。';
+    for (const itemLimit of [DISCOVERY_ITEM_LIMIT, 4, 2]) {
+      const partialPage = createResultEnvelope(
+        summarizeDiscoveryValue(data, itemLimit),
+        rawLength,
+        true,
+        partialPageText,
+        compactIdentity,
+        evidence,
+        window,
+        state
+      );
+      const partialEncoded = JSON.stringify(partialPage);
+      if (Buffer.byteLength(partialEncoded, 'utf8') <= MAX_BOUNDED_TOOL_RESULT_BYTES
+        && partialEncoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return partialEncoded;
+    }
     return boundedFailureContent({
       code: 'RESULT_DISCOVERY_WINDOW_TOO_LARGE',
       message: '发现结果当前逻辑页在保留全部候选稳定身份后仍超过输出预算；请用原查询和当前 cursor 重读当前页，不能直接使用下一页 cursor 跳过未交付候选。',
-      details: buildDiscoveryWindowTooLargeDetails(name, originalData, input)
+      details: overflowDetails
     }, state === 'completed' ? 'failed' : state);
   }
   // Try progressively smaller candidate sets. A single native row/chunk can

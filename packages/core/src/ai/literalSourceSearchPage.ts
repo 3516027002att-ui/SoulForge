@@ -1,4 +1,4 @@
-import { createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
+import { createOpaqueCursor, parseOpaqueCursor, sanitizeCursorScope } from '@soulforge/shared';
 
 /** Exact, case-sensitive source search. Scans at most a page plus one lookahead; no full hit-list allocation. */
 export function literalSourceSearchPage(input: {
@@ -12,7 +12,8 @@ export function literalSourceSearchPage(input: {
   let start = 0;
   if (input.cursor) {
     const c = parseOpaqueCursor(input.cursor);
-    if (c.sessionId !== 'literal-source-v1' || c.domain !== 'script' || c.scope !== scope) fail('SOURCE_CURSOR_SCOPE_MISMATCH', '源码搜索游标不匹配来源或查询。');
+    if (c.sessionId !== 'literal-source-v1' || c.domain !== 'script'
+      || sanitizeCursorScope(c.scope) !== sanitizeCursorScope(scope)) fail('SOURCE_CURSOR_SCOPE_MISMATCH', '源码搜索游标不匹配来源或查询。');
     if (c.sourceHash !== input.sourceHash) fail('STALE_READ_CURSOR', '源码已变化，请重新搜索。');
     start = c.offset;
   }

@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 import { readFile, access } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { defaultReadSessionManager, createOpaqueCursor, parseOpaqueCursor } from '@soulforge/shared';
+import { defaultReadSessionManager, createOpaqueCursor, parseOpaqueCursor, sanitizeCursorScope } from '@soulforge/shared';
 import type { ActionAddress, Diagnostic, TaeEntryWire } from '@soulforge/shared';
 import { formatActionAddress, formatAnimCode, parseActionAddress } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
@@ -232,7 +232,8 @@ export async function readTaeEvents(input: {
       let cursor = input.cursor;
       if (cursor) {
         const payload = parseOpaqueCursor(cursor);
-        if (payload.domain !== 'tae' || payload.scope !== queryScope) {
+        if (payload.domain !== 'tae'
+          || sanitizeCursorScope(payload.scope) !== sanitizeCursorScope(queryScope)) {
           return {
             ok: false,
             error: { code: 'TAE_CURSOR_SCOPE_MISMATCH', message: 'TAE 分页 cursor 与当前文件或读取范围不匹配，请重新读取。' },
