@@ -77,6 +77,23 @@ export function classifyByConvention(name, command) {
   return 'unit';
 }
 
+/**
+ * 非测试验证入口的显式声明（#35）。
+ *
+ * `bridge:verify:*`、`release:manifest`、`probe:*` 这些入口不以 test:/verify: 开头，
+ * 命令也不跑测试文件，isSuiteScript 判不到；它们是否依赖真实原生运行时也无法从名字
+ * 推导（实测 `esd` 是原生、`esd-writer` 是模拟，而后缀相同的 `bnd4-writer` 又是原生）。
+ * 所以把判断写成数据。tier 目前与 tiers.mjs 对齐生成，尚未独立验证。
+ */
+export function loadSuiteTraits() {
+  try {
+    const parsed = JSON.parse(readFileSync(resolve(repoRoot, 'scripts', 'verify', 'suite-traits.json'), 'utf8'));
+    return parsed.entries ?? {};
+  } catch {
+    return {};
+  }
+}
+
 export function isSuiteScript(name, command) {
   if (!/^test:|^verify:/.test(name)) {
     return SUITE_TARGETS.some((pattern) => pattern.test(command));

@@ -32,6 +32,7 @@ import { EXCLUDED, TIER_BY_SCRIPT, TIER_ORDER } from './tiers.mjs';
 import {
   classifyByConvention,
   isSuiteScript,
+  loadSuiteTraits,
   loadTierExceptions,
   loadWorkspaceScripts,
   resolveCommand
@@ -45,13 +46,20 @@ const scripts = packageJson.scripts ?? {};
 /** 例外表：约定表达不了的工程判断（由 --write-exceptions 生成并合并）。 */
 const exceptions = loadTierExceptions();
 
+const suiteTraits = loadSuiteTraits();
 const workspaceScripts = loadWorkspaceScripts(root);
 
 const discovered = [];
 for (const [name, command] of Object.entries(scripts)) {
   if (typeof command !== 'string') continue;
   if (EXCLUDED[name]) continue;
-  if (!isSuiteScript(name, command)) continue;
+  if (!isSuiteScript(name, command)) {
+    // 非测试验证入口：只有显式声明过 trait 的才纳入自动发现，否则留在 scopeGap 里。
+    const trait = suiteTraits[name];
+    if (!trait) continue;
+    discovered.push({ name, tier: trait.tier, traitDeclared: true });
+    continue;
+  }
   const conventionTier = classifyByConvention(name, resolveCommand(command, workspaceScripts));
   const exception = exceptions[name];
   discovered.push({

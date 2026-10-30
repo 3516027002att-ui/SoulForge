@@ -8,7 +8,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { classifyScript, loadWorkspaces } from './verify/scriptGraph.mjs';
-import { EXCLUDED, TIER_BY_SCRIPT, TIER_ORDER } from './verify/tiers.mjs';
+import { EXCLUDED, TIER_ORDER } from './verify/tiers.mjs';
+import { TIER_BY_SCRIPT } from './verify/tier-plan.mjs';
 import { OUTCOME, runPlannedSuite } from './verify/runner.mjs';
 import { planScript, summarizePlan } from './verify/commandPlan.mjs';
 import { normalizeRequiredValidation, validateRequiredValidation } from './governance/requiredValidation.mjs';

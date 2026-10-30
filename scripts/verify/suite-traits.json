@@ -1,0 +1,231 @@
+{
+  "$comment": "验证入口的\"是否依赖真实原生运行时\"声明（#35）。这些入口不是测试套件，名字与命令都推不出层级；实测同一后缀分裂（esd=原生、esd-writer=模拟），所以把判断显式写下来。tier 由 2026-10-30 与 tiers.mjs 对齐生成，尚未独立验证——验证方式是分别在有/无真实 Bridge 的环境跑一遍。",
+  "generatedFrom": "scripts/verify/tiers.mjs",
+  "entries": {
+    "handoff:fingerprint": {
+      "requiresNative": false,
+      "tier": "governance",
+      "command": "node scripts/generate-handoff-fingerprint.mjs"
+    },
+    "typecheck": {
+      "requiresNative": false,
+      "tier": "unit",
+      "command": "tsc -b packages/shared packages/core apps/desktop --pretty false"
+    },
+    "test": {
+      "requiresNative": false,
+      "tier": "unit",
+      "command": "npm run test --workspaces --if-present && npm run test:desktop-security && npm run test:agent-native-proof-gate && npm run test:agent-tool-envelope && npm run t"
+    },
+    "agent:simulate:four": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "node scripts/run-real-agent-four-tasks.mjs"
+    },
+    "bridge:build": {
+      "requiresNative": false,
+      "tier": "synthetic",
+      "command": "node scripts/run-dotnet.mjs build bridge/SoulForge.Bridge/SoulForge.Bridge.csproj --nologo"
+    },
+    "bridge:verify:synthetic": {
+      "requiresNative": false,
+      "tier": "synthetic",
+      "command": "node scripts/verify-synthetic-core-fixtures.mjs"
+    },
+    "bridge:verify:source-hash-performance": {
+      "requiresNative": false,
+      "tier": "synthetic",
+      "command": "node scripts/verify-native-source-hash-performance.mjs"
+    },
+    "bridge:verify:client": {
+      "requiresNative": false,
+      "tier": "synthetic",
+      "command": "npm run test:bridge-daemon-client -w @soulforge/core"
+    },
+    "bridge:verify:crash": {
+      "requiresNative": false,
+      "tier": "synthetic",
+      "command": "npm run test:bridge-daemon-crash -w @soulforge/core"
+    },
+    "bridge:verify:daemon": {
+      "requiresNative": false,
+      "tier": "synthetic",
+      "command": "node scripts/verify-bridge-daemon.mjs"
+    },
+    "bridge:verify:mtd": {
+      "requiresNative": false,
+      "tier": "synthetic",
+      "command": "npm run test:native-mtd -w @soulforge/core"
+    },
+    "bridge:verify:mtd-writer": {
+      "requiresNative": false,
+      "tier": "synthetic",
+      "command": "npm run test:native-mtd-writer -w @soulforge/core"
+    },
+    "bridge:verify:esd-writer": {
+      "requiresNative": false,
+      "tier": "synthetic",
+      "command": "npm run test:native-esd-writer -w @soulforge/core"
+    },
+    "bridge:verify:tae-writer": {
+      "requiresNative": false,
+      "tier": "synthetic",
+      "command": "npm run test:native-tae-writer -w @soulforge/core"
+    },
+    "bridge:verify:fxr": {
+      "requiresNative": false,
+      "tier": "synthetic",
+      "command": "npm run test:native-fxr -w @soulforge/core"
+    },
+    "bridge:verify:fxr-writer": {
+      "requiresNative": false,
+      "tier": "synthetic",
+      "command": "npm run test:native-fxr-writer -w @soulforge/core"
+    },
+    "bridge:verify:bnd4-transaction": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-bnd4-transaction -w @soulforge/core"
+    },
+    "bridge:verify:bnd4-writer": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-bnd4-writer -w @soulforge/core"
+    },
+    "bridge:verify:dcx-documents": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "node scripts/verify-native-dcx-documents.mjs"
+    },
+    "bridge:verify:luabnd": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "node scripts/verify-native-luabnd.mjs"
+    },
+    "bridge:verify:emevd": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-emevd -w @soulforge/core"
+    },
+    "bridge:verify:esd": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-esd -w @soulforge/core"
+    },
+    "bridge:verify:flver": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-flver -w @soulforge/core"
+    },
+    "bridge:verify:flver-glb": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-flver-glb -w @soulforge/core"
+    },
+    "bridge:verify:flver-multi": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-flver-multi -w @soulforge/core"
+    },
+    "bridge:verify:tpf-multi": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-tpf-multi -w @soulforge/core"
+    },
+    "bridge:verify:collision-nav": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-collision-nav -w @soulforge/core"
+    },
+    "bridge:verify:flver-mesh": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-flver-mesh -w @soulforge/core"
+    },
+    "bridge:verify:fmg": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-fmg -w @soulforge/core"
+    },
+    "bridge:verify:msb": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-msb -w @soulforge/core"
+    },
+    "bridge:verify:msb-all": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-msb-all -w @soulforge/core"
+    },
+    "bridge:verify:msb-writer": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-msb-writer -w @soulforge/core"
+    },
+    "bridge:verify:oodle": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "node scripts/verify-oodle-runtime.mjs"
+    },
+    "bridge:verify:param": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-param -w @soulforge/core"
+    },
+    "bridge:verify:gparam": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-gparam -w @soulforge/core"
+    },
+    "bridge:verify:gparam-writer": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-gparam-writer -w @soulforge/core"
+    },
+    "bridge:verify:tpf-writer": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-tpf-writer -w @soulforge/core"
+    },
+    "bridge:verify:flver-writer": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-flver-writer -w @soulforge/core"
+    },
+    "bridge:verify:tae": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-tae -w @soulforge/core"
+    },
+    "bridge:verify:tpf": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-tpf -w @soulforge/core"
+    },
+    "bridge:verify:character-preview": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run test:native-character-preview -w @soulforge/core"
+    },
+    "probe:behavior-headers": {
+      "requiresNative": true,
+      "tier": "native",
+      "command": "npm run probe:behavior-headers -w @soulforge/core"
+    },
+    "build": {
+      "requiresNative": false,
+      "tier": "release",
+      "command": "npm run build -w @soulforge/shared && npm run build -w @soulforge/core && npm run build -w @soulforge/desktop && node scripts/generate-agent-production-build-ma"
+    },
+    "release:manifest": {
+      "requiresNative": false,
+      "tier": "release",
+      "command": "node scripts/generate-release-compliance-manifest.mjs"
+    },
+    "release:installer:manifest": {
+      "requiresNative": false,
+      "tier": "release",
+      "command": "npm run release:installer:manifest -w @soulforge/desktop"
+    }
+  }
+}
