@@ -77,7 +77,12 @@ export async function withDesktopTestBuild(kind, execute, options = {}) {
       const result = await runProcess({ command, args, cwd: repositoryRoot, env:buildEnv, owner: workspace,
         timeoutMs: readTimeoutMs('SOULFORGE_BUILD_TIMEOUT_MS', 20 * 60 * 1000), signal: cancellation.signal,
         onStdout: chunk => process.stdout.write(chunk), onStderr: chunk => process.stderr.write(chunk) });
-      if (!processSucceeded(result)) throw new Error(`Desktop smoke build failed: ${result.terminationReason ?? result.code}`);
+      if (!processSucceeded(result)) {
+        // 诊断：构建失败时把 stderr 尾部带进异常。否则真正的编译/准备错误在抛错前就丢了，
+        // 而 check 只保留套件级 tail（定位 me3 偶发失败时看不到 prepare 的真实输出）。
+        const detail = (result.stderr ?? '').trim().split(/\r?\n/u).filter(Boolean).slice(-20).join('\n');
+        throw new Error(`Desktop smoke build failed: ${result.terminationReason ?? result.code}${detail ? `\n${detail}` : ''}`);
+      }
     }
     if (nativeInput) {
       const testedHash = createHash('sha256').update(await readFile(env.SOULFORGE_SQLITE_NATIVE_BINDING)).digest('hex');
