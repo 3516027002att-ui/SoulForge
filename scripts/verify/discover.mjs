@@ -74,6 +74,21 @@ const tierMismatch = discovered
 const excludedButLooksLikeSuite = Object.keys(EXCLUDED)
   .filter((name) => name in scripts && isSuiteScript(name, String(scripts[name])) && name.startsWith('test:'));
 
+/**
+ * 登记表里有、但自动发现覆盖不到的条目（#35 剩余缺口）。
+ *
+ * 这些不是"漏登记"，而是"约定的判据范围不含它们"：`probe:*`、`bridge:verify:*`、
+ * `release:manifest` 这类非测试验证入口既不以 test:/verify: 开头，命令也不跑测试文件，
+ * 所以 isSuiteScript 判不到。要删登记表，必须先决定这批入口怎么按约定表达。
+ */
+const scopeGap = registered
+  .filter((entry) => !discoveredNames.has(entry.name) && entry.name in scripts)
+  .map((entry) => ({
+    name: entry.name,
+    tier: entry.tier,
+    command: String(scripts[entry.name]).slice(0, 120)
+  }));
+
 const exceptionNames = new Set(Object.keys(exceptions));
 const staleExceptions = [...exceptionNames].filter(
   (name) => !(name in scripts) || tierMismatch.every((entry) => entry.name !== name)
@@ -118,6 +133,7 @@ const report = {
   discoveredOnly: unregistered.map((entry) => ({ name: entry.name, conventionTier: entry.tier })),
   tierMismatch,
   excludedButLooksLikeSuite,
+  scopeGap,
   exceptionsApplied: Object.keys(exceptions).length,
   staleExceptions,
   summary: {
@@ -125,6 +141,7 @@ const report = {
     discoveredOnly: unregistered.length,
     tierMismatch: tierMismatch.length,
     excludedButLooksLikeSuite: excludedButLooksLikeSuite.length,
+    scopeGap: scopeGap.length,
     exceptionsApplied: Object.keys(exceptions).length,
     staleExceptions: staleExceptions.length
   },
@@ -147,6 +164,12 @@ process.stdout.write([
 
 if (unregistered.length > 0) {
   process.stdout.write(`发现但未登记（前 20）：\n${unregistered.slice(0, 20).map((entry) => `  ${entry.name} -> ${entry.tier}`).join('\n')}\n`);
+}
+if (scopeGap.length > 0) {
+  process.stdout.write(`登记表有、自动发现覆盖不到（前 12）：\n${scopeGap
+    .slice(0, 12)
+    .map((entry) => `  [${entry.tier}] ${entry.name}`)
+    .join('\n')}\n`);
 }
 if (tierMismatch.length > 0) {
   process.stdout.write(`层级不一致（前 20）：\n${tierMismatch.slice(0, 20).map((entry) => `  ${entry.name}: 约定=${entry.conventionTier} 登记=${entry.registeredTier}`).join('\n')}\n`);
