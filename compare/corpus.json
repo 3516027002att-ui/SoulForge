@@ -7,12 +7,30 @@
       "operation": "read-text",
       "reference": "soulsformats",
       "inputs": [
-        "msg/zhocn/item.msgbnd.dcx",
-        "msg/zhocn/menu.msgbnd.dcx",
-        "msg/engus/item.msgbnd.dcx",
-        "msg/engus/menu.msgbnd.dcx",
-        "msg/jpnjp/item.msgbnd.dcx",
-        "msg/jpnjp/menu.msgbnd.dcx"
+        {
+          "path": "msg/zhocn/item.msgbnd.dcx",
+          "sha256": "b78daea27ffc16e071728efc763a3816f195ed42147a61b28a9fb898544a146f"
+        },
+        {
+          "path": "msg/zhocn/menu.msgbnd.dcx",
+          "sha256": "2d6e4e13c9b68c9020e026571e0133f49a1985197bdffbf4c30b9bb05eb3a156"
+        },
+        {
+          "path": "msg/engus/item.msgbnd.dcx",
+          "sha256": "7ccc57f94c98c0f62c7ccb58bf7855e5ea9f237a52b48051e0e00a7225029664"
+        },
+        {
+          "path": "msg/engus/menu.msgbnd.dcx",
+          "sha256": "d245a09e0044c58e456888ba39a7e9071c0118ee5d914a64aecf3fcc75620133"
+        },
+        {
+          "path": "msg/jpnjp/item.msgbnd.dcx",
+          "sha256": "18be2d5c6153625a1582e7e675a4486bb42f4849594910bc5d9e3467d53938fb"
+        },
+        {
+          "path": "msg/jpnjp/menu.msgbnd.dcx",
+          "sha256": "1d9a5d51141f13be62136b731b6b5b40e9006292a2a33c586b7d289e6a28c0f2"
+        }
       ]
     },
     {
@@ -21,7 +39,10 @@
       "operation": "write-roundtrip",
       "reference": "soulsformats",
       "inputs": [
-        "msg/jpnjp/item.msgbnd.dcx"
+        {
+          "path": "msg/jpnjp/item.msgbnd.dcx",
+          "sha256": "18be2d5c6153625a1582e7e675a4486bb42f4849594910bc5d9e3467d53938fb"
+        }
       ]
     },
     {
@@ -30,8 +51,14 @@
       "operation": "read-animations",
       "reference": "soulsformats-next",
       "inputs": [
-        "chr/c0000.anibnd.dcx",
-        "chr/c1000.anibnd.dcx"
+        {
+          "path": "chr/c0000.anibnd.dcx",
+          "sha256": "43fcbbec0f22a26317edfd41a3197abbf0da60f1e7699c9006dd02dc20eb3d27"
+        },
+        {
+          "path": "chr/c1000.anibnd.dcx",
+          "sha256": "61364d1c2f73f8f4ccb0280cf9ba0d6f5f0608231917af75a6a684533c26fd11"
+        }
       ]
     },
     {
@@ -40,7 +67,10 @@
       "operation": "write-roundtrip",
       "reference": "soulsformats-next",
       "inputs": [
-        "chr/c0000.anibnd.dcx"
+        {
+          "path": "chr/c0000.anibnd.dcx",
+          "sha256": "43fcbbec0f22a26317edfd41a3197abbf0da60f1e7699c9006dd02dc20eb3d27"
+        }
       ]
     },
     {
@@ -49,9 +79,18 @@
       "operation": "read-events",
       "reference": "soulsformats",
       "inputs": [
-        "event/m13_00_00_00.emevd.dcx",
-        "event/common.emevd.dcx",
-        "mods/event/common.emevd.dcx"
+        {
+          "path": "event/m13_00_00_00.emevd.dcx",
+          "sha256": "311aee0112e17873dad711b5f36f51eaa3281ba3d5defa0cdc1f5b7308fa276f"
+        },
+        {
+          "path": "event/common.emevd.dcx",
+          "sha256": "7a8a238c986f67e3252381bfd56e8b092cdf3b1a56aaf213eb262b182ebf1537"
+        },
+        {
+          "path": "mods/event/common.emevd.dcx",
+          "sha256": "3a3a0a40f77b558349983e69d30250d9cd900ba70190d32e5e8d4aadabdb4a04"
+        }
       ]
     },
     {
@@ -60,8 +99,14 @@
       "operation": "read-map",
       "reference": "soulsformats-next",
       "inputs": [
-        "map/mapstudio/m13_00_00_00.msb.dcx",
-        "mods/map/mapstudio/m13_00_00_00.msb.dcx"
+        {
+          "path": "map/mapstudio/m13_00_00_00.msb.dcx",
+          "sha256": "0034d13fffb90018c54483ee73374266c380f3e1022d94b45999839f015e5375"
+        },
+        {
+          "path": "mods/map/mapstudio/m13_00_00_00.msb.dcx",
+          "sha256": "56304e9c1089b64336fecbbd63f84834c12aa0e87d33f258655e5097482ab62a"
+        }
       ]
     },
     {
@@ -70,8 +115,14 @@
       "operation": "read-rows",
       "reference": "soulsformats",
       "inputs": [
-        "mods/param/gameparam/gameparam.parambnd.dcx",
-        "param/gameparam/gameparam.parambnd.dcx"
+        {
+          "path": "mods/param/gameparam/gameparam.parambnd.dcx",
+          "sha256": "fdd333bd2497ed1749ca0501db43fd67bf5b354d4faa039c38f59a2394d42998"
+        },
+        {
+          "path": "param/gameparam/gameparam.parambnd.dcx",
+          "sha256": "a41a78778a361bcf8d52db9adb6f55eb205193a32916eb0a44d57c6f01b06ce6"
+        }
       ]
     }
   ]
