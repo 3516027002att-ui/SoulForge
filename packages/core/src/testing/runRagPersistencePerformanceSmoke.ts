@@ -16,6 +16,23 @@ import { collectIndexedCandidates, ensureLookupIndex } from '../rag/lookupIndex.
 import { diffRagCorpusBySource, loadRagCorpus, persistRagCorpus } from '../rag/persist.js';
 import { openMigratedDatabase, openWorkspaceDatabase } from '../storage/sqliteDatabase.js';
 import { SQLITE_MIGRATIONS } from '../storage/sqliteSchema.js';
+
+/**
+ * "上一个版本"的迁移集合：**排除** FTS rowid 映射那条，用来构造待升级的旧库。
+ *
+ * 早先用 `LEGACY_BEFORE_FTS_ROWID` 表示"除最后一条"，语义绑在"最后一条恰好是
+ * FTS rowid 迁移"上。实测：在 schema 末尾追加一条不相关迁移（#41 的删表迁移）后，
+ * 旧库已经包含 FTS 迁移，这些断言全变成了空转，然后报"迁移没有失败关闭"。
+ * 所以按名字定位，追加新迁移不再改变这里的语义。
+ */
+const FTS_ROWID_MIGRATION = 'v0_9_rag_fts_rowid_mapping';
+const FTS_ROWID_INDEX = SQLITE_MIGRATIONS.findIndex(
+  (migration) => migration.name === FTS_ROWID_MIGRATION
+);
+if (FTS_ROWID_INDEX < 0) {
+  throw new Error(`迁移表里找不到 ${FTS_ROWID_MIGRATION}；本 smoke 的旧库构造依赖它。`);
+}
+const LEGACY_BEFORE_FTS_ROWID = SQLITE_MIGRATIONS.slice(0, FTS_ROWID_INDEX);
 import {
   isRagChunkDeltaStats,
   WorkspaceDataRepository,
@@ -638,7 +655,7 @@ function assertFtsRowidMigration(workspaceRoot: string): void {
   const workspaceId = 'rag-persistence-legacy-rowid';
   const chunk = makeChunk(1);
   let legacyMainRowId = 0;
-  const legacy = openMigratedDatabase(databasePath, SQLITE_MIGRATIONS.slice(0, -1));
+  const legacy = openMigratedDatabase(databasePath, LEGACY_BEFORE_FTS_ROWID);
   try {
     const now = new Date().toISOString();
     legacy.prepare(`
@@ -677,7 +694,7 @@ function assertFtsRowidMigration(workspaceRoot: string): void {
   // pre-existing temporary table makes migration 15 fail before it can drop
   // either authoritative virtual table; the next legacy open proves the
   // migration ledger and historical rowids are still intact.
-  const rollbackSetup = openMigratedDatabase(databasePath, SQLITE_MIGRATIONS.slice(0, -1));
+  const rollbackSetup = openMigratedDatabase(databasePath, LEGACY_BEFORE_FTS_ROWID);
   rollbackSetup.exec(`
     CREATE TABLE rag_chunks_fts_rowid_v15 (rowid INTEGER, chunk_id TEXT);
   `);
@@ -690,7 +707,7 @@ function assertFtsRowidMigration(workspaceRoot: string): void {
     migrationFailed = true;
   }
   if (!migrationFailed) throw new Error('FTS rowid migration did not fail closed on a conflicting temp table.');
-  const rolledBack = openMigratedDatabase(databasePath, SQLITE_MIGRATIONS.slice(0, -1));
+  const rolledBack = openMigratedDatabase(databasePath, LEGACY_BEFORE_FTS_ROWID);
   try {
     const rolledBackIndexes = rolledBack.prepare("PRAGMA index_list('rag_chunks')").all() as Array<{ name?: unknown }>;
     if (rolledBackIndexes.some((index) => index.name === 'idx_rag_chunks_workspace_chunk')) {
@@ -712,7 +729,7 @@ function assertFtsRowidMigration(workspaceRoot: string): void {
   // Also fail after the first virtual table has been rebuilt.  This proves
   // that a later trigram-stage error rolls back the earlier Unicode rename,
   // the lookup index, and the migration ledger as one transaction.
-  const secondStageSetup = openMigratedDatabase(databasePath, SQLITE_MIGRATIONS.slice(0, -1));
+  const secondStageSetup = openMigratedDatabase(databasePath, LEGACY_BEFORE_FTS_ROWID);
   secondStageSetup.exec(`
     CREATE TABLE rag_chunks_fts_trigram_rowid_v15 (rowid INTEGER, chunk_id TEXT);
   `);
@@ -727,7 +744,7 @@ function assertFtsRowidMigration(workspaceRoot: string): void {
   if (!secondStageMigrationFailed) {
     throw new Error('FTS rowid migration did not fail closed at the trigram stage.');
   }
-  const secondStageRolledBack = openMigratedDatabase(databasePath, SQLITE_MIGRATIONS.slice(0, -1));
+  const secondStageRolledBack = openMigratedDatabase(databasePath, LEGACY_BEFORE_FTS_ROWID);
   try {
     const secondStageIndexes = secondStageRolledBack.prepare("PRAGMA index_list('rag_chunks')")
       .all() as Array<{ name?: unknown }>;
