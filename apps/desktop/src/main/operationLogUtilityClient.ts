@@ -56,6 +56,9 @@ interface LateRequest {
   dispatchedAt: number;
   depth: number;
   expiresAt: number;
+  /** 迟到响应回来后的真实结局：超时只说明没收到回执，这个字段才是答案（#42）。 */
+  outcome?: 'ok' | 'request-failed';
+  errorCode?: string;
 }
 
 interface QueuedRequest {
@@ -438,6 +441,24 @@ export class OperationLogUtilityClient implements OperationLogStore {
     };
   }
 
+  /**
+   * 按操作 ID 查超时请求的真实结局（#42）。
+   *
+   * `pending`：请求超时了、worker 还没回；`completed`：迟到响应已回来，看 outcome；
+   * `unknown`：没有这条记录（从未超时或已被淘汰）——它不能当作"没执行"。
+   */
+  async queryRequest(requestId: string): Promise<{
+    state: 'pending' | 'completed' | 'unknown';
+    outcome: 'ok' | 'request-failed' | null;
+    method: string | null;
+  }> {
+    const late = this.lateRequests.get(requestId);
+    if (!late) return { state: 'unknown', outcome: null, method: null };
+    return late.outcome
+      ? { state: 'completed', outcome: late.outcome, method: late.method }
+      : { state: 'pending', outcome: null, method: late.method };
+  }
+
   async health(): Promise<{ ready: boolean; appReady: boolean; workspaceId?: string }> {
     return this.request('health', {});
   }
@@ -792,7 +813,16 @@ export class OperationLogUtilityClient implements OperationLogStore {
         if (isDispatchedRequest) this.drainDispatchQueue();
         return;
       }
+      late.outcome = message.ok ? 'ok' : 'request-failed';
+      if (!message.ok) late.errorCode = message.error?.code ?? 'DATABASE_UTILITY_FAILED';
+      // 重新插到尾部并限制长度：保留结局供 queryRequest 查询。
       this.lateRequests.delete(message.requestId);
+      this.lateRequests.set(message.requestId, late);
+      while (this.lateRequests.size > 256) {
+        const oldest = this.lateRequests.keys().next().value;
+        if (oldest === undefined) break;
+        this.lateRequests.delete(oldest);
+      }
       writeUtilityTrace({
         side: 'client',
         event: 'late-completion',
