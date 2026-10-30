@@ -3390,8 +3390,12 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var childSelector = options.TryGetProperty("childPath", out var childPathEl) ? childPathEl.GetString() : null;
-                var entryIndex = options.TryGetProperty("entryIndex", out var idxEl) && idxEl.ValueKind == JsonValueKind.Number ? idxEl.GetInt32().ToString() : null;
+                // options 的默认值是 default(JsonElement)（ValueKind=Undefined），对它裸调
+                // TryGetProperty 会抛 InvalidOperationException：调用方不传 commandOptions 时
+                // read-luabnd-script 必然失败，而且异常指向完全错误的方向。
+                var hasOptions = options.ValueKind == JsonValueKind.Object;
+                var childSelector = hasOptions && options.TryGetProperty("childPath", out var childPathEl) ? childPathEl.GetString() : null;
+                var entryIndex = hasOptions && options.TryGetProperty("entryIndex", out var idxEl) && idxEl.ValueKind == JsonValueKind.Number ? idxEl.GetInt32().ToString() : null;
                 var selector = childSelector ?? entryIndex;
                 if (string.IsNullOrWhiteSpace(selector))
                 {
@@ -3399,7 +3403,7 @@ internal sealed class BridgeCommandService
                 }
 
                 var doc = LuabndNativeDocument.Read(file, oodleRuntimeRoot);
-                if (options.TryGetProperty("expectedContainerHash", out var expContHash)
+                if (options.ValueKind == JsonValueKind.Object && options.TryGetProperty("expectedContainerHash", out var expContHash)
                     && expContHash.ValueKind == JsonValueKind.String
                     && !string.IsNullOrWhiteSpace(expContHash.GetString())
                     && !doc.SourceHash.Equals(expContHash.GetString(), StringComparison.OrdinalIgnoreCase))
@@ -3408,7 +3412,7 @@ internal sealed class BridgeCommandService
                 }
 
                 var script = doc.ReadScript(selector);
-                if (options.TryGetProperty("expectedChildHash", out var expChildHash)
+                if (options.ValueKind == JsonValueKind.Object && options.TryGetProperty("expectedChildHash", out var expChildHash)
                     && expChildHash.ValueKind == JsonValueKind.String
                     && !string.IsNullOrWhiteSpace(expChildHash.GetString())
                     && !script.ContentHash.Equals(expChildHash.GetString(), StringComparison.OrdinalIgnoreCase))
@@ -3434,7 +3438,7 @@ internal sealed class BridgeCommandService
 
         if (command == "write-luabnd-script")
         {
-            var targetOutPath = outputPath ?? (options.TryGetProperty("outputPath", out var outPathEl) ? outPathEl.GetString() : null);
+            var targetOutPath = outputPath ?? (options.ValueKind == JsonValueKind.Object && options.TryGetProperty("outputPath", out var outPathEl) ? outPathEl.GetString() : null);
             if (string.IsNullOrWhiteSpace(targetOutPath))
                 return BridgeResult<object>.Failed(file, "script", "BRIDGE_OUTPUT_PATH_REQUIRED", "write-luabnd-script 需要已校验的 options.outputPath。");
 
@@ -3462,7 +3466,7 @@ internal sealed class BridgeCommandService
 
         if (command == "export-luabnd")
         {
-            var exportDir = outputPath ?? (options.TryGetProperty("outputPath", out var outPathEl) ? outPathEl.GetString() : (options.TryGetProperty("outputDirectory", out var outDirEl) ? outDirEl.GetString() : null));
+            var exportDir = outputPath ?? (options.ValueKind == JsonValueKind.Object && options.TryGetProperty("outputPath", out var outPathEl) ? outPathEl.GetString() : (options.TryGetProperty("outputDirectory", out var outDirEl) ? outDirEl.GetString() : null));
             if (string.IsNullOrWhiteSpace(exportDir))
             {
                 return BridgeResult<object>.Failed(file, "script", "BRIDGE_OUTPUT_PATH_REQUIRED", "export-luabnd 需要指定 outputPath 或 options.outputDirectory。");
@@ -3471,7 +3475,9 @@ internal sealed class BridgeCommandService
             try
             {
                 var doc = LuabndNativeDocument.Read(file, oodleRuntimeRoot);
-                var includeJson = !options.TryGetProperty("includeMetadataJson", out var jsonEl) || jsonEl.GetBoolean();
+                // 门禁要求守卫与调用在同一行：先取"有 options 且带该键"，再决定默认值。
+                var includeJsonOption = options.ValueKind == JsonValueKind.Object && options.TryGetProperty("includeMetadataJson", out var jsonEl);
+                var includeJson = !includeJsonOption || jsonEl.GetBoolean();
                 var result = doc.ExportAll(exportDir, includeJson);
                 return BridgeResult<object>.Ok(file, "script", result);
             }
