@@ -88,7 +88,11 @@ export class WorkspaceReadLifetime {
 
   /** Stale operations cannot observe, overwrite or evict the new workspace's
    * cache. Native results are checked even when a handler has no cache. */
-  createCache<Key,Value>():Map<Key,Value> {
+  /**
+   * `maxEntries` 可限制条目数（#27）：这些缓存原先无界，同一工作区内反复读不同文件
+   * 会单调增长。默认不限制，只有显式传入的调用点才启用淘汰。
+   */
+  createCache<Key,Value>(options?:{maxEntries?:number}):Map<Key,Value> {
     const lifetime=this;
     const writable=()=>{
       if(lifetime.isCurrent())return true;
@@ -98,7 +102,17 @@ export class WorkspaceReadLifetime {
     return new class extends Map<Key,Value> {
       override get(key:Key):Value|undefined {return writable()?super.get(key):undefined;}
       override has(key:Key):boolean {return writable()&&super.has(key);}
-      override set(key:Key,value:Value):this {return writable()?super.set(key,value):this;}
+      override set(key:Key,value:Value):this {
+        if(!writable())return this;
+        super.set(key,value);
+        const max=options?.maxEntries;
+        if(max&&max>0&&super.size>max){
+          // 插入序即使用序：超限时淘汰最早写入的键。
+          const oldest=super.keys().next().value;
+          if(oldest!==undefined)super.delete(oldest);
+        }
+        return this;
+      }
       override delete(key:Key):boolean {return writable()&&super.delete(key);}
       override clear():void {if(writable())super.clear();}
       override entries():MapIterator<[Key,Value]> {return writable()?super.entries():new Map<Key,Value>().entries();}
