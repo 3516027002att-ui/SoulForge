@@ -97,6 +97,37 @@ const scopeGap = registered
     command: String(scripts[entry.name]).slice(0, 120)
   }));
 
+/**
+ * 名字与层级不一致的套件（#35 实测）。
+ *
+ * 有 41 个套件的脚本名带 `runNative*Smoke`，但层级不是 native（散布在 synthetic/unit）。
+ * 说明"native"出现在脚本名里表示"用到原生格式/桥"，不是"该进 native 层"；层级答的是
+ * "什么时候跑它"（语料、成本、环境）。这条统计是用来挡住"按名字猜层级"的诱惑的：
+ * 谁再想加一条 `if (name.includes('native')) return 'native'`，这 41 条就是反例。
+ */
+function computeTierSignalDrift() {
+  let coreScripts = {};
+  try {
+    coreScripts = JSON.parse(readFileSync(resolve(root, 'packages', 'core', 'package.json'), 'utf8')).scripts ?? {};
+  } catch {
+    return [];
+  }
+  const drift = [];
+  for (const [name, tier] of Object.entries(TIER_BY_SCRIPT)) {
+    const command = scripts[name];
+    if (typeof command !== 'string') continue;
+    const forward = /^npm run ([\w:@.-]+) -w @soulforge\/core/.exec(command);
+    const target = forward ? coreScripts[forward[1]] : undefined;
+    if (typeof target !== 'string') continue;
+    if (/runNative[A-Za-z]*Smoke\.js/.test(target) && tier !== 'native') {
+      drift.push({ name, tier });
+    }
+  }
+  return drift;
+}
+
+const tierSignalDrift = computeTierSignalDrift();
+
 const exceptionNames = new Set(Object.keys(exceptions));
 const staleExceptions = [...exceptionNames].filter(
   (name) => !(name in scripts) || tierMismatch.every((entry) => entry.name !== name)
@@ -142,6 +173,7 @@ const report = {
   tierMismatch,
   excludedButLooksLikeSuite,
   scopeGap,
+  tierSignalDrift,
   exceptionsApplied: Object.keys(exceptions).length,
   staleExceptions,
   summary: {
@@ -150,6 +182,7 @@ const report = {
     tierMismatch: tierMismatch.length,
     excludedButLooksLikeSuite: excludedButLooksLikeSuite.length,
     scopeGap: scopeGap.length,
+    tierSignalDrift: tierSignalDrift.length,
     exceptionsApplied: Object.keys(exceptions).length,
     staleExceptions: staleExceptions.length
   },
