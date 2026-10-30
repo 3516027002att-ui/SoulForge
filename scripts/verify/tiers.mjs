@@ -38,6 +38,11 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:verify-entrypoint': 'governance',
   'test:verify-scheduling': 'governance',
   'test:ci-change-scope': 'governance',
+  // #35 审计扫出来的三条未登记套件。判据仍是"改了什么该跑什么"：
+  // bridge context 与会话状态相关，属合成路径；四任务 fixture 与知识刷新是纯单元级。
+  'test:agent-bridge-context': 'synthetic',
+  'test:real-agent-four-tasks': 'unit',
+  'test:knowledge-refresh': 'unit',
   'test:editor-layout-fixtures': 'governance',
   'test:v06-deferral-index-fixtures': 'governance',
   'test:required-validation': 'governance',

@@ -141,3 +141,8 @@ obj/
 # Lua C build objects at repo root from native toolchain tests
 *.obj
 .superpowers/
+
+# 本机参考材料与工具状态：不属于仓库内容，但 handoff:fingerprint 会给未跟踪文件算哈希，
+# 目录会以 EISDIR 让门禁失败（实测 Reference tools/ 触发 FILE_READ_FAILED）。
+/Reference tools/
+/.omo/

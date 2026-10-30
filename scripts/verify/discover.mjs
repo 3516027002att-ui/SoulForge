@@ -25,7 +25,7 @@
  *   node scripts/verify/discover.mjs --json     # 机器可读
  *   node scripts/verify/discover.mjs --strict   # 有差异即非零退出（用于切换前的门禁）
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EXCLUDED, TIER_BY_SCRIPT, TIER_ORDER } from './tiers.mjs';
@@ -130,12 +130,34 @@ function isSuite(name, command) {
   return true;
 }
 
+/**
+ * 约定表达不了的例外（#35）。
+ *
+ * 层级判据是"改了什么该跑什么"的工程判断，实测有 84 条无法从名字与路径推导
+ * （把 smoke 一律当 synthetic 会让 66 条 hermetic 套件判错，反向也拆台）。
+ * 所以目标形态是"约定 + 例外清单"：约定覆盖绝大多数，例外逐条写明层级与理由。
+ * 例外表由 `--write-exceptions` 生成，之后任何约定变化都会让未覆盖的例外暴露出来。
+ */
+const EXCEPTIONS_PATH = resolve(root, 'scripts', 'verify', 'tier-exceptions.json');
+let exceptions = {};
+try {
+  exceptions = JSON.parse(readFileSync(EXCEPTIONS_PATH, 'utf8')).exceptions ?? {};
+} catch {
+  exceptions = {};
+}
+
 const discovered = [];
 for (const [name, command] of Object.entries(scripts)) {
   if (typeof command !== 'string') continue;
   if (EXCLUDED[name]) continue;
   if (!isSuite(name, command)) continue;
-  discovered.push({ name, tier: classifyByConvention(name, resolveCommand(command)) });
+  const conventionTier = classifyByConvention(name, resolveCommand(command));
+  const exception = exceptions[name];
+  discovered.push({
+    name,
+    tier: exception?.tier ?? conventionTier,
+    ...(exception ? { exceptionReason: exception.reason, conventionTier } : {})
+  });
 }
 
 const discoveredNames = new Set(discovered.map((entry) => entry.name));
@@ -151,6 +173,40 @@ const tierMismatch = discovered
 const excludedButLooksLikeSuite = Object.keys(EXCLUDED)
   .filter((name) => name in scripts && isSuite(name, String(scripts[name])) && name.startsWith('test:'));
 
+const exceptionNames = new Set(Object.keys(exceptions));
+const staleExceptions = [...exceptionNames].filter(
+  (name) => !(name in scripts) || tierMismatch.every((entry) => entry.name !== name)
+);
+
+/** 把当前差异写成例外清单（只在 --write-exceptions 时执行）。 */
+if (process.argv.includes('--write-exceptions')) {
+  const REASONS = {
+    synthetic: '需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导',
+    native: '依赖原生 Bridge 或真实语料往返，约定只能从名字猜',
+    governance: '验证对象是治理工具/治理数据，路径不在 scripts/verify/ 下',
+    release: '发布打包/安装链路验证，约定规则未覆盖该命名',
+    unit: '产物是单元级检查，但名字或路径让约定判成了更重的层'
+  };
+  const next = {
+    $comment: 'scripts/verify/discover.mjs 的层级例外表（#35 实测产物）。约定能判对的不要写进来；新增条目必须带 reason。',
+    // 合并而不是覆盖：已生效的例外不会出现在本次 tierMismatch 里，覆盖会把它们丢掉，
+    // 下一次跑立刻回到 84 条差异。
+    exceptions: Object.fromEntries([
+      ...Object.entries(exceptions),
+      ...tierMismatch.map((entry) => [
+        entry.name,
+        {
+          tier: entry.registeredTier,
+          reason: REASONS[entry.registeredTier] ?? REASONS.unit
+        }
+      ])
+    ])
+  };
+  writeFileSync(EXCEPTIONS_PATH, `${JSON.stringify(next, null, 2)}\n`);
+  process.stdout.write(`wrote ${Object.keys(next.exceptions).length} exceptions -> scripts/verify/tier-exceptions.json\n`);
+  process.exit(0);
+}
+
 const report = {
   ok: unregistered.length === 0 && registeredMissingScript.length === 0 && tierMismatch.length === 0,
   scriptCount: Object.keys(scripts).length,
@@ -161,11 +217,15 @@ const report = {
   discoveredOnly: unregistered.map((entry) => ({ name: entry.name, conventionTier: entry.tier })),
   tierMismatch,
   excludedButLooksLikeSuite,
+  exceptionsApplied: Object.keys(exceptions).length,
+  staleExceptions,
   summary: {
     inRegistryOnly: registeredMissingScript.length,
     discoveredOnly: unregistered.length,
     tierMismatch: tierMismatch.length,
-    excludedButLooksLikeSuite: excludedButLooksLikeSuite.length
+    excludedButLooksLikeSuite: excludedButLooksLikeSuite.length,
+    exceptionsApplied: Object.keys(exceptions).length,
+    staleExceptions: staleExceptions.length
   },
   note: '约定只根据 script 名字前缀与命令路径推断层级；差异项就是"约定暂时替代不了人工判断"的部分。'
 };

@@ -72,6 +72,7 @@
     "test:agent-param-dependency-batch": "npm run test:agent-param-dependency-batch -w @soulforge/core",
     "test:agent-native-proof-gate": "node packages/core/dist/testing/runNativeReadProofSmoke.js",
     "test:agent-tool-envelope": "node packages/core/dist/testing/runAgentToolEnvelopeSmoke.js && node packages/core/dist/testing/runEvidenceChildScopeSmoke.js && node packages/core/dist/testing/runEmevdOutlinePagingSmoke.js",
+    "test:knowledge-refresh": "npm run test:knowledge-refresh -w @soulforge/core",
     "test:agent-bridge-context": "node scripts/run-agent-bridge-context-smoke.mjs",
     "test:agent-task-status": "node packages/core/dist/testing/runAgentTaskStatusSmoke.js",
     "test:real-agent-harness": "node --test scripts/real-agent-harness.fixture.mjs",

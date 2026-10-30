@@ -1,0 +1,345 @@
+{
+  "$comment": "scripts/verify/discover.mjs 的层级例外表（#35 实测产物）。约定能判对的不要写进来；新增条目必须带 reason。",
+  "exceptions": {
+    "test:standalone-writer-failure-matrix": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:agent-tae-indexed-uri": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:agent-native-proof-gate": {
+      "tier": "unit",
+      "reason": "产物是单元级检查，但名字或路径让约定判成了更重的层"
+    },
+    "test:first-party-schema-clean": {
+      "tier": "unit",
+      "reason": "产物是单元级检查，但名字或路径让约定判成了更重的层"
+    },
+    "test:first-party-schema-native-coverage": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:first-party-tae-field-write": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:asset-import": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:asset-writeback": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:s40-live": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:citations": {
+      "tier": "unit",
+      "reason": "产物是单元级检查，但名字或路径让约定判成了更重的层"
+    },
+    "test:emevd-session-cache": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:action-mature-oracle": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:native-projection-acceptance": {
+      "tier": "unit",
+      "reason": "产物是单元级检查，但名字或路径让约定判成了更重的层"
+    },
+    "test:verify-map-action-open": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:bridge-cancellation-terminal-phase": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:packaged-bridge-runtime": {
+      "tier": "release",
+      "reason": "发布打包/安装链路验证，约定规则未覆盖该命名"
+    },
+    "test:dds-convert-writeback": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:paramdef-layout": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:param-field-mutation": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:container-param-edit": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:native-edit-facade": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:param-metadata-mismatch": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:smithbox-param-metadata-source": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:me3-sekiro-session": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:fmg-reference-integrity": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:desktop-live-editor-contract": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:native-semantic-refresh-cancellation": {
+      "tier": "unit",
+      "reason": "产物是单元级检查，但名字或路径让约定判成了更重的层"
+    },
+    "test:flver-candidate": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:installer-lifecycle": {
+      "tier": "release",
+      "reason": "发布打包/安装链路验证，约定规则未覆盖该命名"
+    },
+    "test:v06-deferral-index": {
+      "tier": "governance",
+      "reason": "验证对象是治理工具/治理数据，路径不在 scripts/verify/ 下"
+    },
+    "verify:audit": {
+      "tier": "governance",
+      "reason": "验证对象是治理工具/治理数据，路径不在 scripts/verify/ 下"
+    },
+    "test:release-corpus-registry": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:release-editor-acceptance": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:section28-sekiro-gate": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:desktop-ipc-contract": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:editor-bounded-access": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:param-field-write-matrix": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:orphan-smoke-gate": {
+      "tier": "governance",
+      "reason": "验证对象是治理工具/治理数据，路径不在 scripts/verify/ 下"
+    },
+    "test:smoke-temp-cleanup": {
+      "tier": "governance",
+      "reason": "验证对象是治理工具/治理数据，路径不在 scripts/verify/ 下"
+    },
+    "test:probe-residual-gate": {
+      "tier": "governance",
+      "reason": "验证对象是治理工具/治理数据，路径不在 scripts/verify/ 下"
+    },
+    "test:stale-tfm-gate": {
+      "tier": "governance",
+      "reason": "验证对象是治理工具/治理数据，路径不在 scripts/verify/ 下"
+    },
+    "test:bridge-exit-hygiene": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:bridge-write-boundary": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:bnd4-repack-scope": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:bc7-decode": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:png-color-space": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:dds-truncation": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:esd-gap-visibility": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:cross-machine-fixtures": {
+      "tier": "governance",
+      "reason": "验证对象是治理工具/治理数据，路径不在 scripts/verify/ 下"
+    },
+    "test:flver-gxlist": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:bc3-color-block": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:flver-gap-visibility": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:desktop-security-runtime": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:renderer-e2e": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:seal-cli": {
+      "tier": "governance",
+      "reason": "验证对象是治理工具/治理数据，路径不在 scripts/verify/ 下"
+    },
+    "test:real-mod-readonly-preview": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:workspace-completeness": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:desktop-contract-mutations": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:sqlite-crash-recovery": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:writer-failure-matrix": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:power-loss-recovery": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:large-transaction-recovery": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:cross-session-journal": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:upgrade-recovery": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:bridge-staging": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:bridge-recovery-harness": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:krak-combination-mutation": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:emevd-plan-production": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:emevd-coverage": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:emevd-full-document": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:emevd-imported-production": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:emevd-imported-coverage": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:script-container-evidence": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:script-container-replace": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:plaintext-script-edit": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:script-container-load-preflight": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:plaintext-script-write": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:container-param-writeback": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:native-document-locator": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:param-session-projection": {
+      "tier": "native",
+      "reason": "依赖原生 Bridge 或真实语料往返，约定只能从名字猜"
+    },
+    "test:editor-layout-fixtures": {
+      "tier": "governance",
+      "reason": "验证对象是治理工具/治理数据，路径不在 scripts/verify/ 下"
+    },
+    "test:v06-deferral-index-fixtures": {
+      "tier": "governance",
+      "reason": "验证对象是治理工具/治理数据，路径不在 scripts/verify/ 下"
+    },
+    "test:required-validation": {
+      "tier": "governance",
+      "reason": "验证对象是治理工具/治理数据，路径不在 scripts/verify/ 下"
+    },
+    "test:bridge-artifact-chunking": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    },
+    "test:agent-bridge-context": {
+      "tier": "synthetic",
+      "reason": "需要较慢/真实语料的合成路径验证，名字与路径不带 synthetic 特征，约定无法推导"
+    }
+  }
+}
