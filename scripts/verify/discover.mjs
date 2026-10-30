@@ -11,6 +11,15 @@
  *   - 约定归属：按 script 命令指向的路径与名字前缀推层级（见 CONVENTIONS）；
  *   - 与 TIER_BY_SCRIPT 对账：未登记 / 登记了但不存在 / 层级不一致 / 被排除但像套件。
  *
+ * 实测（368 个 script，登记表 337 条）：
+ *   - 初版约定（名字前缀 + 命令路径）：层级不一致 101；
+ *   - 解析 `npm run X -w @pkg` 转发层 + 把 smoke 一律当 synthetic：138
+ *     （把 66 个登记为 unit 的 hermetic smoke 误抬成 synthetic）；
+ *   - 当前约定（治理/发布/原生按路径与名字判定，synthetic 只认名字里写明的）：84。
+ *   - 这 40 条差异是"登记为 synthetic、但名字与路径都不带 synthetic/smoke 特征"的套件
+ *     （asset-import、asset-writeback、emevd-session-cache…）——要把它们判对，只能
+ *     逐条写明"这条要真实语料/较慢"，那就是把登记表换个写法。
+
  * 用法：
  *   node scripts/verify/discover.mjs            # 打印对账表
  *   node scripts/verify/discover.mjs --json     # 机器可读
@@ -24,6 +33,38 @@ import { EXCLUDED, TIER_BY_SCRIPT, TIER_ORDER } from './tiers.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
 const scripts = packageJson.scripts ?? {};
+
+/** workspace scripts：根 script 大量只是 `npm run X -w @pkg` 的转发，套件真正跑什么在子包里。 */
+const workspaceScripts = new Map();
+for (const [workspaceName, workspacePath] of Object.entries(packageJson.workspaces ?? {})) {
+  void workspaceName;
+  void workspacePath;
+}
+const WORKSPACE_DIRS = ['packages/core', 'packages/shared', 'apps/desktop'];
+for (const directory of WORKSPACE_DIRS) {
+  try {
+    const manifest = JSON.parse(readFileSync(resolve(root, directory, 'package.json'), 'utf8'));
+    workspaceScripts.set(manifest.name, manifest.scripts ?? {});
+  } catch {
+    // 没有该子包就跳过：约定解析尽力而为，解析不到就退回根命令文本。
+  }
+}
+
+/** 把 `npm run X -w @pkg` 展开成子包里 X 的真实命令（最多 3 层转发）。 */
+function resolveCommand(command, depth = 0) {
+  if (depth >= 3) return command;
+  const tokens = command.trim().split(/\s+/);
+  if (tokens[0] !== 'npm' || tokens[1] !== 'run') return command;
+  const inner = tokens[2];
+  if (!inner) return command;
+  const flagIndex = tokens.findIndex((token, index) => index > 2 && (token === '-w' || token === '--workspace'));
+  const flagValue = flagIndex >= 0 ? tokens[flagIndex + 1] : tokens
+    .find((token) => token.startsWith('--workspace='))
+    ?.slice('--workspace='.length);
+  const table = flagValue ? workspaceScripts.get(flagValue) : undefined;
+  const next = table?.[inner];
+  return typeof next === 'string' ? resolveCommand(next, depth + 1) : command;
+}
 
 /** 命令里出现这些目标就算"跑验证"。 */
 const SUITE_TARGETS = [
@@ -42,10 +83,35 @@ const SUITE_TARGETS = [
  * 判据是"它验证的是治理工具还是产品行为"，路径比名字更接近这个判据。
  */
 const CONVENTIONS = [
-  { tier: 'governance', match: (name, command) => /^scripts[\\/]verify[\\/]|verify\/|handoff:|gov:/.test(command) || /^test:(governance|handoff|release-scope|verify|gov|ci)/.test(name) },
-  { tier: 'release', match: (name, command) => /e2e|installed|installer|update:/.test(name) || /scripts[\\/].*e2e/.test(command) },
-  { tier: 'native', match: (name, command) => /native|bridge:verify:real|dotnet/.test(name) || /bridge[\\/]SoulForge/.test(command) },
-  { tier: 'synthetic', match: (name, command) => /synthetic|smoke/.test(name) || /run[A-Za-z]+Smoke\.js/.test(command) },
+  {
+    tier: 'governance',
+    match: (name, command) => [
+      // 治理工具自身与治理数据的校验：路径在 scripts/verify 下，或名字明确指向治理。
+      /scripts[\\/]verify[\\/]/.test(command),
+      /^test:(governance|handoff|release-scope|verify|gov|ci)/.test(name),
+      /first-party-schema/.test(name)
+    ].some(Boolean)
+  },
+  {
+    tier: 'release',
+    match: (name, command) => [
+      /^test:(release|e2e|installed|update:(integration|installed|all))/.test(name),
+      /verify-(release|reproducible|portable-packaging)/.test(command)
+    ].some(Boolean)
+  },
+  {
+    tier: 'native',
+    match: (name, command) => [
+      /native|real-corpus|corpus|roundtrip|luap|hks/.test(name),
+      /verify-first-party-(lua|luap|hks)/.test(command)
+    ].some(Boolean)
+  },
+  {
+    tier: 'synthetic',
+    // 只有名字里明确写 synthetic 的才归这层：凭"命令里跑的是 run*Smoke.js"判定会把
+    // 66 个登记为 unit 的 hermetic smoke 误抬成 synthetic（实测，改回了就再涨回去）。
+    match: (name) => /synthetic/.test(name)
+  },
   { tier: 'unit', match: () => true }
 ];
 
@@ -69,7 +135,7 @@ for (const [name, command] of Object.entries(scripts)) {
   if (typeof command !== 'string') continue;
   if (EXCLUDED[name]) continue;
   if (!isSuite(name, command)) continue;
-  discovered.push({ name, tier: classifyByConvention(name, command) });
+  discovered.push({ name, tier: classifyByConvention(name, resolveCommand(command)) });
 }
 
 const discoveredNames = new Set(discovered.map((entry) => entry.name));
