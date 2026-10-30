@@ -154,7 +154,7 @@ async function harness(options = {}) {
     fire(delay) { for (const timer of [...timers.values()]) if (timer.delay === delay) { timers.delete(timer); timer.callback(); } },
     get timers() { return timers; },
     switchWorkspace(session, index) { activeSession = session; activeIndex = index; generation++; },
-    async close() { target.destroyed = true; target.emit('destroyed'); api.clearAgentIpcState(); for (const session of coreSessions) session.close(); journal?.close(); await rm(owned, { recursive: true, force: true }); }
+    async close() { target.destroyed = true; target.emit('destroyed'); api.clearAgentIpcState(); for (const session of coreSessions) session.close(); journal?.close(); await rm(owned, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }); }
   };
 }
 const ownedCall = (name, argumentsJson = '{}') => ({ message: { role: 'assistant', content: '', toolCalls: [{ id: 'owned-call', name, argumentsJson }] }, finishReason: 'tool_use', diagnostics: [], usage: { inputTokens: 1, outputTokens: 1 } });
