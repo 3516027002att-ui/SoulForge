@@ -80,6 +80,12 @@ export interface SemanticRefreshStageComplete extends SemanticRefreshStageDetail
   heapUsedMb: number;
   heapLimitMb: number;
   rssMb: number;
+  /**
+   * 相对**上一个完成阶段**的增量（#27）。第一个阶段为 0。
+   * 绝对值只能说明"到了多少"，增量才说明"哪个阶段在涨"。
+   */
+  heapDeltaMb: number;
+  rssDeltaMb: number;
 }
 
 export interface SemanticRefreshTelemetry {
@@ -160,6 +166,7 @@ export function createSemanticRefreshTelemetry(
   const stages = new Map<SemanticRefreshStage, SemanticRefreshStageSnapshot>();
   const startedStages = new Set<SemanticRefreshStage>();
   const stageStartedMonotonic = new Map<SemanticRefreshStage, number>();
+  let previous: { heapUsedMb: number; rssMb: number } | undefined;
   let finished = false;
 
   return {
@@ -215,6 +222,12 @@ export function createSemanticRefreshTelemetry(
       try {
         const memory = process.memoryUsage();
         const heap = getHeapStatistics();
+        const heapUsedMb = toMiB(heap.used_heap_size);
+        const rssMb = toMiB(memory.rss);
+        // 与"上一个完成阶段"比较，得到这一阶段自身的增长。
+        const heapDeltaMb = previous ? Number((heapUsedMb - previous.heapUsedMb).toFixed(1)) : 0;
+        const rssDeltaMb = previous ? Number((rssMb - previous.rssMb).toFixed(1)) : 0;
+        previous = { heapUsedMb, rssMb };
         stageCompleteSink({
           refreshId,
           origin,
@@ -223,9 +236,11 @@ export function createSemanticRefreshTelemetry(
           finishedAt: new Date().toISOString(),
           elapsedMs: safeElapsed,
           pid: process.pid,
-          heapUsedMb: toMiB(heap.used_heap_size),
+          heapUsedMb,
           heapLimitMb: toMiB(heap.heap_size_limit),
-          rssMb: toMiB(memory.rss),
+          rssMb,
+          heapDeltaMb,
+          rssDeltaMb,
           ...details
         });
       } catch {
