@@ -153,6 +153,32 @@ const requiredResources = [
 for (const resource of requiredResources) {
   const path = resolve(resourcesRoot, resource);
   if (existsSync(path) && statSync(path).isFile()) continue;
+  // 区分"打包配置漏了"和"产物是旧的"：配置里登记过、源文件也在，只说明 win-unpacked
+  // 是上一次打包的产物。实测 prompt/native-read-safety.md 就属于这一类——配置里有、
+  // 目录里没有，报成"缺少必需资源"会让人去找配置问题。
+  const sourceRelative = resource.startsWith('prompt/') ? resource.slice('prompt/'.length) : null;
+  const sourceExists = sourceRelative ? existsSync(resolve(root, 'prompt', sourceRelative)) : false;
+  const configured = (() => {
+    try {
+      const builder = JSON.parse(readFileSync(resolve(root, 'apps', 'desktop', 'electron-builder.json'), 'utf8'));
+      const entry = (builder.extraResources ?? []).find((item) => item?.to === resource.split('/')[0]);
+      if (!entry) return false;
+      const filter = entry.filter ?? [];
+      return filter.length === 0 || filter.includes(resource.split('/').slice(1).join('/'));
+    } catch {
+      return false;
+    }
+  })();
+  if (configured && sourceExists) {
+    findings.push({
+      severity: 'error',
+      code: 'FIRST_PARTY_PACKAGE_ARTIFACT_STALE',
+      path: `apps/desktop/release/win-unpacked/resources/${resource}`,
+      message: `打包配置已包含 ${resource}、源文件也在，但 win-unpacked 里没有——产`
+        + '物是上一次打包留下的。重新打包即可，不是配置缺失。'
+    });
+    continue;
+  }
   findings.push({
     severity: 'error',
     code: 'FIRST_PARTY_RESOURCE_MISSING_FROM_PACKAGE',
