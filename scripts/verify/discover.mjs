@@ -29,129 +29,30 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EXCLUDED, TIER_BY_SCRIPT, TIER_ORDER } from './tiers.mjs';
+import {
+  classifyByConvention,
+  isSuiteScript,
+  loadTierExceptions,
+  loadWorkspaceScripts,
+  resolveCommand
+} from './tier-convention.mjs';
+
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
 const scripts = packageJson.scripts ?? {};
 
-/** workspace scripts：根 script 大量只是 `npm run X -w @pkg` 的转发，套件真正跑什么在子包里。 */
-const workspaceScripts = new Map();
-for (const [workspaceName, workspacePath] of Object.entries(packageJson.workspaces ?? {})) {
-  void workspaceName;
-  void workspacePath;
-}
-const WORKSPACE_DIRS = ['packages/core', 'packages/shared', 'apps/desktop'];
-for (const directory of WORKSPACE_DIRS) {
-  try {
-    const manifest = JSON.parse(readFileSync(resolve(root, directory, 'package.json'), 'utf8'));
-    workspaceScripts.set(manifest.name, manifest.scripts ?? {});
-  } catch {
-    // 没有该子包就跳过：约定解析尽力而为，解析不到就退回根命令文本。
-  }
-}
+/** 例外表：约定表达不了的工程判断（由 --write-exceptions 生成并合并）。 */
+const exceptions = loadTierExceptions();
 
-/** 把 `npm run X -w @pkg` 展开成子包里 X 的真实命令（最多 3 层转发）。 */
-function resolveCommand(command, depth = 0) {
-  if (depth >= 3) return command;
-  const tokens = command.trim().split(/\s+/);
-  if (tokens[0] !== 'npm' || tokens[1] !== 'run') return command;
-  const inner = tokens[2];
-  if (!inner) return command;
-  const flagIndex = tokens.findIndex((token, index) => index > 2 && (token === '-w' || token === '--workspace'));
-  const flagValue = flagIndex >= 0 ? tokens[flagIndex + 1] : tokens
-    .find((token) => token.startsWith('--workspace='))
-    ?.slice('--workspace='.length);
-  const table = flagValue ? workspaceScripts.get(flagValue) : undefined;
-  const next = table?.[inner];
-  return typeof next === 'string' ? resolveCommand(next, depth + 1) : command;
-}
-
-/** 命令里出现这些目标就算"跑验证"。 */
-const SUITE_TARGETS = [
-  /node\s+--test\b/,
-  /\.test\.(js|mjs|cjs)\b/,
-  /run[A-Za-z]+Smoke\.js\b/,
-  /electron-vite\s+preview|playwright/i
-];
-
-/**
- * 约定（写进 ARCHITECTURE.md 的那一条）。
- *
- * 只看两条信息：script 名字前缀、以及命令指向的路径。之所以不用"script 名里有没有
- * governance 字样"这种单条规则：现有登记表把 `test:verify-entrypoint` 这类
- * scripts/verify 下的脚本归 governance，而把 `test:editor-layout-*` 归 unit——
- * 判据是"它验证的是治理工具还是产品行为"，路径比名字更接近这个判据。
- */
-const CONVENTIONS = [
-  {
-    tier: 'governance',
-    match: (name, command) => [
-      // 治理工具自身与治理数据的校验：路径在 scripts/verify 下，或名字明确指向治理。
-      /scripts[\\/]verify[\\/]/.test(command),
-      /^test:(governance|handoff|release-scope|verify|gov|ci)/.test(name),
-      /first-party-schema/.test(name)
-    ].some(Boolean)
-  },
-  {
-    tier: 'release',
-    match: (name, command) => [
-      /^test:(release|e2e|installed|update:(integration|installed|all))/.test(name),
-      /verify-(release|reproducible|portable-packaging)/.test(command)
-    ].some(Boolean)
-  },
-  {
-    tier: 'native',
-    match: (name, command) => [
-      /native|real-corpus|corpus|roundtrip|luap|hks/.test(name),
-      /verify-first-party-(lua|luap|hks)/.test(command)
-    ].some(Boolean)
-  },
-  {
-    tier: 'synthetic',
-    // 只有名字里明确写 synthetic 的才归这层：凭"命令里跑的是 run*Smoke.js"判定会把
-    // 66 个登记为 unit 的 hermetic smoke 误抬成 synthetic（实测，改回了就再涨回去）。
-    match: (name) => /synthetic/.test(name)
-  },
-  { tier: 'unit', match: () => true }
-];
-
-export function classifyByConvention(name, command) {
-  for (const rule of CONVENTIONS) {
-    if (rule.match(name, command)) return rule.tier;
-  }
-  return 'unit';
-}
-
-function isSuite(name, command) {
-  if (!/^test:|^verify:/.test(name)) {
-    // 名字不像验证，但命令确实在跑测试文件，也算候选（#35 要抓的正是"没登记"）。
-    return SUITE_TARGETS.some((pattern) => pattern.test(command));
-  }
-  return true;
-}
-
-/**
- * 约定表达不了的例外（#35）。
- *
- * 层级判据是"改了什么该跑什么"的工程判断，实测有 84 条无法从名字与路径推导
- * （把 smoke 一律当 synthetic 会让 66 条 hermetic 套件判错，反向也拆台）。
- * 所以目标形态是"约定 + 例外清单"：约定覆盖绝大多数，例外逐条写明层级与理由。
- * 例外表由 `--write-exceptions` 生成，之后任何约定变化都会让未覆盖的例外暴露出来。
- */
-const EXCEPTIONS_PATH = resolve(root, 'scripts', 'verify', 'tier-exceptions.json');
-let exceptions = {};
-try {
-  exceptions = JSON.parse(readFileSync(EXCEPTIONS_PATH, 'utf8')).exceptions ?? {};
-} catch {
-  exceptions = {};
-}
+const workspaceScripts = loadWorkspaceScripts(root);
 
 const discovered = [];
 for (const [name, command] of Object.entries(scripts)) {
   if (typeof command !== 'string') continue;
   if (EXCLUDED[name]) continue;
-  if (!isSuite(name, command)) continue;
-  const conventionTier = classifyByConvention(name, resolveCommand(command));
+  if (!isSuiteScript(name, command)) continue;
+  const conventionTier = classifyByConvention(name, resolveCommand(command, workspaceScripts));
   const exception = exceptions[name];
   discovered.push({
     name,
@@ -171,7 +72,7 @@ const tierMismatch = discovered
   .map((entry) => ({ name: entry.name, conventionTier: entry.tier, registeredTier: TIER_BY_SCRIPT[entry.name] }))
   .filter((entry) => entry.conventionTier !== entry.registeredTier);
 const excludedButLooksLikeSuite = Object.keys(EXCLUDED)
-  .filter((name) => name in scripts && isSuite(name, String(scripts[name])) && name.startsWith('test:'));
+  .filter((name) => name in scripts && isSuiteScript(name, String(scripts[name])) && name.startsWith('test:'));
 
 const exceptionNames = new Set(Object.keys(exceptions));
 const staleExceptions = [...exceptionNames].filter(
