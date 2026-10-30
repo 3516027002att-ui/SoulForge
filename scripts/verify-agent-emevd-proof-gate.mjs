@@ -17,11 +17,16 @@ import { join } from 'node:path';
 import {
   createAgentToolBridge,
   createNativeReadProofStore,
+  MAX_BOUNDED_TOOL_RESULT_BYTES,
   ToolRegistry
 } from '../packages/core/dist/index.js';
 import { createAgentTaskRecordGateway } from '../apps/desktop/src/main/agentTaskRecord.ts';
 
+/// 证明门槛：分页视图与普通读取必须很小，证明分页真的在工作。
 const MAX_RESULT_BYTES = 8_192;
+/// 完整 native DarkScript 视图（projection=complete_native_dsl）按产品预算判定：
+/// agentToolBridge 允许这种视图撑满产品预算，因为它一次读完整事件、不再分页。
+/// 超限证明由 72 000 字节的 oversize fixture 独立承担，不借用这里的门槛。
 const MAX_RESULT_CHARS = 8_192;
 const NONCANONICAL_WARNING_CODE = 'EMEVD_NONCANONICAL_SOURCE_INSPECT_ONLY';
 const fixtureRoot = await mkdtemp(join(tmpdir(), 'soulforge-emevd-proof-gate-'));
@@ -142,7 +147,7 @@ function modeReadData(harness, sourceUri, eventId, input) {
       state: 'completed',
       data: completeReadData(harness, sourceUri, eventId, {
         total: 1,
-        darkScript: `$Event(${eventId}, Restart, function() {\n  ${'X'.repeat(12_000)}\n});`
+        darkScript: `$Event(${eventId}, Restart, function() {\n  ${'X'.repeat(72_000)}\n});`
       })
     };
   }
@@ -398,11 +403,16 @@ async function call(harness, name, input) {
     argumentsJson: JSON.stringify(input)
   });
   assert.ok(typeof response.content === 'string', `${name} must return content`);
-  assert.ok(Buffer.byteLength(response.content, 'utf8') <= MAX_RESULT_BYTES,
-    `${name} exceeded bounded byte output: ${Buffer.byteLength(response.content, 'utf8')}`);
-  assert.ok(response.content.length <= MAX_RESULT_CHARS,
-    `${name} exceeded bounded character output: ${response.content.length}`);
-  return { response, envelope: JSON.parse(response.content) };
+  const envelope = JSON.parse(response.content);
+  const completeNativeView = envelope?.data?.record?.projection === 'complete_native_dsl';
+  const byteLimit = completeNativeView ? MAX_BOUNDED_TOOL_RESULT_BYTES : MAX_RESULT_BYTES;
+  assert.ok(Buffer.byteLength(response.content, 'utf8') <= byteLimit,
+    `${name} exceeded bounded byte output: ${Buffer.byteLength(response.content, 'utf8')} > ${byteLimit}`);
+  if (!completeNativeView) {
+    assert.ok(response.content.length <= MAX_RESULT_CHARS,
+      `${name} exceeded bounded character output: ${response.content.length}`);
+  }
+  return { response, envelope };
 }
 
 function assertSuccess(result, label) {
