@@ -739,6 +739,46 @@ SELECT rowid, chunk_id, title, body FROM rag_chunks;
 DROP TABLE rag_chunks_fts_trigram;
 ALTER TABLE rag_chunks_fts_trigram_rowid_v15 RENAME TO rag_chunks_fts_trigram;
 `
+  },
+  {
+    id: 16,
+    name: 'retire_unread_tables',
+    sql: `
+PRAGMA foreign_keys = ON;
+
+-- #41：下面这些表在生产代码里没有任何读写路径，当前 schema 也不再创建它们；
+-- 它们只遗留在用旧版本建过的库里。判据可复跑：
+--   node scripts/audit-dead-tables.mjs --check scripts/dead-table-retire-list.json
+-- 该审计按行定位引用，并对三张"只写不读"的表（resource_nodes / resource_edges /
+-- resource_graph_snapshots）单独要求引用只能出现在声明的写入方里，因此本迁移
+-- 只删前者，不动那三张。
+--
+-- 用 DROP TABLE IF EXISTS：新库上这些表本就不存在，删表是空操作；旧库才真正受益。
+-- 迁移引擎拒绝降级（assertSchemaNotNewerThanApplication），所以本迁移上线后回退到
+-- 旧版应用会打不开该库 —— 发布说明须写明，迁移前按现有流程备份。
+DROP TABLE IF EXISTS adaptation_packages;
+DROP TABLE IF EXISTS agent_runs;
+DROP TABLE IF EXISTS agent_steps;
+DROP TABLE IF EXISTS ai_conversations;
+DROP TABLE IF EXISTS ai_messages;
+DROP TABLE IF EXISTS app_agent_runs;
+DROP TABLE IF EXISTS event_instructions;
+DROP TABLE IF EXISTS event_symbols;
+DROP TABLE IF EXISTS event_text_fts;
+DROP TABLE IF EXISTS map_entities;
+DROP TABLE IF EXISTS map_regions;
+DROP TABLE IF EXISTS model_services;
+DROP TABLE IF EXISTS operation_logs;
+DROP TABLE IF EXISTS outbound_context_items;
+DROP TABLE IF EXISTS param_fields;
+DROP TABLE IF EXISTS param_rows;
+DROP TABLE IF EXISTS param_rows_fts;
+DROP TABLE IF EXISTS permission_grants;
+DROP TABLE IF EXISTS text_entries_fts;
+DROP TABLE IF EXISTS tool_calls;
+DROP TABLE IF EXISTS trusted_signers;
+DROP TABLE IF EXISTS workspace_layers;
+`
   }
 ];
 

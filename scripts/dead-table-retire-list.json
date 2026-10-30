@@ -1,0 +1,40 @@
+{
+  "$comment": "scripts/audit-dead-tables.mjs --check 的登记表（#41）。retire 里的表在写完删表迁移前必须仍是'生产代码零引用'；writeOnly 里的表允许有引用，但只能出现在 writers 列出的文件里——新增任何读取都会让审计失败关闭。",
+  "retire": [
+    { "table": "adaptation_packages" },
+    { "table": "agent_runs" },
+    { "table": "agent_steps" },
+    { "table": "ai_conversations" },
+    { "table": "ai_messages" },
+    { "table": "app_agent_runs" },
+    { "table": "event_instructions" },
+    { "table": "event_symbols" },
+    { "table": "event_text_fts" },
+    { "table": "map_entities" },
+    { "table": "map_regions" },
+    { "table": "model_services" },
+    { "table": "operation_logs" },
+    { "table": "outbound_context_items" },
+    { "table": "param_fields" },
+    { "table": "param_rows" },
+    { "table": "param_rows_fts" },
+    { "table": "permission_grants" },
+    { "table": "trusted_signers" },
+    { "table": "workspace_layers" },
+    { "table": "text_entries_fts" }
+  ],
+  "writeOnly": [
+    {
+      "table": "resource_nodes",
+      "writers": ["packages/core/src/workspace/importLegacySemanticSnapshot.ts"]
+    },
+    {
+      "table": "resource_edges",
+      "writers": ["packages/core/src/workspace/importLegacySemanticSnapshot.ts"]
+    },
+    {
+      "table": "resource_graph_snapshots",
+      "writers": ["packages/core/src/workspace/importLegacySemanticSnapshot.ts"]
+    }
+  ]
+}
