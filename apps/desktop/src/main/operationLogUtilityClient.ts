@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { LateRequestJournal, type LateRequestQuery } from './lateRequestJournal.js';
 import { performance } from 'node:perf_hooks';
 import { utilityProcess, type UtilityProcess } from 'electron';
 import type {
@@ -56,6 +57,9 @@ interface LateRequest {
   dispatchedAt: number;
   depth: number;
   expiresAt: number;
+  /** 迟到响应回来后的真实结局：超时只说明没收到回执，这个字段才是答案（#42）。 */
+  outcome?: 'ok' | 'request-failed';
+  errorCode?: string;
 }
 
 interface QueuedRequest {
@@ -131,6 +135,11 @@ export class OperationLogUtilityClient implements OperationLogStore {
   private reader: OperationLogUtilityClient | null = null;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly lateRequests = new Map<string, LateRequest>();
+  /**
+   * 超时请求的结局台账（#42）。时间戳仍留在 lateRequests（trace 需要），
+   * 但"最终提交了没有"只由台账回答，避免两处各存一份状态。
+   */
+  private readonly lateJournal = new LateRequestJournal();
   /** The utility process is serial by design; keep a host-side queue so a
    * long background RAG transaction cannot sit in front of every foreground
    * Agent read that arrived later. */
@@ -436,6 +445,24 @@ export class OperationLogUtilityClient implements OperationLogStore {
       loadReferences: () => this.requestWorkspace('loadReferences', workspaceId, {}),
       upsertJob: (job) => this.requestWorkspace('upsertJob', workspaceId, { job }).then(() => undefined)
     };
+  }
+
+  /**
+   * 按操作 ID 查超时请求的真实结局（#42）。
+   *
+   * `pending`：请求超时了、worker 还没回；`completed`：迟到响应已回来，看 outcome；
+   * `unknown`：没有这条记录（从未超时或已被淘汰）——它不能当作"没执行"。
+   */
+  async queryRequest(requestId: string): Promise<{
+    state: 'pending' | 'completed' | 'unknown';
+    outcome: 'ok' | 'request-failed' | null;
+    method: string | null;
+  }> {
+    const late = this.lateRequests.get(requestId);
+    if (!late) return { state: 'unknown', outcome: null, method: null };
+    return late.outcome
+      ? { state: 'completed', outcome: late.outcome, method: late.method }
+      : { state: 'pending', outcome: null, method: late.method };
   }
 
   async health(): Promise<{ ready: boolean; appReady: boolean; workspaceId?: string }> {
@@ -792,7 +819,20 @@ export class OperationLogUtilityClient implements OperationLogStore {
         if (isDispatchedRequest) this.drainDispatchQueue();
         return;
       }
+      this.lateJournal.settle(
+        message.requestId,
+        message.ok ? 'ok' : 'request-failed',
+        message.error?.code
+      );
+      if (!message.ok) late.errorCode = message.error?.code ?? 'DATABASE_UTILITY_FAILED';
+      // 重新插到尾部并限制长度：保留结局供 queryRequest 查询。
       this.lateRequests.delete(message.requestId);
+      this.lateRequests.set(message.requestId, late);
+      while (this.lateRequests.size > 256) {
+        const oldest = this.lateRequests.keys().next().value;
+        if (oldest === undefined) break;
+        this.lateRequests.delete(oldest);
+      }
       writeUtilityTrace({
         side: 'client',
         event: 'late-completion',
@@ -868,6 +908,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
   }
 
   private rememberLateRequest(request: Omit<LateRequest, 'expiresAt'>): void {
+    this.lateJournal.record(request.requestId, request.method);
     this.pruneLateRequests();
     this.lateRequests.set(request.requestId, {
       ...request,
