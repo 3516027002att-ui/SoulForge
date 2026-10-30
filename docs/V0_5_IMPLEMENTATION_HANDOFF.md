@@ -1233,7 +1233,7 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 337 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 340 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
@@ -1269,7 +1269,7 @@ npm run test:verify-scheduling
 npm run verify:audit
 ~~~
 
-**unit**（147 条）
+**unit**（149 条）
 
 ~~~powershell
 npm run test
@@ -1364,6 +1364,7 @@ npm run test:first-party-schema-clean
 npm run test:flver-pages
 npm run test:fmg-msb-ipc-contract
 npm run test:hex-scene
+npm run test:knowledge-refresh
 npm run test:knowledge-store-sqlite
 npm run test:lua-structure
 npm run test:map-document-scale
@@ -1393,6 +1394,7 @@ npm run test:rag
 npm run test:rag-local-only
 npm run test:rag-persistence-performance
 npm run test:rag-refresh-queue
+npm run test:real-agent-four-tasks
 npm run test:real-agent-harness
 npm run test:recent-paths
 npm run test:reference-cli-session
@@ -1421,7 +1423,7 @@ npm run test:yapped-param-metadata-source
 npm run typecheck
 ~~~
 
-**synthetic**（56 条）
+**synthetic**（57 条）
 
 ~~~powershell
 npm run bridge:build
@@ -1436,6 +1438,7 @@ npm run bridge:verify:mtd-writer
 npm run bridge:verify:source-hash-performance
 npm run bridge:verify:synthetic
 npm run bridge:verify:tae-writer
+npm run test:agent-bridge-context
 npm run test:asset-import
 npm run test:asset-writeback
 npm run test:bc3-color-block
