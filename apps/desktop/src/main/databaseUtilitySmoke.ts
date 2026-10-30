@@ -521,6 +521,90 @@ app.whenReady().then(async () => {
       })}`);
     }
 
+    // #42 验收 2：写入超时后，凭操作 ID 能查到它最终是否提交。
+    // 用一次真实的长写（2 万条 RAG 块）压出真实超时：调用侧 1ms 就返回"未确认"，
+    // worker 照常写完；随后用正常超时查台账，结局必须是 done + ok，且数据真的在库里。
+    const journalChunks = Array.from({ length: 20_000 }, (_, index): RagChunk => ({
+      chunkId: `journal-bulk-${index}`,
+      workspaceId,
+      sourceUri: `file://bulk/${index}.txt`,
+      symbolUri: `file://bulk/${index}.txt`,
+      family: 'file',
+      title: `bulk ${index}`,
+      body: 'x'.repeat(64),
+      numericIds: [],
+      contentHash: `bulk-${index}`,
+      relativePath: `bulk/${index}.txt`,
+      resourceKind: 'other'
+    }));
+    client.setRequestTimeout(1, { ignoreFloor: true });
+    let journalTimeout: (Error & { requestId?: string }) | null = null;
+    try {
+      await client.replaceRagChunks(journalChunks);
+    } catch (error) {
+      journalTimeout = error as Error & { requestId?: string };
+    } finally {
+      client.setRequestTimeout(60_000);
+    }
+    if (!journalTimeout || journalTimeout.requestId === undefined) {
+      throw new Error(`Database utility timed write did not surface a requestId: ${JSON.stringify({
+        message: journalTimeout?.message
+      })}`);
+    }
+    const journalRequestId = journalTimeout.requestId;
+    let journalEntry = await client.queryRequest(journalRequestId);
+    for (let attempt = 0; attempt < 400 && journalEntry.state !== 'done'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      journalEntry = await client.queryRequest(journalRequestId);
+    }
+    const journalStored = await client.loadRagChunks();
+    const journalCommitted = journalStored.some((chunk) => chunk.chunkId === 'journal-bulk-0');
+    if (journalEntry.state !== 'done'
+      || journalEntry.outcome !== 'ok'
+      || !journalCommitted) {
+      throw new Error(`Database utility did not confirm a timed-out write by operation id: ${JSON.stringify({
+        state: journalEntry.state,
+        outcome: journalEntry.outcome,
+        committed: journalCommitted
+      })}`);
+    }
+    const unknownEntry = await client.queryRequest('request-id-that-never-arrived');
+    if (unknownEntry.state !== 'unknown' || unknownEntry.outcome !== null) {
+      throw new Error(`Database utility reported a fabricated journal entry: ${JSON.stringify(unknownEntry)}`);
+    }
+
+    // #42 验收 1：长写进行中发起一次读，读不被阻塞到长写结束。
+    // 判据不是"读很快"，而是"读结束时长写还没结束"——只有在读走独立队列/连接时
+    // 才可能成立，共用一条串行链时读必然排在写之后。
+    const longWriteChunks = journalChunks.map((chunk, index) => ({
+      ...chunk,
+      chunkId: `concurrent-bulk-${index}`,
+      contentHash: `concurrent-${index}`
+    }));
+    let writeSettled = false;
+    let writeError: unknown = null;
+    const writeStartedAt = performance.now();
+    const longWrite = client.replaceRagChunks(longWriteChunks)
+      .then(() => { writeSettled = true; })
+      .catch((error: unknown) => { writeError = error; });
+    const readStartedAt = performance.now();
+    const auditWhileWriting = await client.listAuditEvents();
+    const readMs = performance.now() - readStartedAt;
+    const readBeforeWriteSettled = !writeSettled;
+    await longWrite;
+    const writeMs = performance.now() - writeStartedAt;
+    if (writeError) throw writeError;
+    // 判据：读在长写结束前就返回，且读耗时相对写耗时可以忽略。串行队列下
+    // readBeforeWriteSettled 必定为 false（读要等写完成才有机会被处理）。
+    if (!readBeforeWriteSettled || readMs * 4 > writeMs) {
+      throw new Error(`Database utility read was serialized behind a long write: ${JSON.stringify({
+        readMs, writeMs, readBeforeWriteSettled
+      })}`);
+    }
+    if (!Array.isArray(auditWhileWriting)) {
+      throw new Error('Database utility read returned no audit list during a long write.');
+    }
+
     // #40：fallback -> 伴随库必须经 utility 进程的一致性快照完成（主进程不做
     // SQLite 同步 I/O，也不能分文件复制 WAL 库）。这里跑真实 Electron 链：
     // 造一个带标记表的 fallback 库，让 openWorkspace 带着 migrateFrom* 打开。

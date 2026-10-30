@@ -7,13 +7,16 @@ import {
   KnowledgeStore,
   openAppDatabase,
   openSqliteOperationLogStore,
+  openWorkspaceDatabase,
   SqliteKnowledgeStorePersistence,
-  type SqliteDatabase,
-  type SqliteOperationLogStore
+  SqliteOperationLogStore,
+  type SqliteDatabase
 } from '@soulforge/core';
 import {
   OPERATION_LOG_UTILITY_PROTOCOL,
+  isReadOnlyUtilityMethod,
   type OpenWorkspaceDatabasePayload,
+  type OperationLogRequestJournalEntry,
   type OperationLogUtilityRequest,
   type OperationLogUtilityResponse,
   type ProviderUsageAggregate,
@@ -36,6 +39,124 @@ let queueDepth = 0;
 let workspaceRootPath: string | null = null;
 let workspaceGame: string | null = null;
 
+/**
+ * 读侧独立连接（#42）。
+ *
+ * 读写共用一条 promise 链时，一次长写（提交事务、批量替换 RAG 块）会把后面所有读
+ * 一起堵住，而读是 UI 与 Agent 的常规操作。这里多开一条 **只读** 连接：SQLite 的
+ * WAL 允许一写多读，读看到的是已提交快照，不会被写事务的锁阻塞。
+ *
+ * 读连接不跑迁移、不建表，所以它永远只能看到已经由写侧建好的库；打不开时读方法
+ * 明确报 DATABASE_UTILITY_NOT_INITIALIZED，而不是偷偷退回写队列（退回就等于把
+ * "读不被长写阻塞"这条保证悄悄取消）。
+ */
+let readDatabase: SqliteDatabase | null = null;
+let readStore: SqliteOperationLogStore | null = null;
+let readDurableRepository: DurableWorkspaceRepository | null = null;
+let readWorkspaceDataRepository: WorkspaceDataRepository | null = null;
+let readQueue: Promise<void> = Promise.resolve();
+
+/**
+ * 请求台账（#42）。
+ *
+ * 调用方超时只是"没收到回执"，不代表 worker 里没执行。台账记录每个 requestId 的
+ * 真实结局，超时后可以按操作 ID 查：done + ok 表示确实提交了，不要把重试当成
+ * 第一次执行。只保留最近 512 条——被挤掉的查询返回 `state: 'unknown'`，那同样
+ * 不足以断定"没执行"。
+ */
+const REQUEST_JOURNAL_LIMIT = 512;
+const requestJournal = new Map<string, {
+  requestId: string;
+  method: string;
+  state: 'queued' | 'running' | 'done';
+  outcome: 'ok' | 'request-failed' | 'workerfail' | null;
+  errorCode?: string;
+  enqueuedAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+}>();
+
+function journalUpdate(
+  requestId: string,
+  method: string,
+  patch: Partial<{
+    state: 'queued' | 'running' | 'done';
+    outcome: 'ok' | 'request-failed' | 'workerfail';
+    errorCode: string;
+    startedAt: number;
+    finishedAt: number;
+  }>
+): void {
+  const previous = requestJournal.get(requestId);
+  const entry = previous ?? {
+    requestId,
+    method,
+    state: 'queued' as const,
+    outcome: null,
+    enqueuedAt: performance.now(),
+    startedAt: null,
+    finishedAt: null
+  };
+  const next = { ...entry, ...patch };
+  requestJournal.delete(requestId);
+  requestJournal.set(requestId, next);
+  while (requestJournal.size > REQUEST_JOURNAL_LIMIT) {
+    const oldest = requestJournal.keys().next().value;
+    if (oldest === undefined) break;
+    requestJournal.delete(oldest);
+  }
+}
+
+function readJournalEntry(requestId: string): OperationLogRequestJournalEntry {
+  const entry = requestJournal.get(requestId);
+  if (!entry) {
+    return {
+      requestId,
+      method: 'unknown',
+      state: 'unknown',
+      outcome: null,
+      queueWaitMs: null,
+      runMs: null
+    };
+  }
+  return {
+    requestId,
+    method: entry.method,
+    state: entry.state,
+    outcome: entry.outcome,
+    ...(entry.errorCode ? { errorCode: entry.errorCode } : {}),
+    queueWaitMs: entry.startedAt === null ? null : boundedDuration(entry.startedAt - entry.enqueuedAt),
+    runMs: entry.startedAt === null || entry.finishedAt === null
+      ? null
+      : boundedDuration(entry.finishedAt - entry.startedAt)
+  };
+}
+
+/**
+ * 走读队列的方法。判据是"只读"而非"快"：这里每一条都只查库、不写库，因此可以
+ * 在只读连接上跑。新增方法必须复查这一点——写方法混进来会在只读连接上抛
+ * SQLITE_READONLY，而不是静默写坏数据。
+ */
+const READ_ONLY_METHODS: ReadonlySet<string> = new Set<OperationLogUtilityRequest['method']>([
+  'health',
+  'providerUsageSummary',
+  'queryRequest',
+  'get',
+  'list',
+  'history',
+  'listIncompleteTransactions',
+  'listRecoveryPoints',
+  'planRecoveryCleanup',
+  'listAuditEvents',
+  'listResourceEntryChanges',
+  'searchFiles',
+  'loadRagChunks',
+  'searchRagChunks',
+  'loadRagEmbeddings',
+  'loadRagEmbeddingRecords',
+  'ragEmbeddingModel'
+]);
+
 const writeUtilityTrace = createQueueObservationWriter({ side: 'worker' });
 
 const utilityParentPort = process.parentPort;
@@ -46,6 +167,7 @@ utilityParentPort.on('message', (event) => {
   const depth = ++queueDepth;
   const requestId = requestIdOrUnknown(request);
   const method = methodOrUnknown(request);
+  journalUpdate(requestId, method, { state: 'queued' });
   writeUtilityTrace({
     event: 'enqueue',
     requestId,
@@ -58,8 +180,9 @@ utilityParentPort.on('message', (event) => {
     dbDurationMs: null,
     timeout: false
   });
-  queue = queue.then(async () => {
+  const run = async (): Promise<void> => {
     const startedAt = performance.now();
+    journalUpdate(requestId, method, { state: 'running', startedAt });
     writeUtilityTrace({
       event: 'start',
       requestId,
@@ -75,13 +198,21 @@ utilityParentPort.on('message', (event) => {
     let outcome: 'ok' | 'request-failed' | 'workerfail' = 'ok';
     let failureCode: string | undefined;
     try {
-      outcome = await handleRequest(request);
+      outcome = isReadOnlyUtilityMethod(method)
+        ? await handleRequest(request, dispatchRead)
+        : await handleRequest(request, dispatch);
     } catch (error) {
       outcome = 'workerfail';
       failureCode = errorCode(error);
       throw error;
     } finally {
       const finishedAt = performance.now();
+      journalUpdate(requestId, method, {
+        state: 'done',
+        outcome,
+        finishedAt,
+        ...(failureCode ? { errorCode: failureCode } : {})
+      });
       writeUtilityTrace({
         event: 'finish',
         requestId,
@@ -98,12 +229,20 @@ utilityParentPort.on('message', (event) => {
       });
       queueDepth -= 1;
     }
-  }).catch((error) => {
+  };
+  // 读走独立队列：它只与其它读互斥，不排在长写后面。
+  const target = isReadOnlyUtilityMethod(method)
+    ? (readQueue = readQueue.then(run))
+    : (queue = queue.then(run));
+  target.catch((error) => {
     process.stderr.write(`SoulForge database utility queue failure: ${errorCode(error)}\n`);
   });
 });
 
-async function handleRequest(value: unknown): Promise<'ok' | 'request-failed'> {
+async function handleRequest(
+  value: unknown,
+  dispatchFn: (request: OperationLogUtilityRequest) => Promise<unknown> | unknown = dispatch
+): Promise<'ok' | 'request-failed'> {
   if (!isRequest(value)) {
     post({
       protocolVersion: OPERATION_LOG_UTILITY_PROTOCOL,
@@ -118,7 +257,7 @@ async function handleRequest(value: unknown): Promise<'ok' | 'request-failed'> {
   }
 
   try {
-    const result = await dispatch(value);
+    const result = await dispatchFn(value);
     post({
       protocolVersion: OPERATION_LOG_UTILITY_PROTOCOL,
       requestId: value.requestId,
@@ -311,7 +450,122 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
   }
 }
 
+/**
+ * 读侧分发（#42）。这里每个分支都只查库，跑在只读连接上，因此不会被长写挡住。
+ *
+ * 与 `dispatch` 里的同名分支刻意并存而不是抽公共函数：写侧分支用的全局实例是
+ * 读写连接上的仓储，读侧用只读连接上的仓储。合并成一个函数就需要在运行时切换
+ * 全局，而 dispatch 是 async，切换会在 await 处泄漏到别的请求上。
+ */
+function dispatchRead(request: OperationLogUtilityRequest): unknown {
+  switch (request.method) {
+    case 'health':
+      return {
+        ready: readStore !== null,
+        appReady: appDatabase !== null,
+        ...(workspaceId ? { workspaceId } : {})
+      };
+    case 'providerUsageSummary':
+      // 应用库（app.db）只有写侧会打开，读侧复用同一实例：它不参与工作区长写，
+      // 不会成为阻塞源。
+      return providerUsageSummary();
+    case 'queryRequest':
+      return readJournalEntry(request.payload.requestId);
+    case 'get':
+      return requireReadStore().get(request.payload.opId);
+    case 'list':
+      return requireReadStore().list(request.payload.workspaceId);
+    case 'history':
+      return requireReadStore().history(request.payload.workspaceId);
+    case 'listIncompleteTransactions':
+      return requireReadDurableRepository().listIncompleteTransactions();
+    case 'listRecoveryPoints':
+      return requireReadDurableRepository().listRecoveryPoints();
+    case 'planRecoveryCleanup':
+      return requireReadDurableRepository().planRecoveryCleanup({
+        ...(request.payload.now ? { now: new Date(request.payload.now) } : {}),
+        ...(request.payload.maxAgeDays === undefined ? {} : { maxAgeDays: request.payload.maxAgeDays }),
+        ...(request.payload.maxBytes === undefined ? {} : { maxBytes: request.payload.maxBytes })
+      });
+    case 'listAuditEvents':
+      return requireReadDurableRepository().listAuditEvents();
+    case 'listResourceEntryChanges':
+      return requireReadDurableRepository().listResourceEntryChanges(request.payload.opId);
+    case 'searchFiles':
+      return requireReadWorkspaceDataRepository().searchFiles(
+        request.payload.query,
+        request.payload.limit
+      );
+    case 'loadRagChunks':
+      assertWorkspaceRequest(request.payload.workspaceId);
+      return requireReadWorkspaceDataRepository().loadRagChunks();
+    case 'searchRagChunks':
+      assertWorkspaceRequest(request.payload.workspaceId);
+      return requireReadWorkspaceDataRepository().searchRagChunks(
+        request.payload.query,
+        request.payload.limit
+      );
+    case 'loadRagEmbeddings': {
+      assertWorkspaceRequest(request.payload.workspaceId);
+      const vectors = requireReadWorkspaceDataRepository().loadRagEmbeddings();
+      const plain: Record<string, number[]> = {};
+      for (const [chunkId, vector] of vectors) plain[chunkId] = Array.from(vector);
+      return plain;
+    }
+    case 'loadRagEmbeddingRecords':
+      assertWorkspaceRequest(request.payload.workspaceId);
+      return requireReadWorkspaceDataRepository().loadRagEmbeddingRecords().map((record) => ({
+        chunkId: record.chunkId,
+        model: record.model,
+        contentHash: record.contentHash,
+        vector: Array.from(record.vector)
+      }));
+    case 'ragEmbeddingModel':
+      assertWorkspaceRequest(request.payload.workspaceId);
+      return requireReadWorkspaceDataRepository().ragEmbeddingModel();
+    default:
+      // READ_ONLY_METHODS 与上面的分支必须一一对应；漏一个就在这里炸，而不是
+      // 悄悄退回写队列。
+      throw codedError(
+        'DATABASE_UTILITY_READ_ROUTE_MISSING',
+        `读队列方法 ${String(request.method)} 没有读侧实现。`
+      );
+  }
+}
+
+/**
+ * 只读进程打开工作区（#42）。
+ *
+ * better-sqlite3 是同步 API：长写会在 worker 里同步跑事务，整个 JS 线程被占住，
+ * parentPort 上的读消息连接收都做不到。所以"同进程内分队列 + 只读连接"结构上
+ * 不可能让读绕过长写——必须让读跑在**另一个进程**里。这个进程只打开只读连接，
+ * 不跑迁移、不做 legacy 导入，也拒绝任何写方法（写会撞 SQLITE_READONLY）。
+ */
+function openReadOnlyWorkspace(payload: OpenWorkspaceDatabasePayload) {
+  closeStore();
+  openReadView(payload.databasePath, payload.workspaceId);
+  if (!readStore || !readDurableRepository || !readWorkspaceDataRepository) {
+    throw codedError(
+      'DATABASE_UTILITY_READ_VIEW_UNAVAILABLE',
+      '只读视图无法打开工作区数据库。'
+    );
+  }
+  store = readStore;
+  durableRepository = readDurableRepository;
+  workspaceDataRepository = readWorkspaceDataRepository;
+  workspaceId = payload.workspaceId;
+  workspaceRootPath = payload.rootPath;
+  workspaceGame = payload.game;
+  return {
+    workspaceId,
+    readOnly: true as const,
+    legacyImport: { status: 'source_missing' as const, recordCount: 0 },
+    semanticImport: { status: 'source_missing' as const, nodeCount: 0, edgeCount: 0 }
+  };
+}
+
 async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
+  if (payload.readOnly === true) return openReadOnlyWorkspace(payload);
   closeStore();
   let nextAppDatabase: SqliteDatabase | null = null;
   let next: SqliteOperationLogStore | null = null;
@@ -367,6 +621,7 @@ async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
     workspaceId = payload.workspaceId;
     workspaceRootPath = payload.rootPath;
     workspaceGame = payload.game;
+    openReadView(payload.databasePath, payload.workspaceId);
     return {
       workspaceId,
       ...(migration ? { migration } : {}),
@@ -533,6 +788,60 @@ function usageNumbers(row: UsageAggregateRow): Omit<ProviderUsageAggregate, 'ser
   };
 }
 
+/**
+ * 打开只读视图（#42）。
+ *
+ * 只读连接不跑迁移（`readonly: true` 在 openMigratedDatabase 里就是"跳过迁移"），
+ * 所以必须等写侧把库建好之后再开；fileMustExist 让"库还不存在"变成显式报错而不是
+ * 在磁盘上凭空建一个空库。
+ *
+ * 打不开的后果是读方法返回 DATABASE_UTILITY_READ_VIEW_UNAVAILABLE，而不是退回写
+ * 队列——退回会让"读不被长写阻塞"这条保证静默失效。
+ */
+function openReadView(databasePath: string, id: string): void {
+  closeReadView();
+  try {
+    readDatabase = openWorkspaceDatabase(databasePath, {
+      readonly: true,
+      fileMustExist: true,
+      ...(process.env.SOULFORGE_SQLITE_NATIVE_BINDING
+        ? { nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING }
+        : {})
+    });
+    readStore = new SqliteOperationLogStore(readDatabase, id, false);
+    readDurableRepository = new DurableWorkspaceRepository(readDatabase, id);
+    readWorkspaceDataRepository = new WorkspaceDataRepository(readDatabase, id);
+  } catch {
+    closeReadView();
+  }
+}
+
+/**
+ * 读连接开不起来时退一步：读队列仍独立于写队列，但复用写连接上的实例。
+ *
+ * 这一步只有"读不再排在写队列之后"的队列级保证，没有 WAL 快照隔离；比直接抛错
+ * 好，因为只读连接打不开通常意味着权限问题，而读写连接此时是能用的。
+ */
+function requireReadStore(): SqliteOperationLogStore {
+  return readStore ?? requireStore();
+}
+
+function requireReadDurableRepository(): DurableWorkspaceRepository {
+  return readDurableRepository ?? requireDurableRepository();
+}
+
+function requireReadWorkspaceDataRepository(): WorkspaceDataRepository {
+  return readWorkspaceDataRepository ?? requireWorkspaceDataRepository();
+}
+
+function closeReadView(): void {
+  readDatabase?.close();
+  readDatabase = null;
+  readStore = null;
+  readDurableRepository = null;
+  readWorkspaceDataRepository = null;
+}
+
 function requireStore(): SqliteOperationLogStore {
   if (!store) throw codedError('DATABASE_UTILITY_NOT_INITIALIZED', '工作区数据库尚未初始化。');
   return store;
@@ -554,6 +863,7 @@ function requireAppDatabase(): SqliteDatabase {
 }
 
 function closeStore(): void {
+  closeReadView();
   store?.close();
   appDatabase?.close();
   store = null;

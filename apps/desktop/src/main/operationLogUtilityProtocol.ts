@@ -86,6 +86,11 @@ export interface OpenWorkspaceDatabasePayload {
   migrateFromDatabasePath?: string;
   /** fallback 的 fingerprint-store.json；快照提交成功后才复制。 */
   migrateFingerprintFromPath?: string;
+  /**
+   * 只读视图进程（#42）：只打开只读连接、不跑迁移、不做 legacy 导入。
+   * 长写在写进程里同步占满线程时，读进程仍能响应。
+   */
+  readOnly?: boolean;
 }
 
 export interface OperationLogUtilityPayloadMap {
@@ -160,6 +165,9 @@ export interface OperationLogUtilityPayloadMap {
     };
   };
   loadKnowledgeSnapshot: { workspaceId: string; rootPath: string; game: string };
+  // #42：调用方超时后凭 requestId 查 worker 里的真实结局。读方法，走读队列，
+  // 因此长写进行中也能查到。
+  queryRequest: { requestId: string };
   health: Record<string, never>;
   close: Record<string, never>;
 }
@@ -189,6 +197,8 @@ export interface OperationLogUtilityResultMap {
     workspaceId: string;
     /** 本次打开是否顺带把 fallback 库迁移成了伴随库（含失败原因）。 */
     migration?: WorkspaceDatabaseMigrationOutcome;
+    /** 只读视图进程：没有迁移、没有 legacy 导入。 */
+    readOnly?: true;
     legacyImport: {
       status: 'imported' | 'already_imported' | 'source_missing';
       recordCount: number;
@@ -258,11 +268,63 @@ export interface OperationLogUtilityResultMap {
   };
   upsertSemanticFileCache: null;
   loadKnowledgeSnapshot: KnowledgeStoreSnapshot | null;
+  queryRequest: OperationLogRequestJournalEntry;
   health: { ready: boolean; appReady: boolean; workspaceId?: string };
   close: null;
 }
 
+/**
+ * worker 侧请求台账条目（#42）。
+ *
+ * `state: 'unknown'` 表示 worker 里没有这条请求的记录——可能已被挤出台账（只保留
+ * 最近 512 条），也可能是 requestId 从未到达。两种情况都必须让调用方无法据此
+ * 断定"没有执行"，所以查询结果只说明"查不到记录"，不说明"没写"。
+ */
+export interface OperationLogRequestJournalEntry {
+  requestId: string;
+  method: string;
+  state: 'queued' | 'running' | 'done' | 'unknown';
+  outcome: 'ok' | 'request-failed' | 'workerfail' | null;
+  errorCode?: string;
+  queueWaitMs: number | null;
+  runMs: number | null;
+}
+
 export type OperationLogUtilityMethod = keyof OperationLogUtilityResultMap;
+
+/**
+ * 只读方法表（#42）。worker 用它决定走读队列（只读连接），client 用它决定能否
+ * 与在飞的写并发派发。两侧共用一张表，避免"worker 分了队列、client 仍在串行
+ * 排队"这种只在集成分支上才暴露的错位。
+ *
+ * 判据是"只查不写"，不是"很快"。加方法前必须确认它不写库——写方法混进来会在
+ * 只读连接上抛 SQLITE_READONLY，而不是静默出错。
+ */
+export const READ_ONLY_UTILITY_METHODS: ReadonlySet<OperationLogUtilityMethod> = new Set<
+  OperationLogUtilityMethod
+>([
+  'health',
+  'providerUsageSummary',
+  'queryRequest',
+  'get',
+  'list',
+  'history',
+  'listIncompleteTransactions',
+  'listRecoveryPoints',
+  'planRecoveryCleanup',
+  'listAuditEvents',
+  'listResourceEntryChanges',
+  'searchFiles',
+  'loadRagChunks',
+  'searchRagChunks',
+  'loadRagEmbeddings',
+  'loadRagEmbeddingRecords',
+  'ragEmbeddingModel'
+]);
+
+export function isReadOnlyUtilityMethod(method: string): boolean {
+  return READ_ONLY_UTILITY_METHODS.has(method as OperationLogUtilityMethod);
+}
 
 type request<Method extends string, Payload> = {
   protocolVersion: typeof OPERATION_LOG_UTILITY_PROTOCOL;

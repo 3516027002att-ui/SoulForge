@@ -27,6 +27,8 @@ import {
   OPERATION_LOG_UTILITY_PROTOCOL,
   isOperationLogUtilityResponse,
   type OpenWorkspaceDatabasePayload,
+  type OperationLogRequestJournalEntry,
+  isReadOnlyUtilityMethod,
   type OperationLogUtilityMethod,
   type OperationLogUtilityPayloadMap,
   type OperationLogUtilityRequest,
@@ -135,12 +137,36 @@ export class OperationLogUtilityClient implements OperationLogStore {
   private activeWorkspace: OpenWorkspaceDatabasePayload | null = null;
   private activeAppDatabasePath: string | null = null;
   private opening: Promise<void> | null = null;
+  /**
+   * 读进程（#42）。better-sqlite3 是同步 API：长写在写进程里同步占满线程时，
+   * 同一进程的读消息连"被接收"都做不到。读因此必须跑在另一个进程里，只用
+   * 只读连接打开同一个库。
+   */
+  private reader: UtilityProcess | null = null;
+  private readerWorkspaceKey: string | null = null;
+  private openingReader: Promise<void> | null = null;
 
   constructor(
     private readonly modulePath: string,
-    private readonly requestTimeoutMs = 60_000,
+    private requestTimeoutMs = 60_000,
     private readonly nativeBindingPath?: string
   ) {}
+
+  /**
+   * 临时改调用侧超时（#42 验收用）。
+   *
+   * 超时只存在于调用侧，worker 照常执行；要验证"超时后凭操作 ID 能查到结局"，
+   * 就必须能把某一次写入压到确定会超时，而不是在测试里赌运气。
+   *
+   * 写方法在 timeoutForMethod 里有 120s 下限（防止长写在正常路径上被误杀），
+   * 所以压超时需要显式 `ignoreFloor`——把下限一起绕开，否则这条验收根本压不出超时。
+   */
+  setRequestTimeout(timeoutMs: number, options: { ignoreFloor?: boolean } = {}): void {
+    this.requestTimeoutMs = timeoutMs;
+    this.timeoutFloorIgnored = options.ignoreFloor === true;
+  }
+
+  private timeoutFloorIgnored = false;
 
   async openWorkspace(
     payload: OpenWorkspaceDatabasePayload
@@ -432,12 +458,25 @@ export class OperationLogUtilityClient implements OperationLogStore {
     return this.request('health', {});
   }
 
+  /**
+   * 按操作 ID 查 worker 里的真实结局（#42）。
+   *
+   * 超时只说明"没收到回执"，不代表没执行；调用方在重试任何写入前必须先查这里。
+   * 返回 `state: 'done'` + `outcome: 'ok'` 表示那次写入确实提交了，重试就会重复
+   * 施加副作用。`state: 'unknown'` 表示台账里没有这条记录（已被挤出或从未到达），
+   * 它同样**不能**被当成"没执行"。
+   */
+  async queryRequest(requestId: string): Promise<OperationLogRequestJournalEntry> {
+    return this.request('queryRequest', { requestId });
+  }
+
   /** Force a fresh utility process and reopen the same workspace; pending RPCs are never replayed. */
   async restart(): Promise<void> {
     const payload = this.activeWorkspace;
     const appDatabasePath = this.activeAppDatabasePath;
     const child = this.process;
     if ((!payload && !appDatabasePath) || !child) throw new Error('数据库后台进程没有可恢复的活动数据库。');
+    this.closeReader();
     this.process = null;
     this.activeWorkspace = null;
     this.activeAppDatabasePath = null;
@@ -452,6 +491,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
   async dispose(): Promise<void> {
     const opening = this.opening;
     if (opening) await opening.catch(() => undefined);
+    this.closeReader();
     const child = this.process;
     this.activeWorkspace = null;
     this.activeAppDatabasePath = null;
@@ -474,6 +514,16 @@ export class OperationLogUtilityClient implements OperationLogStore {
       const opened = await this.request('openWorkspace', payload);
       this.activeWorkspace = { ...payload };
       this.activeAppDatabasePath = payload.appDatabasePath;
+      // 读进程尽力而为：它开不起来时读退回写进程，写路径不受影响。
+      try {
+        await this.ensureReader(payload);
+      } catch (error) {
+        process.stderr.write(
+          `[SoulForge database utility] 只读进程未启动，读将退回写进程：${
+            error instanceof Error ? error.message : String(error)
+          }\n`
+        );
+      }
       return opened;
     } catch (error) {
       this.process?.kill();
@@ -496,6 +546,75 @@ export class OperationLogUtilityClient implements OperationLogStore {
       this.activeAppDatabasePath = null;
       throw error;
     }
+  }
+
+  /**
+   * 打开读进程（#42）。读进程只跑只读连接：不迁移、不导入 legacy，也就不会和写进程
+   * 争写锁。打开失败不影响写路径——读会退回写进程，退化成"读排在长写后面"的旧行为，
+   * 但不会把功能整体打死。
+   */
+  private async ensureReader(payload: OpenWorkspaceDatabasePayload): Promise<void> {
+    const key = `${payload.databasePath}|${payload.workspaceId}`;
+    if (this.reader && this.readerWorkspaceKey === key) return;
+    if (this.openingReader) await this.openingReader.catch(() => undefined);
+    if (this.readerWorkspaceKey === key && this.reader) return;
+    const opening = this.openReaderInternal(payload, key);
+    this.openingReader = opening.catch(() => undefined);
+    try {
+      await opening;
+      } finally {
+      this.openingReader = null;
+    }
+  }
+
+  private async openReaderInternal(
+    payload: OpenWorkspaceDatabasePayload,
+    key: string
+  ): Promise<void> {
+    this.reader?.kill();
+    this.reader = null;
+    this.readerWorkspaceKey = null;
+    const child = utilityProcess.fork(this.modulePath, [], {
+      serviceName: 'SoulForge 工作区数据库（只读）',
+      stdio: 'pipe',
+      ...(this.nativeBindingPath
+        ? {
+            env: {
+              ...process.env,
+              SOULFORGE_SQLITE_NATIVE_BINDING: this.nativeBindingPath
+            }
+          }
+        : {})
+    });
+    child.on('message', (message) => this.onMessage(message));
+    child.on('exit', () => {
+      if (this.reader !== child) return;
+      this.reader = null;
+      this.readerWorkspaceKey = null;
+    });
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      try {
+        process.stderr.write(`[SoulForge database utility reader] ${String(chunk)}`);
+      } catch {
+        // 忽略管道断开
+      }
+    });
+    this.reader = child;
+    try {
+      await this.requestOn(child, 'openWorkspace', { ...payload, readOnly: true });
+      this.readerWorkspaceKey = key;
+    } catch (error) {
+      child.kill();
+      if (this.reader === child) this.reader = null;
+      this.readerWorkspaceKey = null;
+      throw error;
+    }
+  }
+
+  private closeReader(): void {
+    this.reader?.kill();
+    this.reader = null;
+    this.readerWorkspaceKey = null;
   }
 
   private spawn(): void {
@@ -540,7 +659,13 @@ export class OperationLogUtilityClient implements OperationLogStore {
     method: Method,
     payload: OperationLogUtilityPayloadMap[Method]
   ): Promise<OperationLogUtilityResultMap[Method]> {
-    const child = this.process;
+    // 读走读进程，写走写进程。两个方法必须留在写进程：queryRequest（台账在写进程，
+    // 路由错会把「已提交」报成「未知」）和 providerUsageSummary（app.db 只在写进程打开）。
+    const writeProcessOnly = method === 'queryRequest'
+      || method === 'providerUsageSummary'
+      || method === 'health';
+    const readChild = !writeProcessOnly && isReadOnlyUtilityMethod(method) ? this.reader : null;
+    const child = readChild ?? this.process;
     if (!child) return Promise.reject(new Error('数据库后台进程不可用。'));
     return this.requestOn(child, method, payload);
   }
@@ -658,14 +783,19 @@ export class OperationLogUtilityClient implements OperationLogStore {
   }
 
   private drainDispatchQueue(setDispatchedAt?: (value: number) => void): void {
-    if (this.dispatchingRequestId !== null) return;
+    // #42：原先"同时只有一条请求在飞"。那条约束让读必然排在长写之后——即使 worker
+    // 里已经分队列，读请求也根本没发出去。现在允许在读方法上与在飞的写并发；写与写
+    // 仍然串行（SQLite 只有一把写锁，并发派发只会多出排队失败）。
     for (;;) {
-      const index = this.nextDispatchIndex();
+      const index = this.nextDispatchIndex(
+        (method) => this.dispatchingRequestId === null || isReadOnlyUtilityMethod(method)
+      );
       if (index < 0) return;
       const queued = this.dispatchQueue.splice(index, 1)[0]!;
       const pending = this.pending.get(queued.requestId);
       if (!pending) continue;
-      if (this.process !== queued.child || queued.child !== this.process) {
+      // 读/写是两个子进程：只要目标子进程还在（写进程或读进程），这次派发就仍然有效。
+      if (this.process !== queued.child && this.reader !== queued.child) {
         clearTimeout(pending.timer);
         this.pending.delete(queued.requestId);
         pending.reject(new Error('数据库后台进程已重启，请重试本次请求。'));
@@ -674,7 +804,8 @@ export class OperationLogUtilityClient implements OperationLogStore {
       const dispatchedAt = performance.now();
       pending.dispatchedAt = dispatchedAt;
       setDispatchedAt?.(dispatchedAt);
-      this.dispatchingRequestId = queued.requestId;
+      // 只有写请求占用「在飞的写」这一格；读可以叠加并发，所以不占。
+      this.dispatchingRequestId = isReadOnlyUtilityMethod(queued.method) ? null : queued.requestId;
       writeUtilityTrace({
         side: 'client',
         event: 'dispatch',
@@ -718,11 +849,13 @@ export class OperationLogUtilityClient implements OperationLogStore {
     }
   }
 
-  private nextDispatchIndex(): number {
+  private nextDispatchIndex(predicate?: (method: OperationLogUtilityMethod) => boolean): number {
     if (this.dispatchQueue.length === 0) return -1;
-    let bestIndex = 0;
-    for (let index = 1; index < this.dispatchQueue.length; index += 1) {
-      if (this.dispatchQueue[index]!.priority > this.dispatchQueue[bestIndex]!.priority) bestIndex = index;
+    let bestIndex = -1;
+    for (let index = 0; index < this.dispatchQueue.length; index += 1) {
+      const candidate = this.dispatchQueue[index]!;
+      if (predicate && !predicate(candidate.method)) continue;
+      if (bestIndex < 0 || candidate.priority > this.dispatchQueue[bestIndex]!.priority) bestIndex = index;
     }
     return bestIndex;
   }
@@ -743,7 +876,9 @@ export class OperationLogUtilityClient implements OperationLogStore {
       case 'createTransaction':
       case 'transitionTransaction':
       case 'finalizeCommit':
-        return Math.max(this.requestTimeoutMs, 120_000);
+        return this.timeoutFloorIgnored
+        ? this.requestTimeoutMs
+        : Math.max(this.requestTimeoutMs, 120_000);
       case 'get':
       case 'list':
       case 'history':
@@ -754,7 +889,9 @@ export class OperationLogUtilityClient implements OperationLogStore {
         // Foreground Agent/operation reads must be able to wait behind one
         // already-running RAG transaction. They remain bounded and are still
         // rejected on process failure or explicit close.
-        return Math.max(this.requestTimeoutMs, 120_000);
+        return this.timeoutFloorIgnored
+        ? this.requestTimeoutMs
+        : Math.max(this.requestTimeoutMs, 120_000);
       default:
         return this.requestTimeoutMs;
     }
