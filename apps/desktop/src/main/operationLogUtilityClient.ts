@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { LateRequestJournal, type LateRequestQuery } from './lateRequestJournal.js';
 import { performance } from 'node:perf_hooks';
 import { utilityProcess, type UtilityProcess } from 'electron';
 import type {
@@ -134,6 +135,11 @@ export class OperationLogUtilityClient implements OperationLogStore {
   private reader: OperationLogUtilityClient | null = null;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly lateRequests = new Map<string, LateRequest>();
+  /**
+   * 超时请求的结局台账（#42）。时间戳仍留在 lateRequests（trace 需要），
+   * 但"最终提交了没有"只由台账回答，避免两处各存一份状态。
+   */
+  private readonly lateJournal = new LateRequestJournal();
   /** The utility process is serial by design; keep a host-side queue so a
    * long background RAG transaction cannot sit in front of every foreground
    * Agent read that arrived later. */
@@ -813,7 +819,11 @@ export class OperationLogUtilityClient implements OperationLogStore {
         if (isDispatchedRequest) this.drainDispatchQueue();
         return;
       }
-      late.outcome = message.ok ? 'ok' : 'request-failed';
+      this.lateJournal.settle(
+        message.requestId,
+        message.ok ? 'ok' : 'request-failed',
+        message.error?.code
+      );
       if (!message.ok) late.errorCode = message.error?.code ?? 'DATABASE_UTILITY_FAILED';
       // 重新插到尾部并限制长度：保留结局供 queryRequest 查询。
       this.lateRequests.delete(message.requestId);
@@ -898,6 +908,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
   }
 
   private rememberLateRequest(request: Omit<LateRequest, 'expiresAt'>): void {
+    this.lateJournal.record(request.requestId, request.method);
     this.pruneLateRequests();
     this.lateRequests.set(request.requestId, {
       ...request,
