@@ -60,7 +60,11 @@ for (const key of [
   'base64DecodeMs',
   'concatJsonParseMs',
   'materializeTotalMs',
-  'return materializeFileBackedResult'
+  // 断言钉的是**调用点**而不是某个拼写：早先钉 `return materializeFileBackedResult`，
+  // 代码把返回值改成先赋给 const 再复用时，这条就误报『transport wiring missing』——
+  // 接线其实在，只是不再是 return 直出。这里匹配赋值右侧的调用，定义处
+  // （`async function materializeFileBackedResult<T>(`）不会被命中。
+  '= materializeFileBackedResult('
 ]) assert.match(runBridgeSource, new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `runBridge transport wiring missing ${key}`);
 for (const key of [
   'BRIDGE_TRANSPORT_TIMING_CODE',
