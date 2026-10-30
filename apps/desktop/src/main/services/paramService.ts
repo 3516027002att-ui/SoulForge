@@ -121,7 +121,7 @@ function projectParamNativeTelemetry(value: unknown): ParamNativeTelemetry | nul
 }
 
 
-const sessionBindings = readLifetime.createCache<string, ParamSessionBinding>();
+const sessionBindings = readLifetime.createCache<string, ParamSessionBinding>({ maxEntries: 64 });
 
 // Isolated dummy for pre-split shared cache — real invalidation now via composition root (raw domain owns its cache).
 const containerChildrenCache = readLifetime.createCache<string, unknown>();
