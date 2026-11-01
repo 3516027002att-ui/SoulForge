@@ -6,6 +6,7 @@
 
 import React, { useState, type ReactElement } from 'react';
 import type { EventDiagnostic } from '@soulforge/core';
+import { Button, IconButton } from '../components/Button.js';
 
 export interface EventProblemsPaneProps {
   diagnostics: readonly EventDiagnostic[];
@@ -31,33 +32,17 @@ export function EventProblemsPane(props: EventProblemsPaneProps): ReactElement {
       <div className="esw-problems__header">
         <div className="esw-problems__filters">
           <span className="esw-problems__title">问题</span>
-          <button
-            type="button"
-            className={filter === 'all' ? 'toolbar-button is-active' : 'toolbar-button'}
-            onClick={() => setFilter('all')}
-          >
+          <Button variant="ghost" size="sm" pressed={filter === 'all'} onClick={() => setFilter('all')}>
             全部 ({diagnostics.length})
-          </button>
-          <button
-            type="button"
-            className={filter === 'error' ? 'toolbar-button is-active' : 'toolbar-button'}
-            onClick={() => setFilter('error')}
-          >
+          </Button>
+          <Button variant="ghost" size="sm" pressed={filter === 'error'} onClick={() => setFilter('error')}>
             错误 ({errorCount})
-          </button>
-          <button
-            type="button"
-            className={filter === 'warning' ? 'toolbar-button is-active' : 'toolbar-button'}
-            onClick={() => setFilter('warning')}
-          >
+          </Button>
+          <Button variant="ghost" size="sm" pressed={filter === 'warning'} onClick={() => setFilter('warning')}>
             警告 ({warningCount})
-          </button>
+          </Button>
         </div>
-        {onClose && (
-          <button type="button" className="toolbar-button" onClick={onClose} title="关闭问题面板">
-            ✕
-          </button>
-        )}
+        {onClose && <IconButton icon="x" size="sm" label="关闭问题面板" onClick={onClose} />}
       </div>
 
       <div className="esw-problems__list" role="list">

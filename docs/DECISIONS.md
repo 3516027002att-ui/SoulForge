@@ -41,6 +41,18 @@ unsupported until a separate issue designs verified repack and Patch Engine
 writeback. License, configuration, platform, cancellation and verification details
 are documented in [Bridge read cache](bridge-read-cache.md).
 
+## 2026-10-31: frontend redesign keeps the spectral theme, changes layout and interaction
+
+Keep the existing spectral look: the tokens, the ambient field shader, both presets
+and the fonts under `theme/` stay as they are. Rework control layout and
+interaction (buttons, menus, tooltips, tabs, splitters, the Agent dock, workbench
+toolbars and keyboard use) following how the Claude desktop app behaves. Borrow
+behaviour only; do not copy code or CSS from other projects. Order of work:
+shared controls, then the Agent dock, then each workbench. The owner approved an
+interactive mockup of this direction, including document tabs that can be dragged
+out into their own window. An earlier same-day choice to replace the colour theme
+was withdrawn.
+
 ## Verification limits retained from retired governance records
 
 These are historical coverage limits and owner decisions, not a replacement scope registry or a claim that this refactor ran the omitted checks. Current source contracts and actual per-leg results determine present capability. In particular, the old FLVER/MSB no-write and TAE/ESD version restrictions are superseded where the current native writer and editor contracts provide the implemented paths.

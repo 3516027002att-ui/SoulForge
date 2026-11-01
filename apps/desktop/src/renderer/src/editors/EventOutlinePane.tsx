@@ -7,6 +7,7 @@
 import React, { useState, useMemo, type ReactElement } from 'react';
 import type { EventSymbol } from '@soulforge/core';
 import { searchEventSymbols } from '@soulforge/core/dist/emevd/language-service/index.js';
+import { IconButton } from '../components/Button.js';
 
 export interface EventOutlinePaneProps {
   symbols: readonly EventSymbol[];
@@ -36,11 +37,7 @@ export function EventOutlinePane(props: EventOutlinePaneProps): ReactElement {
           onChange={(e) => setQuery(e.target.value)}
           aria-label="搜索事件符号"
         />
-        {onClose && (
-          <button type="button" className="toolbar-button" onClick={onClose} title="关闭大纲">
-            ✕
-          </button>
-        )}
+        {onClose && <IconButton icon="x" size="sm" label="关闭大纲" onClick={onClose} />}
       </div>
 
       <div className="esw-outline__list" role="list">

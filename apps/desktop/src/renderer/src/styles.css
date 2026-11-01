@@ -12,6 +12,7 @@
 @import "./app/NavigationSidebarViews.css";
 @import "./navigation/DomainLibraryList.css";
 @import "./components/control-primitives.css";
+@import "./components/Button.css";
 @import "./app/NavigationSidebarViews.search.css";
 @import "./app/ChangeOperationsViews.audit.css";
 @import "./app/SettingsPanelView.css";

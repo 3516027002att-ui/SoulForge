@@ -2222,8 +2222,7 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   // T5-4 + 问题 4 工具条：新建行/复制当前行/删除当前行 + 导出行/导入行/导出行名/
   // 导入行名 七个真实按钮；未选表时全部禁用（没有可操作的表格目标）。不再有
   // 「Game Parameters · 1 library · N tables」crumb、类型名、行大小。
-  const toolbarButtons = window.getByLabel('PARAM 工作台')
-    .locator('.workbench__toolbar .toolbar-button, .pane-toolbar .toolbar-button');
+  const toolbarButtons = window.getByLabel('PARAM 工作台').locator('.workbench__toolbar').getByRole('button');
   await expect(toolbarButtons).toHaveCount(7);
   await expect(toolbarButtons.nth(0)).toHaveText('新建行');
   await expect(toolbarButtons.nth(1)).toHaveText('复制当前行');
@@ -2236,6 +2235,19 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   await expect(toolbarButtons.nth(0)).toBeDisabled();
   await expect(toolbarButtons.nth(2)).toBeDisabled();
   await expect(toolbarButtons.nth(3)).toBeDisabled();
+  await expect(toolbarButtons.nth(0)).toHaveAttribute('title', '先在左栏选择一个参数表');
+  // 禁用只降颜色、不降透明度（components/Button.css）：.45 透明度会把字和边框一起淡到约 2:1，
+  // 首屏 7 个按钮全禁用时几乎看不见。字色要等于同一位置解析出的 --ink-3。
+  const disabledLook = await toolbarButtons.nth(0).evaluate((el) => {
+    const probe = document.createElement('span');
+    probe.style.color = 'var(--ink-3)';
+    el.append(probe);
+    const ink3 = getComputedStyle(probe).color;
+    probe.remove();
+    return { opacity: getComputedStyle(el).opacity, color: getComputedStyle(el).color, ink3 };
+  });
+  expect(disabledLook.opacity).toBe('1');
+  expect(disabledLook.color).toBe(disabledLook.ink3);
   // EVENT-30B 起事件源码工作台常驻挂载，裸 .workbench 命中两个元素：收窄到 PARAM 工作台。
   const workbenchText = await window.getByLabel('PARAM 工作台').innerText();
   expect(workbenchText).not.toContain('Game Parameters');
@@ -2255,6 +2267,7 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   // 选中表后工具条按钮解除禁用（新建行可用；导出行/导入行已可点击目标）。
   await expect(toolbarButtons.nth(0)).toBeEnabled();
   await expect(toolbarButtons.nth(3)).toBeEnabled();
+  expect(await toolbarButtons.nth(0).evaluate((el) => getComputedStyle(el).color)).not.toBe(disabledLook.color);
 
   // 字段类型控件：enum 字段按类型渲染——原始值留在 input（只读），
   // 当前值标签（枚举标签「攻击」）显示在字段名旁，不是裸自由文本。
@@ -2310,7 +2323,7 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   // 问题 4：行级工具（新建行/复制当前行/删除当前行）真实触发 bridge。fixture 走
   // 合成内存态（就地增删 paramTables 行），重读即见 —— 与行名/CSV 的 fixture
   // 同一套约定（不真写盘）。字段栏行名输入框的 aria-label 暴露当前选中的行。
-  await window.locator('.workbench__toolbar .toolbar-button', { hasText: '新建行' }).click();
+  await toolbarButtons.filter({ hasText: '新建行' }).click();
   await expect.poll(async () =>
     (await ipcCalls(app))['resource.applyContainerParamRowMutations'] ?? 0
   ).toBeGreaterThan(0);
@@ -2319,11 +2332,11 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   await expect(window.getByLabel('行 104 的名字')).toBeVisible();
 
   // 复制当前行（选中的行 104 → 新 id 105），焦点落到新行。
-  await window.locator('.workbench__toolbar .toolbar-button', { hasText: '复制当前行' }).click();
+  await toolbarButtons.filter({ hasText: '复制当前行' }).click();
   await expect(window.getByLabel('行 105 的名字')).toBeVisible();
 
   // 删除当前行（行 105）：删除后选择清空，回到「先在中栏选择一行。」空态。
-  await window.locator('.workbench__toolbar .toolbar-button', { hasText: '删除当前行' }).click();
+  await toolbarButtons.filter({ hasText: '删除当前行' }).click();
   await expect(window.locator('.wb-empty', { hasText: '先在中栏选择一行。' })).toBeVisible();
 
   // 父选区清理：切到 EquipParamWeapon 后字段栏清空回空态。

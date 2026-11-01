@@ -23,6 +23,7 @@ import {
   sourceFillAnnotation,
   sourceFillCompletionAnnotation
 } from './incrementalSourceInjection.js';
+import { buttonClass } from '../components/buttonClass.js';
 
 const setDiagnosticsEffect = StateEffect.define<EventDiagnostic[]>();
 
@@ -120,7 +121,7 @@ export function emevdDiagnosticsExtension(
           for (const fix of hit.suggestedFixes) {
             const btn = document.createElement('button');
             btn.type = 'button';
-            btn.className = 'toolbar-button';
+            btn.className = buttonClass({ size: 'sm' });
             btn.textContent = `修复: ${fix.title}`;
             btn.onclick = () => {
               view.dispatch({

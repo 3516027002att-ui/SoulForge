@@ -43,6 +43,7 @@ import { base64ToUint8Array, uint8ArrayToBase64 } from '../utils/binary.js';
 import { decodeFieldView } from '../editors/ParamDefPanel.js';
 import { isParamCheckboxField } from './paramCheckboxField.js';
 import { WorkbenchLayout, type WorkbenchColumnSpec } from './WorkbenchLayout.js';
+import { Button } from '../components/Button.js';
 import { LoadedVersionComparison, LoadedFieldComparison } from '../editors/LoadedVersionComparison.js';
 
 /** 容器 PARAM 选中行 payload 的物理页大小；必须与 main 侧页契约一致。 */
@@ -1685,6 +1686,10 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
         ]
       : [])
   ];
+  // 工具条按钮禁用时说明原因，按前提的先后：先有表，再有行；忙时说忙。
+  const tableActionBlocked = selectedEntry === null ? '先在左栏选择一个参数表' : undefined;
+  const rowActionBlocked = (busy: boolean, needsRow: boolean): string | undefined =>
+    tableActionBlocked ?? (needsRow && selectedRow === null ? '先在中栏选择一行' : busy ? '上一个操作还在进行' : undefined);
 
   return (
     <div className="param-workbench">
@@ -1714,31 +1719,31 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
           {/* 问题 4：对照本地参数编辑器（Yapped/Smithbox）行级工具。未选表时全部
               禁用；选表未选行时「新建行」可用（新 id = 当前表最大 id + 1），
               复制/删除仍禁用。写入走 onApplyRowMutation → Patch Engine。 */}
-          <button
-            type="button"
-            className="toolbar-button"
+          <Button
+            variant="ghost" size="sm" icon="plus"
             disabled={rowMutationBusy || selectedEntry === null}
+            disabledReason={rowActionBlocked(rowMutationBusy, false)}
             title="新建一行（id = 当前表最大 id + 1，字节全 0）"
             onClick={() => { void commitRowMutation('add'); }}
-          >新建行</button>
-          <button
-            type="button"
-            className="toolbar-button"
+          >新建行</Button>
+          <Button
+            variant="ghost" size="sm" icon="copy"
             disabled={rowMutationBusy || selectedEntry === null || selectedRow === null}
+            disabledReason={rowActionBlocked(rowMutationBusy, true)}
             title="复制当前行到新 id（整行字节原样）"
             onClick={() => { void commitRowMutation('copy'); }}
-          >复制当前行</button>
-          <button
-            type="button"
-            className="toolbar-button"
+          >复制当前行</Button>
+          <Button
+            variant="ghost" size="sm" icon="trash"
             disabled={rowMutationBusy || selectedEntry === null || selectedRow === null}
+            disabledReason={rowActionBlocked(rowMutationBusy, true)}
             title="删除当前行（含备份与回滚）"
             onClick={() => { void commitRowMutation('delete'); }}
-          >删除当前行</button>
-          <button
-            type="button"
-            className="toolbar-button"
+          >删除当前行</Button>
+          <Button
+            variant="ghost" size="sm" icon="download"
             disabled={ioBusy || selectedEntry === null}
+            disabledReason={rowActionBlocked(ioBusy, false)}
             title="导出当前表所有行（id,name,字段值）为 CSV"
             onClick={() => {
               if (!bridge || selectedEntry === null) return;
@@ -1747,11 +1752,11 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                 '已导出'
               );
             }}
-          >导出行</button>
-          <button
-            type="button"
-            className="toolbar-button"
+          >导出行</Button>
+          <Button
+            variant="ghost" size="sm" icon="upload"
             disabled={ioBusy || selectedEntry === null}
+            disabledReason={rowActionBlocked(ioBusy, false)}
             title="从 CSV 导入行数据（表头 id,name,字段标识；空单元格不改）"
             onClick={() => {
               if (!bridge || selectedEntry === null) return;
@@ -1762,11 +1767,11 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                 '已保存'
               );
             }}
-          >导入行</button>
-          <button
-            type="button"
-            className="toolbar-button"
+          >导入行</Button>
+          <Button
+            variant="ghost" size="sm" icon="download"
             disabled={ioBusy || selectedEntry === null}
+            disabledReason={rowActionBlocked(ioBusy, false)}
             title="导出当前表行名（id,name）为 CSV"
             onClick={() => {
               if (!bridge || selectedEntry === null) return;
@@ -1775,11 +1780,11 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                 '已导出'
               );
             }}
-          >导出行名</button>
-          <button
-            type="button"
-            className="toolbar-button"
+          >导出行名</Button>
+          <Button
+            variant="ghost" size="sm" icon="upload"
             disabled={ioBusy || selectedEntry === null}
+            disabledReason={rowActionBlocked(ioBusy, false)}
             title="从 CSV 导入行名（表头 id,name）"
             onClick={() => {
               if (!bridge || selectedEntry === null) return;
@@ -1790,7 +1795,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                 '已保存'
               );
             }}
-          >导入行名</button>
+          >导入行名</Button>
         </>
       }
       {...(footerMessages.length > 0
