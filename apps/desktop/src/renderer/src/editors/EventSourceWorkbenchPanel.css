@@ -56,11 +56,6 @@
   flex: none;
 }
 .esw-toolbar__group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.toolbar-button { padding: 4px 8px; font-size: 10.5px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--forge-1); color: var(--ink-2); cursor: pointer; }
-.toolbar-button:hover { background: var(--control-hover-bg); color: var(--ink-1); }
-.toolbar-button.is-active { border-color: var(--ember); color: var(--ember-text); background: var(--ember-soft); }
-.toolbar-button:disabled { opacity: .45; cursor: default; }
-.toolbar-button:disabled:hover { background: var(--forge-1); color: var(--ink-2); }
 
 .esw-body { flex: 1 1 0; min-height: 64px; display: flex; align-items: stretch; }
 .esw-source { flex: 1; min-width: 0; min-height: 0; height: 100%; display: flex; flex-direction: column; position: relative; }
@@ -74,7 +69,7 @@
 .esw-meaning__empty { padding: 12px; }
 .esw-meaning__args { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
 .esw-meaning__args li { padding: 6px 0; border-top: 1px solid var(--line); }
-.esw-meaning__args .toolbar-button { margin-top: 6px; }
+.esw-meaning__args .ui-btn { margin-top: 6px; }
 .esw-source__loading {
   margin: 12px;
   padding: 10px 12px;

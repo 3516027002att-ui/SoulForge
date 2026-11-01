@@ -76,6 +76,7 @@ import { emevdEditingCommandsExtension, formatDocument } from '../emevd/cmEditor
 import { emevdNavigationExtension } from '../emevd/cmNavigation.js';
 import { EventOutlinePane } from './EventOutlinePane.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
+import { Button } from '../components/Button.js';
 import { EditorState, Transaction, type Extension } from '@codemirror/state';
 import {
   EditorView,
@@ -739,27 +740,25 @@ export function EventMeaningPane(props: {
                   </div>
                 )}
                 {arg.role === 'event-id' && arg.eventId !== undefined && (
-                  <button type="button" className="toolbar-button" onClick={() => onJumpEvent(arg.eventId!)}>
+                  <Button size="sm" onClick={() => onJumpEvent(arg.eventId!)}>
                     转到 $Event({arg.eventId})
-                  </button>
+                  </Button>
                 )}
                 {isFmgRole(arg.role) && arg.resourceId !== undefined && (
-                  <button
-                    type="button"
-                    className="toolbar-button"
+                  <Button
+                    size="sm"
                     onClick={() => onJumpResource({ kind: 'fmg', semantic: fmgSemanticOf(arg.role), id: arg.resourceId! })}
                   >
                     转到文本条目 {arg.resourceId}
-                  </button>
+                  </Button>
                 )}
                 {arg.role === 'param-id' && arg.resourceId !== undefined && (
-                  <button
-                    type="button"
-                    className="toolbar-button"
+                  <Button
+                    size="sm"
                     onClick={() => onJumpResource({ kind: 'param', id: arg.resourceId! })}
                   >
                     转到 PARAM 行 {arg.resourceId}
-                  </button>
+                  </Button>
                 )}
               </li>
             );
@@ -1547,36 +1546,36 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           <div className="esw-toolbar__group">
             {!readOnly && (
               <>
-                <button
-                  type="button"
-                  className="toolbar-button"
+                <Button
+                  variant="ghost" size="sm" icon="save"
                   data-testid="esw-save"
                   disabled={submitting || !activeTab?.dirty}
+                  disabledReason={submitting ? '正在保存' : '没有未保存的修改'}
                   title="保存（Ctrl+S）"
                   onClick={() => { void submitSource(); }}
                 >
                   保存
-                </button>
-                <button
-                  type="button"
-                  className="toolbar-button"
+                </Button>
+                <Button
+                  variant="ghost" size="sm" icon="undo"
                   data-testid="esw-revert"
                   disabled={submitting || !activeTab?.dirty}
+                  disabledReason={submitting ? '正在保存' : '没有未保存的修改'}
                   title="撤回未保存的修改"
                   onClick={() => revertSource()}
                 >
                   撤回
-                </button>
-                <button
-                  type="button"
-                  className="toolbar-button"
+                </Button>
+                <Button
+                  variant="ghost" size="sm" icon="format"
                   data-testid="esw-format"
                   disabled={submitting}
+                  disabledReason="正在保存"
                   title="格式化文档（Alt+Shift+F）"
                   onClick={() => { if (viewRef.current) formatDocument(viewRef.current); }}
                 >
                   格式化
-                </button>
+                </Button>
               </>
             )}
 
@@ -1665,9 +1664,9 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
                   <section className="esw-source" aria-label="对照源码">
                     <div className="esw-pane-bar">
                       <span className="muted">{splitTab.title}</span>
-                      <button type="button" className="toolbar-button" onClick={() => setSplitTabId(null)}>
+                      <Button variant="ghost" size="sm" onClick={() => setSplitTabId(null)}>
                         关闭分栏
-                      </button>
+                      </Button>
                     </div>
                     <div ref={splitHostRef} className="esw-source__host" data-editor-engine="codemirror" />
                   </section>

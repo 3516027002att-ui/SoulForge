@@ -1,0 +1,27 @@
+/* 统一按钮（components/Button.tsx）。焦点环用全局 :focus-visible，不在这里覆写。
+   禁用只降颜色、不降透明度：.45 透明度会把字和边框一起淡到约 2:1（见 Button.test.tsx）。 */
+.ui-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex: none;
+  height: 28px; padding: 0 12px; border: 1px solid transparent; border-radius: var(--radius-m);
+  font: inherit; font-size: 12.5px; font-weight: 550; line-height: 1; white-space: nowrap;
+  color: var(--ink-1); background: transparent; cursor: pointer;
+  transition: background var(--dur-micro), border-color var(--dur-micro), color var(--dur-micro);
+}
+.ui-btn--sm { height: 24px; padding: 0 8px; gap: 5px; font-size: 12px; }
+.ui-btn--icon { width: 28px; padding: 0; }
+.ui-btn--icon.ui-btn--sm { width: 24px; }
+.ui-icon { flex: none; }
+
+.ui-btn--primary { color: var(--on-primary); background: var(--primary-fill); }
+.ui-btn--primary:hover:not(:disabled) { background: var(--primary-fill-hover); }
+.ui-btn--secondary { background: var(--forge-2); border-color: var(--line-strong); }
+.ui-btn--secondary:hover:not(:disabled) { background: var(--forge-3); color: var(--ink-0); }
+.ui-btn--ghost:hover:not(:disabled) { background: var(--control-hover-bg); color: var(--ink-0); }
+.ui-btn--danger { color: var(--danger-text); border-color: var(--danger); }
+.ui-btn--danger:hover:not(:disabled) { background: var(--danger-soft); }
+.ui-btn:active:not(:disabled) { background: var(--control-active-bg); }
+.ui-btn[aria-pressed="true"] { color: var(--ember-text); background: var(--ember-soft); border-color: color-mix(in oklch, var(--ember), transparent 55%); }
+
+.ui-btn:disabled { color: var(--ink-3); cursor: not-allowed; }
+.ui-btn--primary:disabled { color: var(--ink-3); background: var(--forge-2); }
+.ui-btn--danger:disabled { border-color: var(--line-strong); }
