@@ -1304,8 +1304,31 @@ test('问题 1：有工作区后在 PARAM 页，标题栏 workspace-switcher 可
   await expect(window.getByTestId('switcher-open-workspace')).toContainText('更换 Mod 工作区');
   await expect(window.getByTestId('switcher-choose-base-directory')).toContainText('选择原版目录');
 
-  // 点「更换 Mod 工作区」→ 走现有 openWorkspace 路径（dialog stub），菜单关闭。
-  await window.getByTestId('switcher-open-workspace').click();
+  // #80 键盘：打开后焦点在第一项，↓↑ 循环，Esc 关闭并把焦点还给触发按钮；点菜单外关闭。
+  const trigger = window.getByTestId('workspace-switcher').locator('button').first();
+  await expect(window.getByTestId('switcher-open-workspace')).toBeFocused();
+  await window.keyboard.press('ArrowDown');
+  await expect(window.getByTestId('switcher-choose-base-directory')).toBeFocused();
+  await window.keyboard.press('ArrowDown');
+  await expect(window.getByTestId('switcher-open-workspace')).toBeFocused();
+  await window.keyboard.press('End');
+  await expect(window.getByTestId('switcher-choose-base-directory')).toBeFocused();
+  await window.keyboard.press('Escape');
+  await expect(window.getByTestId('workspace-switcher-menu')).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await trigger.click();
+  await expect(window.getByTestId('workspace-switcher-menu')).toBeVisible();
+  await window.mouse.click(5, 300);
+  await expect(window.getByTestId('workspace-switcher-menu')).toHaveCount(0);
+  // 菜单收在窗口内。
+  await trigger.click();
+  const box = await window.getByTestId('workspace-switcher-menu').boundingBox();
+  const viewport = await window.evaluate(() => [document.documentElement.clientWidth, innerHeight]);
+  expect(box.x >= 0 && box.y >= 0 && box.x + box.width <= viewport[0] && box.y + box.height <= viewport[1]).toBe(true);
+
+  // 键盘 Enter 选「更换 Mod 工作区」→ 走现有 openWorkspace 路径（dialog stub），菜单关闭。
+  await expect(window.getByTestId('switcher-open-workspace')).toBeFocused();
+  await window.keyboard.press('Enter');
   await expect(window.getByTestId('workspace-switcher-menu')).toHaveCount(0);
   const after = (await ipcCalls(app))['workspace.openDialog'] ?? 0;
   expect(after).toBeGreaterThan(before);

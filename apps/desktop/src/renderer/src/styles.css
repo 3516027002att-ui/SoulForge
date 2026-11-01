@@ -4,6 +4,7 @@
 @import "./theme/ThemeSettings.css";
 @import "./theme/renderer-accessibility.css";
 @import "./app/WorkspaceHeaderView.css";
+@import "./components/Menu.css";
 @import "./navigation/WorkspaceResourceBar.css";
 @import "./navigation/DomainNavigationBar.css";
 @import "./app/browser-preview.css";

@@ -1,0 +1,20 @@
+/* 菜单（components/Menu.tsx）。位置由 Menu 在打开时按触发按钮算出来写进 top / left，这里的值只是算出来之前的初值。 */
+.ui-menu-backdrop { position: fixed; inset: 0; z-index: 39; -webkit-app-region: no-drag; }
+.ui-menu {
+  -webkit-app-region: no-drag;
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 41;
+  display: flex; flex-direction: column; min-width: 180px; padding: 4px;
+  background: var(--forge-2); border: 1px solid var(--line); border-radius: var(--radius-m);
+  box-shadow: var(--control-hover-shadow);
+}
+/* 菜单项自己定外观：不吃 button:not([class]) 的边框、底色和粗体基线（control-primitives.css）。 */
+.ui-menu [role^='menuitem'] {
+  display: block; width: 100%; text-align: left; padding: 6px 10px;
+  font-size: 12.5px; font-weight: 400; color: var(--ink-1);
+  background: transparent; border: 0; border-radius: var(--radius-s); outline: none;
+}
+/* 方向键和鼠标都移动焦点，所以高亮跟着 :focus 走；鼠标点开后按方向键时 :focus-visible 不一定成立。 */
+/* 用 --ember-soft 而不是 --control-hover-bg：亮色下后者是 48% 白，叠在近白的菜单底上看不出高亮。 */
+.ui-menu [role^='menuitem']:focus,
+.ui-menu [role^='menuitem']:hover { color: var(--ink-0); background: var(--ember-soft); }
+.ui-menu [role^='menuitem'][aria-checked='true'] { color: var(--ember-text); }

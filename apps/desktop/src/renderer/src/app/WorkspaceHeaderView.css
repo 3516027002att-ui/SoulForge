@@ -24,19 +24,6 @@
 .workspace-switcher__trigger[aria-expanded='true'] { color: var(--ink-1); background: var(--ember-soft); }
 .workspace-switcher__label { overflow: hidden; text-overflow: ellipsis; }
 .workspace-switcher__caret { font-size: 9px; opacity: .7; }
-.workspace-switcher__backdrop { position: fixed; inset: 0; z-index: 39; }
-.workspace-switcher__menu {
-  -webkit-app-region: no-drag;
-  position: absolute; top: calc(100% + 6px); left: 0; z-index: 41;
-  display: flex; flex-direction: column; min-width: 180px; padding: 4px;
-  background: var(--forge-2); border: 1px solid var(--line); border-radius: var(--radius-m);
-  box-shadow: var(--control-hover-shadow);
-}
-.workspace-switcher__menu button[role='menuitem'] {
-  text-align: left; padding: 6px 10px; font-size: 12px; color: var(--ink-2);
-  border-radius: var(--radius-s);
-}
-.workspace-switcher__menu button[role='menuitem']:hover { color: var(--ink-0); background: var(--control-hover-bg); }
 .workspace-indexing {
   display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 34ch;
   color: var(--ink-2); font-size: 11px; white-space: nowrap;

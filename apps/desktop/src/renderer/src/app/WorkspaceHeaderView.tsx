@@ -1,6 +1,7 @@
 import type { ReactElement } from 'react';
 import type { WorkspaceController } from './useWorkspaceController.js';
 import type { ShellInteractionController } from './useShellInteractionController.js';
+import { Menu } from '../components/Menu.js';
 
 export interface WorkspaceHeaderViewProps {
   workspace: Pick<WorkspaceController, 'workspace' | 'sessionMeta' | 'baseRootChoice' | 'openWorkspace' | 'chooseBaseDirectory' | 'clearBaseDirectory'>;
@@ -32,13 +33,8 @@ export function WorkspaceHeaderView({ workspace: owner, shell, isBrowserPreview,
               <span className="workspace-switcher__caret" aria-hidden="true">▾</span>
             </button>
             {workspaceSwitcherOpen && (
-              <>
-                <div
-                  className="workspace-switcher__backdrop"
-                  onClick={() => setWorkspaceSwitcherOpen(false)}
-                  aria-hidden="true"
-                />
-                <div className="workspace-switcher__menu" role="menu" data-testid="workspace-switcher-menu">
+                <Menu label="工作区" className="workspace-switcher__menu" data-testid="workspace-switcher-menu"
+                  onClose={() => setWorkspaceSwitcherOpen(false)}>
                   <button
                     type="button"
                     role="menuitem"
@@ -67,8 +63,7 @@ export function WorkspaceHeaderView({ workspace: owner, shell, isBrowserPreview,
                       清除原版目录
                     </button>
                   )}
-                </div>
-              </>
+                </Menu>
             )}
           </div>
         </div>
